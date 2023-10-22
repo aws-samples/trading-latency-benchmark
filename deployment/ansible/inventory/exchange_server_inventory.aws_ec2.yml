@@ -1,0 +1,24 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+plugin: amazon.aws.aws_ec2
+boto_profile: exchange_servers
+regions:
+  - eu-west-1
+include_filters:
+  - tag:Name:
+      - 'tc3-exchange-lowrate'
+      - 'tc5-exchange-lowrate'
+      - 'tc3-exchange-highrate'
+      - 'tc5-exchange-highrate'
+hostnames:
+  - name: tag:Name
+    separator: ''
+compose:
+  # Use the private IP address to connect to the host
+  # (note: this does not modify inventory_hostname, which is set via I(hostnames))
+  ansible_host: public_ip_address
+keyed_groups:
+  - key: tag:Name
+    separator: ''
+

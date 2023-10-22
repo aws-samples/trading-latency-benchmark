@@ -1,0 +1,45 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: deploy application
+  hosts: aws_ec2
+  collections:
+    - amazon.aws.ec2_instance
+  tasks:
+  - name: copy run script to ec2
+    copy:
+      src: ../run.sh
+      dest: /home/ec2-user/run.sh
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy
+  - name: copy run script to ec2
+    copy:
+      src: ../stop.sh
+      dest: /home/ec2-user/stop.sh
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy
+  - name: copy run script to ec2
+    copy:
+      src: ../latency_report.sh
+      dest: /home/ec2-user/latency_report.sh
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy
+  - name: copy app jar
+    copy:
+      src: ../../target/ExchangeFlow-1.0-SNAPSHOT.jar
+      dest: /home/ec2-user/ExchangeFlow-1.0-SNAPSHOT.jar
+      owner: ec2-user
+      group: ec2-user
+      mode: 0644
+    tags:
+      - deploy

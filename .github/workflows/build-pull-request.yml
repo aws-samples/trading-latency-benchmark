@@ -1,0 +1,92 @@
+name: Build Pull Request
+
+on: [pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        language: ['csharp', 'go','python', 'java', 'typescript']
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        if: ${{ matrix.language == 'go' }}
+        with:
+          go-version: '1.20'
+      - uses: actions/setup-node@v3
+        if: ${{matrix.language == 'typescript'}}
+        with:
+          node-version: 18
+      - uses: actions/setup-java@v3
+        if: ${{matrix.language == 'java'}}
+        with:
+          distribution: 'corretto'
+          java-version: '17'
+      - uses: actions/setup-python@v4
+        if: ${{matrix.language == 'python'}}
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-dotnet@v3
+        if: ${{matrix.language == 'csharp'}}
+        with:
+          dotnet-version: 8
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Get changed files
+        id: changed-files-specific
+        uses: tj-actions/changed-files@v39
+        with:
+          files: ${{matrix.language}}/**
+          files_ignore: "*.md"
+      - name: list changed files
+        if: steps.changed-files-specific.outputs.any_changed == 'true'
+        run: |
+          for file in ${{ steps.changed-files.outputs.all_changed_files }}; do
+            echo "$file was changed"
+          done
+      - name: Build changed files
+        if: steps.changed-files-specific.outputs.any_changed == 'true'
+        run: |
+          echo "::group::Build changes for ${{ matrix.language }}"
+          echo ""
+          buildlang="${{ matrix.language }}"
+
+          echo "# Build summary for ${buildlang}" >> $GITHUB_STEP_SUMMARY
+          buildpath=""
+          # For each file that is in the changed set
+          for file in ${{ steps.changed-files-specific.outputs.all_modified_files }}
+          do
+            echo "processing ${file}"
+            # Split the path into the language, example, and 
+            IFS="/" read path1 path2 extra <<<"$file"
+            # $path1 is the language name e.g. 'typescript'
+            # $path2 is the fist directory under the language
+            # $extra is everything else after path2
+            if [[ $path1 != $buildlang ]]; then
+              continue
+            fi 
+            if [[ "$buildpath" == "$path1/$path2" ]]; then
+              continue
+            fi
+            buildpath=$path1/$path2
+            echo "Build Path ${buildpath}"
+            
+            # make sure there's nothing funny left over.
+            git clean -dfx
+
+            # we should pass both $path2 and $extra to the build script
+            # for example:
+            # scripts/build-typescript.sh ecs example-name/index.ts for typescripts/ecs/example/index.ts 
+            # scripts/build-typescript.sh example index.ts for typescripts/example/index.ts 
+            scripts/build-${buildlang}.sh $path2 $extra
+            
+            if [[ $? == 0 ]]; then
+              echo "- :o: $buildpath" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- :x: $buildpath" >> $GITHUB_STEP_SUMMARY
+            fi 
+          done
+          echo "::endgroup::"
