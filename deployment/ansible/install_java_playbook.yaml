@@ -1,0 +1,21 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: install java
+  hosts: aws_ec2
+  collections:
+    - amazon.aws.ec2_instance
+  tasks:
+  - name: Get hostname
+    command: echo {{ ansible_hostname.split('-')[1] }}
+    register: hostname
+
+  - name: install java
+    become: yes
+    become_user: root
+    ansible.builtin.dnf:
+      name: java-11-amazon-corretto
+      state: latest
+    tags:
+      - java

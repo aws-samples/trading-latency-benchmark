@@ -1,0 +1,15 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+---
+- name: cleanup exchange clients
+  hosts: aws_ec2
+  collections:
+    - amazon.aws.ec2_instance
+  tasks:
+    - name: cleanup exchange client
+      become: true
+      become_user: root
+      shell: |
+        rm /home/ec2-user/histogram.hlog
+        rm /home/ec2-user/config.properties.*
+        echo "" > output.log

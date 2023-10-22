@@ -1,0 +1,17 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: stop exchange clients
+  hosts: aws_ec2
+  collections:
+    - amazon.aws.ec2_instance
+  tasks:
+    - name: stop exchange client
+      become: true
+      become_user: root
+      shell: |
+        ps -aux | grep "java" | grep -v "grep" | awk '{print $2}' | while read -r pid ; do
+          echo "Shutting down PID: $pid"
+          kill -9 $pid
+        done

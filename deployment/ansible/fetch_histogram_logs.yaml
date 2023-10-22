@@ -1,0 +1,14 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: fetch histogram logs
+  hosts: aws_ec2
+  collections:
+    - amazon.aws.ec2_instance
+  tasks:
+    - name: copy histogram file to local
+      fetch:
+        src: /home/ec2-user/histogram.hlog
+        dest: ../../histogram_logs/
+        validate_checksum: false
