@@ -3,6 +3,8 @@ use actix_web_actors::ws;
 use serde_json::{json, Value};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
+use rand::Rng;
 // Add websocket support for this
 //ExchangeClient is connecting via websocket to localhost:8888
 //
@@ -58,6 +60,22 @@ struct SubscriptionRequest {
     channels: Vec<Channel>,
 }
 
+#[derive(Deserialize)]
+struct Order {
+    instrument_code: String,
+    client_id: String,
+    side: String,
+    r#type: String,
+    price: String, // These are String becasue we only need to do ping-pong, no need to parse it to number
+    amount: String,
+    time_in_force: String,
+}
+
+#[derive(Deserialize)]
+struct LimitOrderRequest {
+    r#type: String,
+    order: Order,
+}
     
 
 pub struct WebSocketActor {
@@ -97,8 +115,6 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebSocketActor {
                         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
                         let subscription_request: SubscriptionRequest = serde_json::from_str(&text).unwrap();
 
-                        // convert the subscription_reqeust.channels to the response channels format, add account_id to each json object in the array
-
                         let output_channels = subscription_request.channels.iter().map(|channel| {
                             json!({
                                 "account_id": self.user_id.as_ref().unwrap(),
@@ -114,26 +130,29 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebSocketActor {
                     },
                     "CREATE_ORDER" => {
                         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+                        let limit_order_request: LimitOrderRequest = serde_json::from_str(&text).unwrap();
+                        let mut rng = rand::thread_rng();
                         ctx.text(json!({
                             "type": "BOOKED",
-                            "order_book_sequence": 25532628695 as i64,
-                            "side": "SELL",
-                            "uid": 3002,
-                            "amount": "1",
-                            "price": "1",
-                            "instrument_code": "BTC_USDC",
-                            "client_id": "4df7275e-6af9-4f2a-b620-7a9f6527a4f0",
-                            "order_id": "2e81f80a-d6a0-48c0-bf17-4f63ba01d5a1",
-                            "channel_name": "TRADING",
+                            "order_book_sequence": rng.gen::<i64>(),
+                            "side": limit_order_request.order.side,
+                            "uid": self.user_id.as_ref().unwrap(),
+                            "amount": limit_order_request.order.amount,
+                            "price": limit_order_request.order.price,
+                            "instrument_code": limit_order_request.order.instrument_code,
+                            "client_id": limit_order_request.order.client_id,
+                            "order_id": Uuid::new_v4().to_string(),
+                            "channel_name": "TRADING", // This is fixed for testing
                             "time": timestamp,
                         }).to_string());
                     },
                     "CANCEL_ORDER" => {
                         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+                        let mut rng = rand::thread_rng();
                         ctx.text(json!({
                             "type": "DONE",
                             "status": "CANCELLED",
-                            "order_book_sequence": 25532628695 as i64,
+                            "order_book_sequence": rng.gen::<i64>(),
                             "side": "SELL",
                             "uid": 3002,
                             "amount": "1",
