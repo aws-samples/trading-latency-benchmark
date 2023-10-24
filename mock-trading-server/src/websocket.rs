@@ -76,6 +76,13 @@ struct LimitOrderRequest {
     r#type: String,
     order: Order,
 }
+
+#[derive(Deserialize)]
+struct CancelOrderRequest {
+    r#type: String,
+    client_id: String,
+    instrument_code: String,
+}
     
 
 pub struct WebSocketActor {
@@ -99,6 +106,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebSocketActor {
         match msg {
             Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
             Ok(ws::Message::Text(text)) => {
+                println!("Received message: {}", text);
 
                 let payload: Value = serde_json::from_str(&text).unwrap(); 
                 let payload_type = payload["type"].as_str().unwrap();
@@ -148,19 +156,17 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebSocketActor {
                     },
                     "CANCEL_ORDER" => {
                         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+                        let cancel_order_request: CancelOrderRequest = serde_json::from_str(&text).unwrap();
                         let mut rng = rand::thread_rng();
                         ctx.text(json!({
                             "type": "DONE",
                             "status": "CANCELLED",
                             "order_book_sequence": rng.gen::<i64>(),
-                            "side": "SELL",
-                            "uid": 3002,
-                            "amount": "1",
-                            "price": "1",
-                            "instrument_code": "BTC_USDC",
-                            "client_id": "4df7275e-6af9-4f2a-b620-7a9f6527a4f0",
-                            "order_id": "2e81f80a-d6a0-48c0-bf17-4f63ba01d5a1",
-                            "channel_name": "TRADING",
+                            "uid": self.user_id.as_ref().unwrap(),
+                            "instrument_code": cancel_order_request.instrument_code,
+                            "client_id": cancel_order_request.client_id,
+                            "order_id": Uuid::new_v4().to_string(),
+                            "channel_name": "TRADING", // This is fixed for testing
                             "time": timestamp,
                         }).to_string());
                     }
@@ -169,10 +175,9 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebSocketActor {
                     }
 
                 }
-
-                println!("Received text message: {}", text);
             },
             Ok(ws::Message::Close(reason)) => {
+                println!("Closing connection");
                 ctx.close(reason);
                 ctx.stop();
             },
