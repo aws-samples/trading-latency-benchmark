@@ -124,7 +124,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebSocketActor {
                 }
             }
             Ok(ws::Message::Close(reason)) => {
-                info!("Closing connection");
+                debug!("Closing connection");
                 ctx.close(reason);
                 ctx.stop();
             }
