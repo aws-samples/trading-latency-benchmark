@@ -8,3 +8,4 @@
 .js: //         # JavaScript
 .py: "#"        # Python (must quote "#" here as it is also a YAML comment marker)
 .ts: //         # TypeScript
+.rs: //         # Rust
