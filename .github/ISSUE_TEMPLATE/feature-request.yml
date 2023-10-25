@@ -57,5 +57,7 @@ body:
         - .NET
         - Java
         - Go
+        - Rust
+        - Shell
     validations:
       required: true
