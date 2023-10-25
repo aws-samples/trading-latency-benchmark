@@ -1,52 +1,11 @@
 use actix::prelude::*;
 use actix_web_actors::ws;
 use rand::Rng;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-// Message formats
-#[derive(Deserialize)]
-struct AuthRequest {
-    //r#type: String, // Not used
-    api_token: String,
-}
-
-#[derive(Deserialize)]
-struct Channel {
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct SubscriptionRequest {
-    // r#type: String,
-    channels: Vec<Channel>,
-}
-
-#[derive(Deserialize)]
-struct Order {
-    instrument_code: String,
-    client_id: String,
-    side: String,
-    // r#type: String,
-    price: String, // These are String becasue we only need to do ping-pong, no need to parse it to number
-    amount: String,
-    // time_in_force: String,
-}
-
-#[derive(Deserialize)]
-struct LimitOrderRequest {
-    // r#type: String,
-    order: Order,
-}
-
-#[derive(Deserialize)]
-struct CancelOrderRequest {
-    // r#type: String,
-    client_id: String,
-    instrument_code: String,
-}
+use crate::websocket_message_types::*;
 
 pub struct WebSocketActor {
     user_id: Option<String>,
@@ -65,7 +24,6 @@ impl WebSocketActor {
 impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebSocketActor {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         match msg {
-            Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
             Ok(ws::Message::Text(text)) => {
                 debug!("Received message: {}", text);
                 let Ok(payload): Result<Value, _> = serde_json::from_str(&text) else {

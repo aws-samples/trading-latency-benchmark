@@ -7,6 +7,7 @@ extern crate log;
 extern crate env_logger;
 
 mod websocket;
+mod websocket_message_types;
 use self::websocket::WebSocketActor;
 
 #[post("/private/account/user/balances/{user_id}/{currency}/{amount}")]
