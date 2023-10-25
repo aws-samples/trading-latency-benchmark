@@ -1,17 +1,15 @@
 use actix::prelude::*;
-use actix_web::cookie::time::error;
 use actix_web_actors::ws;
+use rand::Rng;
+use serde::Deserialize;
 use serde_json::{json, Value};
-use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
-use rand::Rng;
-use log;
 
 // Message formats
 #[derive(Deserialize)]
 struct AuthRequest {
-    r#type: String,
+    //r#type: String, // Not used
     api_token: String,
 }
 
@@ -22,7 +20,7 @@ struct Channel {
 
 #[derive(Deserialize)]
 struct SubscriptionRequest {
-    r#type: String,
+    // r#type: String,
     channels: Vec<Channel>,
 }
 
@@ -31,28 +29,27 @@ struct Order {
     instrument_code: String,
     client_id: String,
     side: String,
-    r#type: String,
+    // r#type: String,
     price: String, // These are String becasue we only need to do ping-pong, no need to parse it to number
     amount: String,
-    time_in_force: String,
+    // time_in_force: String,
 }
 
 #[derive(Deserialize)]
 struct LimitOrderRequest {
-    r#type: String,
+    // r#type: String,
     order: Order,
 }
 
 #[derive(Deserialize)]
 struct CancelOrderRequest {
-    r#type: String,
+    // r#type: String,
     client_id: String,
     instrument_code: String,
 }
-    
 
 pub struct WebSocketActor {
-    user_id: Option<String>
+    user_id: Option<String>,
 }
 
 impl Actor for WebSocketActor {
@@ -61,9 +58,7 @@ impl Actor for WebSocketActor {
 
 impl WebSocketActor {
     pub fn new() -> Self {
-        Self {
-            user_id: None
-        }
+        Self { user_id: None }
     }
 }
 
@@ -88,69 +83,93 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebSocketActor {
                         self.user_id = Some(auth_request.api_token);
 
                         ctx.text(json!({"type": "AUTHENTICATED"}).to_string());
-                    },
+                    }
                     "SUBSCRIBE" => {
-                        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-                        let subscription_request: SubscriptionRequest = serde_json::from_str(&text).unwrap();
+                        let timestamp = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis();
+                        let subscription_request: SubscriptionRequest =
+                            serde_json::from_str(&text).unwrap();
 
-                        let output_channels = subscription_request.channels.iter().map(|channel| {
-                            json!({
-                                "account_id": self.user_id.as_ref().unwrap(),
-                                "name": channel.name
+                        let output_channels = subscription_request
+                            .channels
+                            .iter()
+                            .map(|channel| {
+                                json!({
+                                    "account_id": self.user_id.as_ref().unwrap(),
+                                    "name": channel.name
+                                })
                             })
-                        }).collect::<Vec<Value>>();
+                            .collect::<Vec<Value>>();
 
-                        ctx.text(json!({
-                            "type": "SUBSCRIPTIONS",
-                            "channels": output_channels,
-                            "time": timestamp,
-                        }).to_string());
-                    },
+                        ctx.text(
+                            json!({
+                                "type": "SUBSCRIPTIONS",
+                                "channels": output_channels,
+                                "time": timestamp,
+                            })
+                            .to_string(),
+                        );
+                    }
                     "CREATE_ORDER" => {
-                        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-                        let limit_order_request: LimitOrderRequest = serde_json::from_str(&text).unwrap();
+                        let timestamp = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis();
+                        let limit_order_request: LimitOrderRequest =
+                            serde_json::from_str(&text).unwrap();
                         let mut rng = rand::thread_rng();
-                        ctx.text(json!({
-                            "type": "BOOKED",
-                            "order_book_sequence": rng.gen::<i64>(),
-                            "side": limit_order_request.order.side,
-                            "uid": self.user_id.as_ref().unwrap(),
-                            "amount": limit_order_request.order.amount,
-                            "price": limit_order_request.order.price,
-                            "instrument_code": limit_order_request.order.instrument_code,
-                            "client_id": limit_order_request.order.client_id,
-                            "order_id": Uuid::new_v4().to_string(),
-                            "channel_name": "TRADING", // This is fixed for testing
-                            "time": timestamp,
-                        }).to_string());
-                    },
+                        ctx.text(
+                            json!({
+                                "type": "BOOKED",
+                                "order_book_sequence": rng.gen::<i64>(),
+                                "side": limit_order_request.order.side,
+                                "uid": self.user_id.as_ref().unwrap(),
+                                "amount": limit_order_request.order.amount,
+                                "price": limit_order_request.order.price,
+                                "instrument_code": limit_order_request.order.instrument_code,
+                                "client_id": limit_order_request.order.client_id,
+                                "order_id": Uuid::new_v4().to_string(),
+                                "channel_name": "TRADING", // This is fixed for testing
+                                "time": timestamp,
+                            })
+                            .to_string(),
+                        );
+                    }
                     "CANCEL_ORDER" => {
-                        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-                        let cancel_order_request: CancelOrderRequest = serde_json::from_str(&text).unwrap();
+                        let timestamp = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis();
+                        let cancel_order_request: CancelOrderRequest =
+                            serde_json::from_str(&text).unwrap();
                         let mut rng = rand::thread_rng();
-                        ctx.text(json!({
-                            "type": "DONE",
-                            "status": "CANCELLED",
-                            "order_book_sequence": rng.gen::<i64>(),
-                            "uid": self.user_id.as_ref().unwrap(),
-                            "instrument_code": cancel_order_request.instrument_code,
-                            "client_id": cancel_order_request.client_id,
-                            "order_id": Uuid::new_v4().to_string(),
-                            "channel_name": "TRADING", // This is fixed for testing
-                            "time": timestamp,
-                        }).to_string());
+                        ctx.text(
+                            json!({
+                                "type": "DONE",
+                                "status": "CANCELLED",
+                                "order_book_sequence": rng.gen::<i64>(),
+                                "uid": self.user_id.as_ref().unwrap(),
+                                "instrument_code": cancel_order_request.instrument_code,
+                                "client_id": cancel_order_request.client_id,
+                                "order_id": Uuid::new_v4().to_string(),
+                                "channel_name": "TRADING", // This is fixed for testing
+                                "time": timestamp,
+                            })
+                            .to_string(),
+                        );
                     }
                     _ => {
                         error!("Ignoring unknown message type: {}", payload);
                     }
-
                 }
-            },
+            }
             Ok(ws::Message::Close(reason)) => {
                 info!("Closing connection");
                 ctx.close(reason);
                 ctx.stop();
-            },
+            }
             _ => {}
         }
     }

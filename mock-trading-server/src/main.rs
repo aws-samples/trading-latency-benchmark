@@ -1,5 +1,5 @@
-use actix_web::{web, App, HttpRequest, HttpServer, Responder, get, post, HttpResponse, Error};
 use actix_web::middleware::Logger;
+use actix_web::{get, post, web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web_actors::ws;
 
 #[macro_use]
@@ -12,8 +12,14 @@ use self::websocket::WebSocketActor;
 #[post("/private/account/user/balances/{user_id}/{currency}/{amount}")]
 async fn add_balances(path: actix_web::web::Path<(i32, String, i32)>) -> impl Responder {
     let (user_id, currency, amount) = path.into_inner();
-    info!("Adding balances for user {}, currency {}, amount {}", user_id, currency, amount);
-    HttpResponse::Ok().body(format!("User Created and balances sent for user: {}", user_id))
+    info!(
+        "Adding balances for user {}, currency {}, amount {}",
+        user_id, currency, amount
+    );
+    HttpResponse::Ok().body(format!(
+        "User Created and balances sent for user: {}",
+        user_id
+    ))
 }
 
 #[get("/")]
@@ -24,7 +30,7 @@ async fn ws_index(req: HttpRequest, stream: web::Payload) -> Result<HttpResponse
     resp
 }
 
-#[actix_web::main] 
+#[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
