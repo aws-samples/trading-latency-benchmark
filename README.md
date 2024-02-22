@@ -33,18 +33,18 @@ Before you can use this network latency test stack, you'll need to ensure that y
 ### Deployment with Ansible
 
 1. Generate SSH key pairs for the instances
-2. Update `.aws_ec2.yml` inventory files under deployment/ansible/ with your EC2 instance names. As an example you can find 2 inventories one for tokyo one for virginia.
-3. Open `deploy.sh` file and update INVENTORY and SSH_KEY_FILE. SSH_KEY_FILE is the ssh key pair that you use to connect to EC2 instances.
+2. Update `.aws_ec2.yml` inventory files under `deployment/ansible/inventory` with your EC2 instance names. As an example you can find 2 inventories one for tokyo one for virginia.
+3. Open `deploy.sh` file and update `INVENTORY` and `SSH_KEY_FILE`. `SSH_KEY_FILE` is the ssh key pair that you use to connect to EC2 instances.
 4. Run `deploy.sh`
 
 The `deploy.sh` script will:
 
 1. Build the Java application using Maven
 2. Run Ansible playbooks to:
-Install Java on EC2 instances
-Deploy the client application artifacts
-Deploy the client configuration
-Deploy the mock trading server
+    - Install Java on EC2 instances
+    - Deploy the client application artifacts
+    - Deploy the client configuration
+    - Deploy the mock trading server
 
 The playbooks use the AWS EC2 dynamic inventory to target the instances for example virginia_inventory.aws_ec2.yml.
 `deploy_mock_trading_server.yaml` playbook defines a set of tasks to:
