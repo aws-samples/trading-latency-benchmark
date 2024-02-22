@@ -28,11 +28,15 @@ import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.websocketx.*;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.util.CharsetUtil;
 import org.HdrHistogram.SingleWriterRecorder;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import javax.net.ssl.SSLException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Random;
@@ -40,6 +44,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static com.aws.trading.Config.COIN_PAIRS;
+import static com.aws.trading.Config.USE_SSL;
 import static com.aws.trading.RoundTripLatencyTester.printResults;
 
 public class ExchangeClientLatencyTestHandler extends ChannelInboundHandlerAdapter {
@@ -49,6 +54,7 @@ public class ExchangeClientLatencyTestHandler extends ChannelInboundHandlerAdapt
     private final int test_size;
     public final URI uri;
     private final ExchangeProtocol protocol;
+
     private ChannelPromise handshakeFuture;
     private final ConcurrentHashMap<String, Long> orderSentTimeMap;
     private final ConcurrentHashMap<String, Long> cancelSentTimeMap;

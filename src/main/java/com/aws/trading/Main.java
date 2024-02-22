@@ -19,10 +19,15 @@ package com.aws.trading;
 
 import java.io.IOException;
 import java.net.URISyntaxException;
+import java.security.KeyManagementException;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.UnrecoverableKeyException;
+import java.security.cert.CertificateException;
 
 public class Main {
 
-    public static void main(String[] args) throws URISyntaxException, InterruptedException, IOException {
+    public static void main(String[] args) throws URISyntaxException, InterruptedException, IOException, UnrecoverableKeyException, CertificateException, NoSuchAlgorithmException, KeyStoreException, KeyManagementException {
         //parse commands from args
         if (args.length < 1) {
             printHelpMessage();

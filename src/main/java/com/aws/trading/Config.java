@@ -42,6 +42,9 @@ public class Config {
     public static final long WARMUP_COUNT;
     public static final boolean USE_IOURING;
     public static final int EXCHANGE_CLIENT_COUNT;
+    public static final boolean USE_SSL;
+    public static final String KEY_STORE_PASSWORD;
+    public static final String KEY_STORE_PATH;
 
     static {
         URL resource = Config.class.getClassLoader().getResource("config.properties");
@@ -67,6 +70,9 @@ public class Config {
         USE_IOURING = getBooleanProperty("USE_IOURING", "false");
         EXCHANGE_CLIENT_COUNT = getIntegerProperty("EXCHANGE_CLIENT_COUNT", "16");
         WARMUP_COUNT = getLongProperty("WARMUP_COUNT", "5");
+        USE_SSL = getBooleanProperty("USE_SSL", "false");
+        KEY_STORE_PATH = getProperty("KEY_STORE_PATH", "keystore.p12");
+        KEY_STORE_PASSWORD = getProperty("KEY_STORE_PASSWORD", "123456");
 
     }
 
