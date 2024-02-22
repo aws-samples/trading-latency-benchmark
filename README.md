@@ -13,9 +13,11 @@ This repository does not contain a real trading matching engine but only mocks i
 - [Introduction](#introduction)
 - [Prerequisites](#prerequisites)
 - [Getting Started](#getting-started)
-- [Ansible Setup](#ansible-setup)
-- [Java Client Setup](#java-client-setup)
-- [Usage](#usage)
+- [Deployment with Ansible](#deployment-with-ansible)
+- [Start Running Tests](#start-running-tests)
+- [Fetch and Analyze Logs](#fetch-and-analyze-logs)
+- [Generating Self Signed Certificates for Testing SSL connections](#generating-self-signed-certificates-for-testing-ssl-connections)
+- [Optimization used for Java Client](#optimization-used-for-java-client)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -28,58 +30,104 @@ Before you can use this network latency test stack, you'll need to ensure that y
 
 
 ## Getting Started
-### Ansible Setup
+### Deployment with Ansible
 
-Navigate to the Ansible directory:
-```
-cd deployment/ansible/inventory.yml
-```
+1. Generate SSH key pairs for the instances
+2. Update `.aws_ec2.yml` inventory files under deployment/ansible/ with your EC2 instance names. As an example you can find 2 inventories one for tokyo one for virginia.
+3. Open `deploy.sh` file and update INVENTORY and SSH_KEY_FILE. SSH_KEY_FILE is the ssh key pair that you use to connect to EC2 instances.
+4. Run `deploy.sh`
 
-Edit the `exchange_client_inventory.aws_ec2.yml` file to specify the target instances for your network latency test.
-and `exchange_server_inventory.aws_ec2.yml`
-As an Ansible inventory we used `aws_ec2` plugin. Therefore we mainly configure 3 properties within this plugin;
-1. boto_profile: profile mapping that is defined in ~/.aws/credentials
-2. regions: aws region that we use to run tests
-3. include_filters: EC2 instance names, plugin fetches public ip address of those instances and run ansible playbooks on only those EC2 instances with provided names
+The `deploy.sh` script will:
 
-Under the `deployment` directory we have some useful shell scripts that are self explanatory. In order to use them we need to edit those files and change ssh key pair path.
-For example `cleanup_exchange_clients.sh` file contains
+1. Build the Java application using Maven
+2. Run Ansible playbooks to:
+Install Java on EC2 instances
+Deploy the client application artifacts
+Deploy the client configuration
+Deploy the mock trading server
+
+The playbooks use the AWS EC2 dynamic inventory to target the instances for example virginia_inventory.aws_ec2.yml.
+`deploy_mock_trading_server.yaml` playbook defines a set of tasks to:
+- Copy over the Rust source code
+- Install build dependencies like GCC, Make etc
+- Download and install Rust/Cargo
+- Build the trading server release artifact
+- [Generate self-signed SSL certificates. You can also do this manually as described below](#generating-self-signed-certificates-for-testing-ssl-connections).
+- Configure the server to use SSL
+- Deploy the configuration file
+
+### Start Running Tests
+
+`start_latency_test.yaml` playbook is used to start the exchange server and client processes for performance testing on AWS EC2 instances.
+
+The playbook defines tasks to:
+
+    Start the exchange server process in screen on the server instances
+    Start the exchange client processes in screen on the client instances
+
+Steps:
+
+    Ensure server and client code is deployed
+    Update EC2 inventory file with tags
+    Run ansible-playbook restart.yml
+
+You can monitor client logs from `/home/ec2-user/output.log`and server logs from `/home/ec2-user/mock-trading-server/target/release/output.log`
+
+### Fetch and Analyze Logs
+
+`deployment/show_latency_reports.sh` script fetches latency histogram logs from EC2 instances and analyzes them locally.
+Usage
+
+1. Open show_latency_reports.sh`
+2. set INVENTORY 
+3. set SSH_KEY_FILE
+4. run show_latency_reports.sh
+
+Workflow
+
+The script performs the following steps:
+
+    Runs the fetch_histogram_logs.yaml Ansible playbook to copy logs from instances
+    Loops through fetched log files
+    Calls a Java program to analyze each log
+    The program outputs latency reports
+
+### Generating Self Signed Certificates for Testing SSL connections
+
+1. Generate a 2048-bit RSA private key (localhost.key) and a Certificate Signing Request (localhost.csr) using OpenSSL. The private key is kept secret and is used to digitally sign documents. 
+The CSR contains information about the key and identity of the requestor and is used to apply for a certificate.
 ```bash
-ansible-playbook cleanup_all_clients.yaml --key-file  replace_me_with_ssh_key_pair -i ./inventory/exchange_client_inventory.aws_ec2.yml
-```
-replace_me_with_ssh_key_pair should be key-file that is used to connect EC2 instances. 
-
-Here below you can find the list of shell scripts and their usage:
-
-1. `clean_up_exchange_clients.sh`: removes histogram files from previous run, cleans output log, removes previous config history
-2. `deploy.sh`: deploys both client app and configuration
-3. `latency_report.sh`: runs jar file takes histogram file as an input and generates latency report
-4. `tune.sh`: optimizes Operating System for lower latency
-5. `restart_exchange_clients.sh`: Stops all running jar processes in the client EC2 instances and starts client processes again
-6. `run.sh`: Run script that is used to run client application. This script is deployed to target client EC2 instances and contains optimum JVM parameters
-7. `show_latency_reports.sh`: downloads all histogram files from remote EC2 instances and generates latency report
-8. `stop.sh`: Stop script that is used to stop java processes on EC2 instances
-9. `stop_exchange_clients.sh`: Stops all client processes on all EC2 instances
-
-### Java Client Setup
-
-From the project root directory run following
-```
-mvn clean install
+openssl genrsa -out localhost.key 2048
+openssl req -new -key localhost.key -out localhost.csr
 ```
 
-This will produce `./target/ExchangeFlow-1.0-SNAPSHOT.jar` jar file. This is jar file we use as a client process to generate orders as well as to generate human readable reports from histogram files.
+2. Self-sign the CSR to generate a localhost test certificate (localhost.crt) that is valid for 365 days. 
+This acts as a certificate authority to sign our own certificate for testing SSL connections.
+```bash
+openssl x509 -req -days 365 -in localhost.csr -signkey localhost.key -out localhost.crt 
+```
 
+3. Export the private key and self-signed certificate to a PKCS#12 keystore (keystore.p12). This bundles the private key and certificate together in a format usable by Java high-frequency trading (HFT) client. 
+A password protects the keystore.
+```bash
+openssl pkcs12 -export -out keystore.p12 -inkey localhost.key -in localhost.crt
+```
 
-## Usage
-Once you have set up both Ansible, Maven and ansible inventory files and edit shell scripts to point out correct ssh key pairs to access EC2 instances. 
-You can do following
+4. Configure the Java high-frequency trading (HFT) client to use the keystore for SSL connections by setting USE_SSL=true 
+and providing the KEY_STORE_PATH and KEY_STORE_PASSWORD in the `config.properties` file.
+```
+USE_SSL=true
+KEY_STORE_PATH=keystore.p12
+KEY_STORE_PASSWORD=YOUR_PASSWORD
+```
 
-1. Create client jar file using `mvn clean install` 
-2. Run deploy.sh to deploy client jar file and client config
-3. Run `restart_exchange_clients.sh` to start trading clients in parallel
-4. Once test is run for desired duration, run `stop_exchange_clients.sh` to stop all exchange clients
-5. Run `show_latency_reports.sh` to download histogram files and generate a latency report
+5. Similarly, configure the Rust mock exchange server to use the localhost.key for its private key and the localhost.crt for its certificate chain. 
+Enable SSL usage by setting use_ssl=true in its `configuration.toml` file.
+```
+private_key = "/path/to/localhost.key"
+cert_chain = "/path/to/localhost.crt"
+use_ssl = true
+```
 
 ## Optimization used for Java Client
 

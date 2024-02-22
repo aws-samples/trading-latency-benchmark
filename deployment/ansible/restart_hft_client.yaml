@@ -2,12 +2,12 @@
 #  SPDX-License-Identifier: MIT-0
 
 ---
-- name: restart exchange client
+- name: restart hft client
   hosts: aws_ec2
   collections:
     - amazon.aws.ec2_instance
   tasks:
-    - name: stop exchange client
+    - name: stop hft client
       become: true
       become_user: root
       shell: |
@@ -15,7 +15,7 @@
           echo "Shutting down PID: $pid"
           kill -9 $pid
         done
-    - name: start exchange server
+    - name: start hft client
       shell: "screen -dmS test bash -c 'cd /home/ec2-user/; ./run.sh > output.log 2>&1'"
       async: 45
       poll: 0

@@ -24,37 +24,63 @@ import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.incubator.channel.uring.IOUringSocketChannel;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import javax.net.ssl.*;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.security.*;
+import java.security.cert.CertificateException;
 import java.time.Duration;
 
-import static com.aws.trading.Config.USE_IOURING;
+import static com.aws.trading.Config.*;
 
 public class ExchangeClient {
     private static final Logger LOGGER = LogManager.getLogger(ExchangeClient.class);
     private final HttpClient httpClient;
     private final ExchangeClientLatencyTestHandler handler;
     private final EventLoopGroup workerGroup;
+
     private Integer apiToken;
     Channel ch;
     private Bootstrap bootstrap;
 
 
-    public ExchangeClient(int apiToken, ExchangeClientLatencyTestHandler handler, MultithreadEventLoopGroup ioGroup, MultithreadEventLoopGroup workerGroup) {
+    public ExchangeClient(int apiToken, ExchangeClientLatencyTestHandler handler, MultithreadEventLoopGroup ioGroup, MultithreadEventLoopGroup workerGroup) throws IOException, NoSuchAlgorithmException, KeyStoreException, CertificateException, UnrecoverableKeyException, KeyManagementException {
         this.apiToken = apiToken;
         this.handler = handler;
-        this.bootstrap = configureBootstrap(ioGroup).handler(getChannelInitializer(workerGroup, handler));
+        SslContext sslCtx = null;
+        var httpClientBuilder = HttpClient.newBuilder();
+        if (USE_SSL) {
+            sslCtx = SslContextBuilder.forClient()
+                    .trustManager(InsecureTrustManagerFactory.INSTANCE).build();
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            KeyStore ks = KeyStore.getInstance("PKCS12");
+            ks.load(new FileInputStream(KEY_STORE_PATH), KEY_STORE_PASSWORD.toCharArray());
+            KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+            kmf.init(ks, KEY_STORE_PASSWORD.toCharArray());
+            TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            tmf.init(ks);
+            sslContext.init(kmf.getKeyManagers(), tmf.getTrustManagers(), null);
+            httpClientBuilder = httpClientBuilder.sslContext(sslContext);
+        }
+
+        this.bootstrap = configureBootstrap(ioGroup).handler(getChannelInitializer(workerGroup, handler, sslCtx));
         this.workerGroup = workerGroup;
-        this.httpClient = HttpClient
-                .newBuilder()
+        this.httpClient = httpClientBuilder
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
+
     }
 
     private static Bootstrap configureBootstrap(MultithreadEventLoopGroup workerGroup) {
@@ -67,7 +93,7 @@ public class ExchangeClient {
     public void addBalances(URI uri, String qt) throws RuntimeException {
         try {
             String endpoint =
-                    new StringBuilder().append("http://")
+                    new StringBuilder().append(uri.getScheme()).append("://")
                             .append(uri.getHost())
                             .append(":").append(uri.getPort())
                             .append("/private/account/user/balances/")
@@ -93,11 +119,14 @@ public class ExchangeClient {
         this.ch = this.bootstrap.connect(handler.uri.getHost(), handler.uri.getPort()).sync().channel();
     }
 
-    private static ChannelInitializer<SocketChannel> getChannelInitializer(MultithreadEventLoopGroup workerGroup, ExchangeClientLatencyTestHandler handler) {
+    private static ChannelInitializer<SocketChannel> getChannelInitializer(MultithreadEventLoopGroup workerGroup, ExchangeClientLatencyTestHandler handler, SslContext sslCtx) {
         return new ChannelInitializer<>() {
             @Override
             public void initChannel(SocketChannel channel) throws Exception {
                 ChannelPipeline pipeline = channel.pipeline();
+                if (null != sslCtx) {
+                    pipeline.addLast(sslCtx.newHandler(channel.alloc(), handler.uri.getHost(), handler.uri.getPort()));
+                }
                 pipeline.addLast("http-codec", new HttpClientCodec());
                 pipeline.addLast("aggregator", new HttpObjectAggregator(65536));
                 pipeline.addLast(workerGroup, "ws-handler", handler);
