@@ -6,7 +6,7 @@ distributed tests.
 Java based trading client is designed to send limit and cancel orders,
 allowing you to measure round-trip times of the network communication.
 
-This repository does not contain a real trading matching engine but only mocks it.
+This repository also contains mock trading server that is developed in Rust. It responds to limit and cancel orders. 
 
 ## Table of Contents
 
