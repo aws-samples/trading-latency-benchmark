@@ -1,20 +1,20 @@
-# 
+#
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
-# 
+#
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this
 # software and associated documentation files (the "Software"), to deal in the Software
 # without restriction, including without limitation the rights to use, copy, modify,
 # merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
 # permit persons to whom the Software is furnished to do so.
-# 
+#
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
 # PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
 # HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-# 
+#
 # Disable hyperthreading
 for cpunum in $(cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | cut -s -d, -f2- | tr ',' '\n' | sort -un) do echo 0 > /sys/devices/system/cpu/cpu$cpunum/online
 done
@@ -34,7 +34,7 @@ echo tsc | tee /sys/devices/system/clocksource/clocksource0/current_clocksource
 #NUMA affinity for writeback threads, move threads should be moved to only the housekeeping CPUs
 echo 0 | tee /sys/bus/workqueue/devices/writeback/numa
 
-#Sysctl IO configuration
+#Sysctl IO configuration.toml
 sysctl -w vm.dirty_background_bytes=33554432
 sysctl -w vm.dirty_bytes=268435456
 sysctl -w vm.dirty_expire_centisecs=3000

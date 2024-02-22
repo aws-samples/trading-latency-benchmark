@@ -11,11 +11,11 @@
     become: true
     become_user: root
     shell: |
-      ps -aux | grep "java" | grep -v "grep" | awk '{print $2}' | while read -r pid ; do
+      ps -aux | grep "mock-trading-server" | grep -v "grep" | awk '{print $2}' | while read -r pid ; do
         echo "Shutting down PID: $pid"
         kill -9 $pid
       done
   - name: start exchange server
-    shell: "screen -dmS test bash -c 'cd /home/ec2-user/run/; ./run.sh > output.log 2>&1'"
+    shell: "screen -dmS test bash -c 'cd /home/ec2-user/mock-trading-server/target/release; ./mock-trading-server > output.log 2>&1'"
     async: 45
     poll: 0

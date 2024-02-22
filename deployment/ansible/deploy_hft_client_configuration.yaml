@@ -1,0 +1,25 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: deploy_app_configuration
+  hosts: aws_ec2
+  vars_files:
+    - instance_config.yaml
+  collections:
+    - amazon.aws.ec2_instance
+  tasks:
+    - name: copy config properties to ec2
+      copy:
+        src: ../../src/main/resources/config.properties
+        dest: /home/ec2-user/config.properties
+        owner: ec2-user
+        group: ec2-user
+    - name: "set use ssl config property"
+      become: yes
+      become_user: root
+      replace:
+        path: /home/ec2-user/config.properties
+        regexp: '(^USE_SSL=)(.*)$'
+        replace: 'USE_SSL={{ use_ssl[inventory_hostname] }}'
+        backup: no

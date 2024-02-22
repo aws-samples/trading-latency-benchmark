@@ -4,6 +4,19 @@
 cd ../
 mvn clean install
 cd ./deployment/ansible
-ansible-playbook deploy_application.yaml --key-file  replace_me_with_ssh_key_pair -i ./inventory/exchange_client_inventory.aws_ec2.yml
-ansible-playbook deploy_configuration.yaml --key-file replace_me_with_ssh_key_pair -i ./inventory/exchange_client_inventory.aws_ec2.yml
 
+INVENTORY="./inventory/virginia_inventory.aws_ec2.yml"
+SSH_KEY_FILE="~/.ssh/virginia.pem"
+
+PLAYBOOKS=(
+  "install_java_playbook.yaml"
+  "deploy_hft_client_application.yaml"
+  "deploy_hft_client_configuration.yaml"
+  "deploy_mock_trading_server.yaml"
+)
+
+for playbook in "${PLAYBOOKS[@]}"; do
+  ansible-playbook "$playbook" \
+    --key-file "$SSH_KEY_FILE" \
+    -i "$INVENTORY"
+done

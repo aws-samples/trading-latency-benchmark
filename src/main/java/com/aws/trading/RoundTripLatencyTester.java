@@ -31,6 +31,11 @@ import org.apache.logging.log4j.Logger;
 import java.io.*;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.security.KeyManagementException;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.UnrecoverableKeyException;
+import java.security.cert.CertificateException;
 import java.text.MessageFormat;
 import java.util.Arrays;
 import java.util.Collection;
@@ -60,9 +65,9 @@ public class RoundTripLatencyTester {
     private final URI httpURI;
 
 
-    public RoundTripLatencyTester() throws URISyntaxException {
-        this.websocketURI = new URI(MessageFormat.format("ws://{0}:{1,number,#}", HOST, WEBSOCKET_PORT));
-        this.httpURI = new URI(MessageFormat.format("ws://{0}:{1,number,#}", HOST, HTTP_PORT));
+    public RoundTripLatencyTester() throws URISyntaxException, UnrecoverableKeyException, CertificateException, IOException, NoSuchAlgorithmException, KeyStoreException, KeyManagementException {
+        this.websocketURI = new URI(MessageFormat.format("{0}://{1}:{2,number,#}", USE_SSL ? "wss" : "ws", HOST, WEBSOCKET_PORT));
+        this.httpURI = new URI(MessageFormat.format("{0}://{1}:{2,number,#}", USE_SSL ? "https" : "http", HOST, HTTP_PORT));
         this.nettyIOGroup = USE_IOURING ? new IOUringEventLoopGroup(NETTY_THREAD_COUNT, NETTY_IO_THREAD_FACTORY) : new NioEventLoopGroup(NETTY_THREAD_COUNT, NETTY_IO_THREAD_FACTORY);
         this.workerGroup = USE_IOURING ? new IOUringEventLoopGroup(NETTY_THREAD_COUNT, NETTY_WORKER_THREAD_FACTORY) : new NioEventLoopGroup(NETTY_THREAD_COUNT, NETTY_WORKER_THREAD_FACTORY);
         var apiToken1 = API_TOKEN;
@@ -152,7 +157,7 @@ public class RoundTripLatencyTester {
         return new PrintStream(new FileOutputStream("./histogram.hlog", true), false);
     }
 
-    public static void main(String[] args) throws InterruptedException, IOException, URISyntaxException {
+    public static void main(String[] args) throws InterruptedException, IOException, URISyntaxException, UnrecoverableKeyException, CertificateException, NoSuchAlgorithmException, KeyStoreException, KeyManagementException {
         RoundTripLatencyTester latencyTester = new RoundTripLatencyTester();
         latencyTester.start();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {

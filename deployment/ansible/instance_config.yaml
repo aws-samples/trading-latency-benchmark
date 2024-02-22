@@ -1,0 +1,10 @@
+use_ssl:
+  m5zn-metal: "true"
+  c6a-12xlarge: "true"
+  c6i-12xlarge: "true"
+  c7i-12xlarge: "true"
+  c7a-12xlarge: "true"
+  m7a-12xlarge: "true"
+  m7i-12xlarge: "true"
+  r7a-12xlarge: "true"
+  r7i-12xlarge: "true"
