@@ -2,16 +2,12 @@
 #  SPDX-License-Identifier: MIT-0
 
 plugin: amazon.aws.aws_ec2
-boto_profile: exchange_clients
 regions:
-  - eu-west-1
+  - us-east-1
 include_filters:
   - tag:Name:
-      - 'tc3-client-lowrate'
-      - 'tc5-client-lowrate'
-  - tag:Name:
-      - 'tc3-client-highrate'
-      - 'tc5-client-highrate'
+      - 'c7i-12xlarge'
+      - 'c7a-12xlarge'
 hostnames:
   - name: tag:Name
     separator: ''
@@ -20,6 +16,6 @@ compose:
   # (note: this does not modify inventory_hostname, which is set via I(hostnames))
   ansible_host: public_ip_address
 keyed_groups:
-  - key: tags.Application
+  - key: tag:Name
     separator: ''
 

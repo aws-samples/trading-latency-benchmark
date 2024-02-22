@@ -15,3 +15,11 @@
           echo "Shutting down PID: $pid"
           kill -9 $pid
         done
+    - name: stop exchange server
+      become: true
+      become_user: root
+      shell: |
+        ps -aux | grep "mock-trading-server" | grep -v "grep" | awk '{print $2}' | while read -r pid ; do
+          echo "Shutting down PID: $pid"
+          kill -9 $pid
+        done
