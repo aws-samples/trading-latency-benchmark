@@ -1,4 +1,4 @@
-# Network Latency Test Stack
+# AWS EC2 Network Latency Test Stack for Trading Use Cases
 
 This repository contains a network latency test stack that consists of Java based trading client and Ansible playbooks to coordinate 
 distributed tests.
