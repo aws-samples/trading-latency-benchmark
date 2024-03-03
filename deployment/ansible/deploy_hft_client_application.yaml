@@ -9,8 +9,8 @@
   tasks:
   - name: copy run script to ec2
     copy:
-      src: ../run.sh
-      dest: /home/ec2-user/run.sh
+      src: ../run_with_qatengine.sh
+      dest: /home/ec2-user/run_with_qatengine.sh
       owner: ec2-user
       group: ec2-user
       mode: 0755
@@ -34,12 +34,26 @@
       mode: 0755
     tags:
       - deploy
-  - name: copy app jar
+  - name: copy java source
     copy:
-      src: ../../target/ExchangeFlow-1.0-SNAPSHOT.jar
-      dest: /home/ec2-user/ExchangeFlow-1.0-SNAPSHOT.jar
+      src: ../../src/
+      dest: /home/ec2-user/hft-client/src
       owner: ec2-user
       group: ec2-user
       mode: 0644
     tags:
       - deploy
+  - name: copy java pom xml file
+    copy:
+      src: ../../pom.xml
+      dest: /home/ec2-user/hft-client/pom.xml
+      owner: ec2-user
+      group: ec2-user
+      mode: 0644
+    tags:
+      - deploy
+  - name: Build HFT Client
+    shell: |
+      cd /home/ec2-user/hft-client
+      mvn clean install
+      cp ./target/ExchangeFlow-1.0-SNAPSHOT.jar /home/ec2-user/

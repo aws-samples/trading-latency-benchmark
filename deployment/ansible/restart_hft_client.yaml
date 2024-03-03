@@ -16,6 +16,6 @@
           kill -9 $pid
         done
     - name: start hft client
-      shell: "screen -dmS test bash -c 'cd /home/ec2-user/; ./run.sh > output.log 2>&1'"
+      shell: "tmux new -s test_client -d bash -c 'cd /home/ec2-user/; ./run_with_qatengine.sh > output.log 2>&1'"
       async: 45
       poll: 0

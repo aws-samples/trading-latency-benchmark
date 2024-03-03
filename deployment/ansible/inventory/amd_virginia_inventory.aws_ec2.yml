@@ -6,7 +6,6 @@ regions:
   - us-east-1
 include_filters:
   - tag:Name:
-      - 'c7i-metal-24xl'
       - 'c7a-24xlarge'
 hostnames:
   - name: tag:Name
