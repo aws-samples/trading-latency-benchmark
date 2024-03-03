@@ -7,13 +7,17 @@
     <groupId>1</groupId>
     <artifactId>ExchangeFlow</artifactId>
     <version>1.0-SNAPSHOT</version>
-
+    <repositories>
+        <repository>
+            <id>local-maven-repo</id>
+            <url>file:///home/ec2-user/.m2/repository</url>
+        </repository>
+    </repositories>
     <properties>
         <maven.compiler.source>11</maven.compiler.source>
         <maven.compiler.target>11</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
-
     <dependencies>
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
@@ -74,6 +78,12 @@
             <artifactId>netty-incubator-transport-native-io_uring</artifactId>
             <version>0.0.21.Final</version>
             <classifier>linux-x86_64</classifier>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-tcnative</artifactId>
+            <version>2.0.64.Final-SNAPSHOT</version>
+            <classifier>linux-x86_64-fedora</classifier>
         </dependency>
     </dependencies>
 

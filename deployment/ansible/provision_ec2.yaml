@@ -1,0 +1,110 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: provision ec2 for latency tests
+  hosts: aws_ec2
+  collections:
+    - amazon.aws.ec2_instance
+  tasks:
+  - name: Get hostname
+    command: echo {{ ansible_hostname.split('-')[1] }}
+    register: hostname
+  - name: install baseline packages
+    become: yes
+    become_user: root
+    ansible.builtin.yum:
+      name:
+        - java-11-openjdk
+        - maven
+        - make
+        - gcc
+        - patch
+        - glibc-devel
+        - git
+        - apr-devel
+        - openssl-devel
+        - wget
+        - vim
+        - tmux
+      state: latest
+    tags:
+      - java, maven, make, gcc, patch, glibc,devel, git
+  - name: copy run with qat engine script to ec2
+    copy:
+      src: ../run_with_qatengine.sh
+      dest: /home/ec2-user/run_with_qatengine.sh
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy
+  - name: copy run without engine script to ec2
+    copy:
+      src: ../run_without_qatengine.sh
+      dest: /home/ec2-user/run_without_qatengine.sh
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy
+  - name: copy stop script to ec2
+    copy:
+      src: ../stop.sh
+      dest: /home/ec2-user/stop.sh
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy
+  - name: copy latency report script to ec2
+    copy:
+      src: ../latency_report.sh
+      dest: /home/ec2-user/latency_report.sh
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy
+  - name: copy java source code
+    copy:
+      src: ../../src/
+      dest: /home/ec2-user/hft-client/src
+      owner: ec2-user
+      group: ec2-user
+      mode: 0644
+    tags:
+      - deploy
+  - name: copy config properties to ec2
+    copy:
+      src: ../../src/main/resources/config.properties
+      dest: /home/ec2-user/config.properties
+      owner: ec2-user
+      group: ec2-user
+  - name: copy mock trading server
+    copy:
+      src: ../../mock-trading-server/
+      dest: /home/ec2-user/mock-trading-server/
+      owner: ec2-user
+      group: ec2-user
+      mode: 0644
+    tags:
+      - deploy
+  - name: Download Rust Installer
+    get_url:
+      url: https://sh.rustup.rs
+      dest: /tmp/sh.rustup.rs
+      mode: '0755'
+      force: 'yes'
+    tags:
+      - rust
+  - name: install rust/cargo
+    shell: /tmp/sh.rustup.rs -y
+    tags:
+      - rust
+  - name: install rust/cargo
+    shell: /tmp/sh.rustup.rs -y
+    become: yes
+    become_user: root
+    tags:
+      - rust

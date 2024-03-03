@@ -24,8 +24,10 @@ import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
+import io.netty.handler.ssl.OpenSsl;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.incubator.channel.uring.IOUringSocketChannel;
 import org.apache.logging.log4j.LogManager;
@@ -42,11 +44,16 @@ import java.net.http.HttpResponse;
 import java.security.*;
 import java.security.cert.CertificateException;
 import java.time.Duration;
+import java.util.Arrays;
 
 import static com.aws.trading.Config.*;
 
 public class ExchangeClient {
+
     private static final Logger LOGGER = LogManager.getLogger(ExchangeClient.class);
+    {
+        LOGGER.info("OpenSSL: available={} version= {}", OpenSsl.isAvailable(), OpenSsl.versionString());
+    }
     private final HttpClient httpClient;
     private final ExchangeClientLatencyTestHandler handler;
     private final EventLoopGroup workerGroup;
@@ -62,8 +69,6 @@ public class ExchangeClient {
         SslContext sslCtx = null;
         var httpClientBuilder = HttpClient.newBuilder();
         if (USE_SSL) {
-            sslCtx = SslContextBuilder.forClient()
-                    .trustManager(InsecureTrustManagerFactory.INSTANCE).build();
             SSLContext sslContext = SSLContext.getInstance("TLS");
             KeyStore ks = KeyStore.getInstance("PKCS12");
             ks.load(new FileInputStream(KEY_STORE_PATH), KEY_STORE_PASSWORD.toCharArray());
@@ -75,7 +80,16 @@ public class ExchangeClient {
             httpClientBuilder = httpClientBuilder.sslContext(sslContext);
         }
 
-        this.bootstrap = configureBootstrap(ioGroup).handler(getChannelInitializer(workerGroup, handler, sslCtx));
+        this.bootstrap = configureBootstrap(ioGroup)
+                .handler(
+                        getChannelInitializer(workerGroup, handler,
+                                SslContextBuilder.forClient()
+                                        .sslProvider(SslProvider.OPENSSL_REFCNT)
+                                        .ciphers(Arrays.asList(CIPHERS))
+                                        .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                                        .build()
+                        )
+        );
         this.workerGroup = workerGroup;
         this.httpClient = httpClientBuilder
                 .connectTimeout(Duration.ofSeconds(10))

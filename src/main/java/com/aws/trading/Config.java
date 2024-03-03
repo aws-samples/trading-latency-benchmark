@@ -46,6 +46,8 @@ public class Config {
     public static final String KEY_STORE_PASSWORD;
     public static final String KEY_STORE_PATH;
 
+    public static final String CIPHERS;
+
     static {
         URL resource = Config.class.getClassLoader().getResource("config.properties");
         assert resource != null;
@@ -73,6 +75,7 @@ public class Config {
         USE_SSL = getBooleanProperty("USE_SSL", "false");
         KEY_STORE_PATH = getProperty("KEY_STORE_PATH", "keystore.p12");
         KEY_STORE_PASSWORD = getProperty("KEY_STORE_PASSWORD", "123456");
+        CIPHERS = getProperty("CIPHERS", "AES256-GCM-SHA384");
 
     }
 
