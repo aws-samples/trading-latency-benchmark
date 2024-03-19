@@ -32,21 +32,76 @@ import java.util.stream.Collectors;
 public class Config {
     private static final Logger LOGGER = LogManager.getLogger(Config.class);
     private static final Properties cfg = new Properties();
+    /**
+     * A list of cryptocurrency trading pairs to be used in the exchange latency test application.
+     */
     public static final List<String> COIN_PAIRS;
+
+    /**
+     * The API token required for authentication with the exchange.
+     */
     public static final Integer API_TOKEN;
+
+    /**
+     * The hostname or IP address of the exchange to connect to.
+     */
     public static final String HOST;
+
+    /**
+     * The HTTP port number to be used by exchange.
+     */
     public static final int HTTP_PORT;
 
+    /**
+     * The WebSocket port number to be used for real-time communication with the exchange.
+     */
     public static final int WEBSOCKET_PORT;
+
+    /**
+     * The size of the test data set to be used for performance evaluation.
+     */
     public static final int TEST_SIZE;
+
+    /**
+     * The number of iterations to be performed as a warm-up before benchmarking.
+     */
     public static final long WARMUP_COUNT;
+
+    /**
+     * A flag indicating whether to use the io_uring (I/O acceleration) feature on Linux systems.
+     */
     public static final boolean USE_IOURING;
+
+    /**
+     * The number of exchange client instances to be created for parallel load testing.
+     */
     public static final int EXCHANGE_CLIENT_COUNT;
+
+    /**
+     * A flag indicating whether to use SSL/TLS encryption for network communication.
+     */
     public static final boolean USE_SSL;
+
+    /**
+     * The password for the Java keystore containing SSL/TLS certificates.
+     */
     public static final String KEY_STORE_PASSWORD;
+
+    /**
+     * The path to the Java keystore file containing SSL/TLS certificates.
+     */
     public static final String KEY_STORE_PATH;
 
+    /**
+     * A comma-separated list of cipher suites to be used for SSL/TLS encryption.
+     */
     public static final String CIPHERS;
+
+    /**
+     * The interval (in milliseconds) between consecutive ping requests to the endpoint. This is used to measure endpoint latencies.
+     */
+    public static final long PING_INTERVAL;
+
 
     static {
         URL resource = Config.class.getClassLoader().getResource("config.properties");
@@ -76,6 +131,7 @@ public class Config {
         KEY_STORE_PATH = getProperty("KEY_STORE_PATH", "keystore.p12");
         KEY_STORE_PASSWORD = getProperty("KEY_STORE_PASSWORD", "123456");
         CIPHERS = getProperty("CIPHERS", "AES256-GCM-SHA384");
+        PING_INTERVAL = getLongProperty("PING_INTERVAL", "1000" ); // 1 minute in milliseconds
 
     }
 

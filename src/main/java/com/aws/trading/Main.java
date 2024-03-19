@@ -36,6 +36,8 @@ public class Main {
         String command = args[0];
         if ("latency-test".equals(command)) {
             RoundTripLatencyTester.main(args);
+        } else if("ping-latency".equals(command)){
+            EndpointPingClient.main(args);
         } else if ("latency-report".equals(command)) {
             LatencyReport.main(args);
         } else if ("help".equals(command)) {
