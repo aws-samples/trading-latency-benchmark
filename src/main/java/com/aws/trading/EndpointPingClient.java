@@ -5,6 +5,7 @@ import org.HdrHistogram.SingleWriterRecorder;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.InetAddress;
@@ -18,19 +19,31 @@ import static com.aws.trading.RoundTripLatencyTester.getLogFile;
 import static com.aws.trading.RoundTripLatencyTester.saveHistogramToFile;
 
 public class EndpointPingClient {
-    public static final Histogram HISTOGRAM = new Histogram(Long.MAX_VALUE, 2);
     private static final Logger LOGGER = LogManager.getLogger(EndpointPingClient.class);
-    public static void main(String[] args) {
+
+    public static void main(String[] args) throws IOException {
         Timer timer = new Timer();
-        timer.scheduleAtFixedRate(new PingTask(HOST), 0, PING_INTERVAL);
+        String[] hosts = HOST.split(",");
+        for (String host : hosts) {
+            timer.scheduleAtFixedRate(new PingTask(host.trim()), 0, PING_INTERVAL);
+        }
     }
 
     private static class PingTask extends TimerTask {
+        final Histogram HISTOGRAM = new Histogram(Long.MAX_VALUE, 2);
         private final String host;
+        private final PrintStream histogramLogFile;
         private long count = 0;
         private final SingleWriterRecorder hdrRecorder = new SingleWriterRecorder(Long.MAX_VALUE, 2);
-        public PingTask(String host) {
+
+        public PingTask(String host) throws IOException {
             this.host = host;
+            String folderPath = "./" + host.replace(".", "_");
+            File folder = new File(folderPath);
+            if (!folder.exists()) {
+                folder.mkdirs(); // Create the folder if it doesn't exist
+            }
+            this.histogramLogFile = getLogFile(folderPath + "/histogram.hlog");
         }
 
         @Override
@@ -47,17 +60,13 @@ public class EndpointPingClient {
                     return;
                 }
                 if (isReachable) {
-                    LOGGER.info(" {} is reachable. Latency: {}",host, formatNanos(latency));
+                    LOGGER.info(" {} is reachable. Latency: {}", host, formatNanos(latency));
                     hdrRecorder.recordValue(latency);
                     if (count % TEST_SIZE == 0) {
                         HISTOGRAM.add(hdrRecorder.getIntervalHistogram());
                         LinkedHashMap<String, String> latencyReport = LatencyTools.createLatencyReport(HISTOGRAM);
-                        try (PrintStream histogramLogFile = getLogFile()) {
-                            saveHistogramToFile(HISTOGRAM, System.nanoTime(), histogramLogFile);
-                        } catch (IOException e) {
-                            LOGGER.error(e);
-                        }
-                        LOGGER.info("Percentiles: {} \n", LatencyTools.toJSON(latencyReport));
+                        saveHistogramToFile(HISTOGRAM, System.nanoTime(), histogramLogFile);
+                        LOGGER.info("Percentiles for host: {}\n {}\n", host, LatencyTools.toJSON(latencyReport));
                     }
                 } else {
                     LOGGER.error("{} is not reachable.", host);

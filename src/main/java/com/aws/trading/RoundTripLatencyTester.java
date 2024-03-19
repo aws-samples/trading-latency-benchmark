@@ -154,9 +154,11 @@ public class RoundTripLatencyTester {
     }
 
     public static PrintStream getLogFile() throws IOException {
-        return new PrintStream(new FileOutputStream("./histogram.hlog", true), false);
+        return getLogFile("./histogram.hlog");
     }
-
+    public static PrintStream getLogFile(String path) throws IOException {
+        return new PrintStream(new FileOutputStream(path, true), false);
+    }
     public static void main(String[] args) throws InterruptedException, IOException, URISyntaxException, UnrecoverableKeyException, CertificateException, NoSuchAlgorithmException, KeyStoreException, KeyManagementException {
         RoundTripLatencyTester latencyTester = new RoundTripLatencyTester();
         latencyTester.start();
