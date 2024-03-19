@@ -127,7 +127,7 @@ public class RoundTripLatencyTester {
             var logMsg = "\nTest Execution Time: {}s \n Number of messages: {} \n Message Per Second: {} \n Percentiles: {} \n";
 
             try (PrintStream histogramLogFile = getLogFile()) {
-                saveHistogramToFile(currentTime, histogramLogFile);
+                saveHistogramToFile(HISTOGRAM, currentTime, histogramLogFile);
                 histogramStartTime = currentTime;
             } catch (IOException e) {
                 LOGGER.error(e);
@@ -143,17 +143,17 @@ public class RoundTripLatencyTester {
         }
     }
 
-    private static void saveHistogramToFile(long currentTime, PrintStream log) {
+    public static void saveHistogramToFile(Histogram histogram, long currentTime, PrintStream log) {
         var histogramLogWriter = new HistogramLogWriter(log);
         histogramLogWriter.outputComment("[Logged with " + "Exchange Client 0.0.1" + "]");
         histogramLogWriter.outputLogFormatVersion();
         histogramLogWriter.outputStartTime(TimeUnit.MILLISECONDS.convert(currentTime, TimeUnit.NANOSECONDS));
         histogramLogWriter.setBaseTime(TimeUnit.MILLISECONDS.convert(histogramStartTime, TimeUnit.NANOSECONDS));
         histogramLogWriter.outputLegend();
-        histogramLogWriter.outputIntervalHistogram(HISTOGRAM);
+        histogramLogWriter.outputIntervalHistogram(histogram);
     }
 
-    private static PrintStream getLogFile() throws IOException {
+    public static PrintStream getLogFile() throws IOException {
         return new PrintStream(new FileOutputStream("./histogram.hlog", true), false);
     }
 
