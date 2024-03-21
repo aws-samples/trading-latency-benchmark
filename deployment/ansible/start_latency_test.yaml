@@ -9,15 +9,20 @@
   collections:
     - amazon.aws.ec2_instance
   tasks:
-    - name: start exchange server
-      become: yes
+    - name: stop exchange client
+      become: true
       become_user: root
-      shell: "tmux new -s test_server -d bash -c 'cd /home/ec2-user/mock-trading-server; ./target/release/mock-trading-server > output.log 2>&1'"
-      async: 45
-      poll: 0
+      shell: |
+        ps -aux | grep "java" | grep -v "grep" | awk '{print $2}' | while read -r pid ; do
+        echo "Shutting down PID: $pid"
+        kill -9 $pid
+        done
     - name: start exchange client
       become: yes
       become_user: root
-      shell: "tmux new -s test_client -d bash -c 'cd /home/ec2-user/; ./{{ run_script[inventory_hostname] }} > output.log 2>&1'"
+      shell: |
+        tmux new-session -d -s test_client 'bash -c "cd /home/ec2-user/; ./run_ping_test.sh > output.log 2>&1"'
+      # depending on tmux version this could be instead
+      # tmux new -s test_client -d bash -c 'cd /home/ec2-user/; ./{{ run_script[inventory_hostname] }} > output.log 2>&1'
       async: 45
       poll: 0
