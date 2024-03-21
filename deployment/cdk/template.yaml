@@ -1,0 +1,769 @@
+Resources:
+  LowLatencyConnectVPCA0B6CF6A:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/Resource
+  LowLatencyConnectVPCPublicSubnet1SubnetFCE80365:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: us-east-1a
+      CidrBlock: 10.0.0.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: aws-cdk:subnet-name
+          Value: Public
+        - Key: aws-cdk:subnet-type
+          Value: Public
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet1
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet1/Subnet
+  LowLatencyConnectVPCPublicSubnet1RouteTable1923A050:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet1
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet1/RouteTable
+  LowLatencyConnectVPCPublicSubnet1RouteTableAssociation631DD75F:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: LowLatencyConnectVPCPublicSubnet1RouteTable1923A050
+      SubnetId:
+        Ref: LowLatencyConnectVPCPublicSubnet1SubnetFCE80365
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet1/RouteTableAssociation
+  LowLatencyConnectVPCPublicSubnet1DefaultRoute2BAF62A6:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: LowLatencyConnectVPCIGW325E400D
+      RouteTableId:
+        Ref: LowLatencyConnectVPCPublicSubnet1RouteTable1923A050
+    DependsOn:
+      - LowLatencyConnectVPCVPCGW69A16B2D
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet1/DefaultRoute
+  LowLatencyConnectVPCPublicSubnet1EIPB2314236:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet1
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet1/EIP
+  LowLatencyConnectVPCPublicSubnet1NATGatewayF1606744:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+          - LowLatencyConnectVPCPublicSubnet1EIPB2314236
+          - AllocationId
+      SubnetId:
+        Ref: LowLatencyConnectVPCPublicSubnet1SubnetFCE80365
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet1
+    DependsOn:
+      - LowLatencyConnectVPCPublicSubnet1DefaultRoute2BAF62A6
+      - LowLatencyConnectVPCPublicSubnet1RouteTableAssociation631DD75F
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet1/NATGateway
+  LowLatencyConnectVPCPublicSubnet2Subnet899AB0FD:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: us-east-1b
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: aws-cdk:subnet-name
+          Value: Public
+        - Key: aws-cdk:subnet-type
+          Value: Public
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet2
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet2/Subnet
+  LowLatencyConnectVPCPublicSubnet2RouteTableFE1A092B:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet2
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet2/RouteTable
+  LowLatencyConnectVPCPublicSubnet2RouteTableAssociation7D606B45:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: LowLatencyConnectVPCPublicSubnet2RouteTableFE1A092B
+      SubnetId:
+        Ref: LowLatencyConnectVPCPublicSubnet2Subnet899AB0FD
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet2/RouteTableAssociation
+  LowLatencyConnectVPCPublicSubnet2DefaultRouteB51F85BA:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: LowLatencyConnectVPCIGW325E400D
+      RouteTableId:
+        Ref: LowLatencyConnectVPCPublicSubnet2RouteTableFE1A092B
+    DependsOn:
+      - LowLatencyConnectVPCVPCGW69A16B2D
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet2/DefaultRoute
+  LowLatencyConnectVPCPublicSubnet3SubnetEDE9C219:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: us-east-1c
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: aws-cdk:subnet-name
+          Value: Public
+        - Key: aws-cdk:subnet-type
+          Value: Public
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet3
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet3/Subnet
+  LowLatencyConnectVPCPublicSubnet3RouteTableAA810A47:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet3
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet3/RouteTable
+  LowLatencyConnectVPCPublicSubnet3RouteTableAssociation1E80590B:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: LowLatencyConnectVPCPublicSubnet3RouteTableAA810A47
+      SubnetId:
+        Ref: LowLatencyConnectVPCPublicSubnet3SubnetEDE9C219
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet3/RouteTableAssociation
+  LowLatencyConnectVPCPublicSubnet3DefaultRoute5245351E:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: LowLatencyConnectVPCIGW325E400D
+      RouteTableId:
+        Ref: LowLatencyConnectVPCPublicSubnet3RouteTableAA810A47
+    DependsOn:
+      - LowLatencyConnectVPCVPCGW69A16B2D
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet3/DefaultRoute
+  LowLatencyConnectVPCPublicSubnet4SubnetA62B7AD3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: us-east-1d
+      CidrBlock: 10.0.3.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: aws-cdk:subnet-name
+          Value: Public
+        - Key: aws-cdk:subnet-type
+          Value: Public
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet4
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet4/Subnet
+  LowLatencyConnectVPCPublicSubnet4RouteTable083835AB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet4
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet4/RouteTable
+  LowLatencyConnectVPCPublicSubnet4RouteTableAssociationF950AFBB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: LowLatencyConnectVPCPublicSubnet4RouteTable083835AB
+      SubnetId:
+        Ref: LowLatencyConnectVPCPublicSubnet4SubnetA62B7AD3
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet4/RouteTableAssociation
+  LowLatencyConnectVPCPublicSubnet4DefaultRoute402BB017:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: LowLatencyConnectVPCIGW325E400D
+      RouteTableId:
+        Ref: LowLatencyConnectVPCPublicSubnet4RouteTable083835AB
+    DependsOn:
+      - LowLatencyConnectVPCVPCGW69A16B2D
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet4/DefaultRoute
+  LowLatencyConnectVPCPublicSubnet5Subnet75697FEE:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: us-east-1e
+      CidrBlock: 10.0.4.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: aws-cdk:subnet-name
+          Value: Public
+        - Key: aws-cdk:subnet-type
+          Value: Public
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet5
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet5/Subnet
+  LowLatencyConnectVPCPublicSubnet5RouteTableCB0F58B0:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet5
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet5/RouteTable
+  LowLatencyConnectVPCPublicSubnet5RouteTableAssociation3DB36C15:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: LowLatencyConnectVPCPublicSubnet5RouteTableCB0F58B0
+      SubnetId:
+        Ref: LowLatencyConnectVPCPublicSubnet5Subnet75697FEE
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet5/RouteTableAssociation
+  LowLatencyConnectVPCPublicSubnet5DefaultRoute1163810D:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: LowLatencyConnectVPCIGW325E400D
+      RouteTableId:
+        Ref: LowLatencyConnectVPCPublicSubnet5RouteTableCB0F58B0
+    DependsOn:
+      - LowLatencyConnectVPCVPCGW69A16B2D
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet5/DefaultRoute
+  LowLatencyConnectVPCPublicSubnet6Subnet3DDBECC3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: us-east-1f
+      CidrBlock: 10.0.5.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: aws-cdk:subnet-name
+          Value: Public
+        - Key: aws-cdk:subnet-type
+          Value: Public
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet6
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet6/Subnet
+  LowLatencyConnectVPCPublicSubnet6RouteTableD7051721:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet6
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet6/RouteTable
+  LowLatencyConnectVPCPublicSubnet6RouteTableAssociation7E03F167:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: LowLatencyConnectVPCPublicSubnet6RouteTableD7051721
+      SubnetId:
+        Ref: LowLatencyConnectVPCPublicSubnet6Subnet3DDBECC3
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet6/RouteTableAssociation
+  LowLatencyConnectVPCPublicSubnet6DefaultRouteF6FC319D:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: LowLatencyConnectVPCIGW325E400D
+      RouteTableId:
+        Ref: LowLatencyConnectVPCPublicSubnet6RouteTableD7051721
+    DependsOn:
+      - LowLatencyConnectVPCVPCGW69A16B2D
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/PublicSubnet6/DefaultRoute
+  LowLatencyConnectVPCIGW325E400D:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/LowLatencyConnectVPC
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/IGW
+  LowLatencyConnectVPCVPCGW69A16B2D:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId:
+        Ref: LowLatencyConnectVPCIGW325E400D
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/VPCGW
+  LowLatencyConnectVPCRestrictDefaultSecurityGroupCustomResource34FA0E0C:
+    Type: Custom::VpcRestrictDefaultSG
+    Properties:
+      ServiceToken:
+        Fn::GetAtt:
+          - CustomVpcRestrictDefaultSGCustomResourceProviderHandlerDC833E5E
+          - Arn
+      DefaultSecurityGroupId:
+        Fn::GetAtt:
+          - LowLatencyConnectVPCA0B6CF6A
+          - DefaultSecurityGroup
+      Account:
+        Ref: AWS::AccountId
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/LowLatencyConnectVPC/RestrictDefaultSecurityGroupCustomResource/Default
+  CustomVpcRestrictDefaultSGCustomResourceProviderRole26592FE0:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+      ManagedPolicyArns:
+        - Fn::Sub: arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: Inline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupEgress
+                Resource:
+                  - Fn::Join:
+                      - ""
+                      - - "arn:aws:ec2:us-east-1:"
+                        - Ref: AWS::AccountId
+                        - :security-group/
+                        - Fn::GetAtt:
+                            - LowLatencyConnectVPCA0B6CF6A
+                            - DefaultSecurityGroup
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/Custom::VpcRestrictDefaultSGCustomResourceProvider/Role
+  CustomVpcRestrictDefaultSGCustomResourceProviderHandlerDC833E5E:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket:
+          Fn::Sub: cdk-hnb659fds-assets-${AWS::AccountId}-us-east-1
+        S3Key: 7f18a11296f35510ee16538afec983ed6312e12afbf81b777089a9f8e34e2474.zip
+      Timeout: 900
+      MemorySize: 128
+      Handler: __entrypoint__.handler
+      Role:
+        Fn::GetAtt:
+          - CustomVpcRestrictDefaultSGCustomResourceProviderRole26592FE0
+          - Arn
+      Runtime: nodejs18.x
+      Description: Lambda function for removing all inbound/outbound rules from the VPC default security group
+    DependsOn:
+      - CustomVpcRestrictDefaultSGCustomResourceProviderRole26592FE0
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/Custom::VpcRestrictDefaultSGCustomResourceProvider/Handler
+      aws:asset:path: asset.7f18a11296f35510ee16538afec983ed6312e12afbf81b777089a9f8e34e2474
+      aws:asset:property: Code
+  InstanceSecurityGroup896E10BF:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH access
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic by default
+          IpProtocol: "-1"
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          Description: Allow SSH access from the public internet
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+      VpcId:
+        Ref: LowLatencyConnectVPCA0B6CF6A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/InstanceSecurityGroup/Resource
+  r4xlargeuseast1aInstanceRole4F391840:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+        Version: "2012-10-17"
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/r4-xlarge-us-east-1a
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1a/InstanceRole/Resource
+  r4xlargeuseast1aInstanceProfile662B371B:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: r4xlargeuseast1aInstanceRole4F391840
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1a/InstanceProfile
+  r4xlargeuseast1aB5F335E8:
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: us-east-1a
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 100
+      IamInstanceProfile:
+        Ref: r4xlargeuseast1aInstanceProfile662B371B
+      ImageId:
+        Ref: SsmParameterValueawsserviceamiamazonlinuxlatestamzn2amikernel510hvmx8664ebsC96584B6F00A464EAD1953AFF4B05118Parameter
+      InstanceType: r4.xlarge
+      KeyName: virginia
+      SecurityGroupIds:
+        - Fn::GetAtt:
+            - InstanceSecurityGroup896E10BF
+            - GroupId
+      SubnetId:
+        Ref: LowLatencyConnectVPCPublicSubnet1SubnetFCE80365
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/r4-xlarge-us-east-1a
+      UserData:
+        Fn::Base64: "#!/bin/bash"
+    DependsOn:
+      - r4xlargeuseast1aInstanceRole4F391840
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1a/Resource
+  r4xlargeuseast1bInstanceRoleFC78EB1A:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+        Version: "2012-10-17"
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/r4-xlarge-us-east-1b
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1b/InstanceRole/Resource
+  r4xlargeuseast1bInstanceProfile406F1AA7:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: r4xlargeuseast1bInstanceRoleFC78EB1A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1b/InstanceProfile
+  r4xlargeuseast1b5D1323C2:
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: us-east-1b
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 100
+      IamInstanceProfile:
+        Ref: r4xlargeuseast1bInstanceProfile406F1AA7
+      ImageId:
+        Ref: SsmParameterValueawsserviceamiamazonlinuxlatestamzn2amikernel510hvmx8664ebsC96584B6F00A464EAD1953AFF4B05118Parameter
+      InstanceType: r4.xlarge
+      KeyName: virginia
+      SecurityGroupIds:
+        - Fn::GetAtt:
+            - InstanceSecurityGroup896E10BF
+            - GroupId
+      SubnetId:
+        Ref: LowLatencyConnectVPCPublicSubnet2Subnet899AB0FD
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/r4-xlarge-us-east-1b
+      UserData:
+        Fn::Base64: "#!/bin/bash"
+    DependsOn:
+      - r4xlargeuseast1bInstanceRoleFC78EB1A
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1b/Resource
+  r4xlargeuseast1cInstanceRole3E434E93:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+        Version: "2012-10-17"
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/r4-xlarge-us-east-1c
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1c/InstanceRole/Resource
+  r4xlargeuseast1cInstanceProfile07F73801:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: r4xlargeuseast1cInstanceRole3E434E93
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1c/InstanceProfile
+  r4xlargeuseast1c21F96094:
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: us-east-1c
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 100
+      IamInstanceProfile:
+        Ref: r4xlargeuseast1cInstanceProfile07F73801
+      ImageId:
+        Ref: SsmParameterValueawsserviceamiamazonlinuxlatestamzn2amikernel510hvmx8664ebsC96584B6F00A464EAD1953AFF4B05118Parameter
+      InstanceType: r4.xlarge
+      KeyName: virginia
+      SecurityGroupIds:
+        - Fn::GetAtt:
+            - InstanceSecurityGroup896E10BF
+            - GroupId
+      SubnetId:
+        Ref: LowLatencyConnectVPCPublicSubnet3SubnetEDE9C219
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/r4-xlarge-us-east-1c
+      UserData:
+        Fn::Base64: "#!/bin/bash"
+    DependsOn:
+      - r4xlargeuseast1cInstanceRole3E434E93
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1c/Resource
+  r4xlargeuseast1dInstanceRole86FA0E80:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+        Version: "2012-10-17"
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/r4-xlarge-us-east-1d
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1d/InstanceRole/Resource
+  r4xlargeuseast1dInstanceProfileBB82ED35:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: r4xlargeuseast1dInstanceRole86FA0E80
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1d/InstanceProfile
+  r4xlargeuseast1dEED28E90:
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: us-east-1d
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 100
+      IamInstanceProfile:
+        Ref: r4xlargeuseast1dInstanceProfileBB82ED35
+      ImageId:
+        Ref: SsmParameterValueawsserviceamiamazonlinuxlatestamzn2amikernel510hvmx8664ebsC96584B6F00A464EAD1953AFF4B05118Parameter
+      InstanceType: r4.xlarge
+      KeyName: virginia
+      SecurityGroupIds:
+        - Fn::GetAtt:
+            - InstanceSecurityGroup896E10BF
+            - GroupId
+      SubnetId:
+        Ref: LowLatencyConnectVPCPublicSubnet4SubnetA62B7AD3
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/r4-xlarge-us-east-1d
+      UserData:
+        Fn::Base64: "#!/bin/bash"
+    DependsOn:
+      - r4xlargeuseast1dInstanceRole86FA0E80
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1d/Resource
+  r4xlargeuseast1eInstanceRole620E52F7:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+        Version: "2012-10-17"
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/r4-xlarge-us-east-1e
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1e/InstanceRole/Resource
+  r4xlargeuseast1eInstanceProfileF9420016:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: r4xlargeuseast1eInstanceRole620E52F7
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1e/InstanceProfile
+  r4xlargeuseast1e73E58833:
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: us-east-1e
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 100
+      IamInstanceProfile:
+        Ref: r4xlargeuseast1eInstanceProfileF9420016
+      ImageId:
+        Ref: SsmParameterValueawsserviceamiamazonlinuxlatestamzn2amikernel510hvmx8664ebsC96584B6F00A464EAD1953AFF4B05118Parameter
+      InstanceType: r4.xlarge
+      KeyName: virginia
+      SecurityGroupIds:
+        - Fn::GetAtt:
+            - InstanceSecurityGroup896E10BF
+            - GroupId
+      SubnetId:
+        Ref: LowLatencyConnectVPCPublicSubnet5Subnet75697FEE
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/r4-xlarge-us-east-1e
+      UserData:
+        Fn::Base64: "#!/bin/bash"
+    DependsOn:
+      - r4xlargeuseast1eInstanceRole620E52F7
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1e/Resource
+  r4xlargeuseast1fInstanceRoleA818B3AC:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+        Version: "2012-10-17"
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/r4-xlarge-us-east-1f
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1f/InstanceRole/Resource
+  r4xlargeuseast1fInstanceProfile6F5F1ED3:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: r4xlargeuseast1fInstanceRoleA818B3AC
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1f/InstanceProfile
+  r4xlargeuseast1fAB13A49E:
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: us-east-1f
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 100
+      IamInstanceProfile:
+        Ref: r4xlargeuseast1fInstanceProfile6F5F1ED3
+      ImageId:
+        Ref: SsmParameterValueawsserviceamiamazonlinuxlatestamzn2amikernel510hvmx8664ebsC96584B6F00A464EAD1953AFF4B05118Parameter
+      InstanceType: r4.xlarge
+      KeyName: virginia
+      SecurityGroupIds:
+        - Fn::GetAtt:
+            - InstanceSecurityGroup896E10BF
+            - GroupId
+      SubnetId:
+        Ref: LowLatencyConnectVPCPublicSubnet6Subnet3DDBECC3
+      Tags:
+        - Key: Name
+          Value: LowLatencyConnectStack/r4-xlarge-us-east-1f
+      UserData:
+        Fn::Base64: "#!/bin/bash"
+    DependsOn:
+      - r4xlargeuseast1fInstanceRoleA818B3AC
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/r4-xlarge-us-east-1f/Resource
+  CDKMetadata:
+    Type: AWS::CDK::Metadata
+    Properties:
+      Analytics: v2:deflate64:H4sIAAAAAAAA/21QTW/CMAz9LbunAXrZGaEJ9TJFLeI6ualhhiZBiQNCVf87yTrWTdrpPT/7+auUq2Uply9wC4XuzkVPrRwaBn0WSfoYUJdy2F+02BzsXm2Eim1PuomtRc7azGoXGXfQ9jjrs7YOwWkCJmd/ijN5q1SGd+AtMN7gnqPKMvpk/yWl2d/RmtN2nwYtiwZ19MT3rXfx8jX1j1DZwGA1Ti0nPgoCI4faTWs+8ZlW3h2ox3EUNQYXfTbHwM7MYTL9n0reK3XoRboVOf3wSPaY6xV4MJhOGoV1HcpTWFzLlXxNbz8FosJHy2RQ1hM+AFq5faaTAQAA
+    Metadata:
+      aws:cdk:path: LowLatencyConnectStack/CDKMetadata/Default
+Parameters:
+  SsmParameterValueawsserviceamiamazonlinuxlatestamzn2amikernel510hvmx8664ebsC96584B6F00A464EAD1953AFF4B05118Parameter:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-kernel-5.10-hvm-x86_64-ebs
+  BootstrapVersion:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /cdk-bootstrap/hnb659fds/version
+    Description: Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]
+Rules:
+  CheckBootstrapVersion:
+    Assertions:
+      - Assert:
+          Fn::Not:
+            - Fn::Contains:
+                - - "1"
+                  - "2"
+                  - "3"
+                  - "4"
+                  - "5"
+                - Ref: BootstrapVersion
+        AssertDescription: CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.
+

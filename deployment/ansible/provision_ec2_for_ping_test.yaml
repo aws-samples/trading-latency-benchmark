@@ -1,0 +1,107 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: provision ec2 for latency tests
+  hosts: aws_ec2
+  collections:
+    - amazon.aws.ec2_instance
+  tasks:
+  - name: Get hostname
+    command: echo {{ ansible_hostname.split('-')[1] }}
+    register: hostname
+  - name: install baseline packages
+    become: yes
+    become_user: root
+    ansible.builtin.yum:
+      name:
+        - java-11-amazon-corretto
+        - git
+        - wget
+        - vim
+        - tmux
+      state: latest
+    tags:
+      - java, maven, wget, vim, tmux, git
+  - name: copy run script to ec2
+    copy:
+      src: ../run_ping_test.sh
+      dest: /home/ec2-user/run_ping_test.sh
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy
+  - name: copy stop script to ec2
+    copy:
+      src: ../stop.sh
+      dest: /home/ec2-user/stop.sh
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy
+  - name: copy latency report script to ec2
+    copy:
+      src: ../latency_report.sh
+      dest: /home/ec2-user/latency_report.sh
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy
+  - name: copy java source code
+    copy:
+      src: ../../src/
+      dest: /home/ec2-user/hft-client/src
+      owner: ec2-user
+      group: ec2-user
+      mode: 0644
+    tags:
+      - deploy
+  - name: copy pom xml
+    copy:
+      src: ../../pom.xml
+      dest: /home/ec2-user/hft-client/pom.xml
+      owner: ec2-user
+      group: ec2-user
+      mode: 0644
+    tags:
+      - deploy
+  - name: Install Maven
+    become: yes
+    become_user: root
+    shell: |
+      sudo ln -s /usr/lib/jvm/java-11-amazon-corretto.x86_64/bin/java /usr/bin/
+      wget https://dlcdn.apache.org/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz
+      tar xzvf apache-maven-3.9.6-bin.tar.gz
+      ln -sf /home/ec2-user/apache-maven-3.9.6/bin/mvn /bin/mvn
+  - name: Build Ping Client
+    become: yes
+    become_user: root
+    shell: |
+      cd /home/ec2-user/hft-client
+      mvn clean install
+      cp ./target/ExchangeFlow-1.0-SNAPSHOT.jar /home/ec2-user/
+  - name: copy config properties to ec2
+    copy:
+      src: ../../src/main/resources/config.properties
+      dest: /home/ec2-user/config.properties
+      owner: ec2-user
+      group: ec2-user
+  - name: "set target hosts"
+    become: yes
+    become_user: root
+    replace:
+      path: /home/ec2-user/config.properties
+      regexp: '(^HOST=)(.*)$'
+      replace: 'HOST=REPLACE_ME_WITH_IP'  #comma seperated list of IPs to ping
+      backup: no
+  - name: "set ping interval"
+    become: yes
+    become_user: root
+    replace:
+      path: /home/ec2-user/config.properties
+      regexp: '(^PING_INTERVAL=)(.*)$'
+      replace: 'PING_INTERVAL=60000'
+      backup: no
