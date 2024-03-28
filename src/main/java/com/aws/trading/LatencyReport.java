@@ -22,38 +22,93 @@ import org.HdrHistogram.HistogramLogReader;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.io.FileInputStream;
+import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static com.aws.trading.Main.printHelpMessage;
+import static java.nio.file.Files.newInputStream;
 
 public class LatencyReport {
     private static final Logger LOGGER = LogManager.getLogger(LatencyReport.class);
+    private static final String regex = ".*/LowLatencyConnectStack/([^/]+)/home/ec2-user/([^/]+)/histogram.hlog";
+    private static final Pattern pattern = Pattern.compile(regex);
 
     public static void main(String[] args) {
         if (args.length < 2) {
             printHelpMessage();
             System.exit(0);
         }
-        try {
-            //read path to histogram file from args and load it
-            var path = Path.of(args[1]);
-            LOGGER.info("loading histogram from file {}", path.toFile());
-            HistogramLogReader logReader = new HistogramLogReader(new FileInputStream(path.toFile()));
-            Histogram histogram = null;
-            while (logReader.hasNext()){
-                Histogram iter = (Histogram) logReader.nextIntervalHistogram();
-                if(null == histogram){
-                    histogram = iter;
-                }else{
-                    histogram.add(iter);
-                }
-            }
-            assert histogram != null;
-            LOGGER.info("Percentiles: \n {}", LatencyTools.createLatencyReportJson(histogram));
+        try (Stream<Path> paths = Files.walk(Paths.get(args[1]))) {
+            List<Map<String, String>> rows = paths.filter(Files::isRegularFile)
+                    .filter(path -> path.toString().endsWith(".hlog"))
+                    .map(file -> {
+                        LOGGER.info("loading histogram from file {}", file);
+                        HistogramLogReader logReader = getHistogramLogReader(file);
+                        Histogram histogram = null;
+                        while (logReader.hasNext()) {
+                            Histogram iter = (Histogram) logReader.nextIntervalHistogram();
+                            if (null == histogram) {
+                                histogram = iter;
+                            } else {
+                                histogram.add(iter);
+                            }
+                        }
+                        assert histogram != null;
+                        final LinkedHashMap<String, String> row = LatencyTools.createLatencyReport(histogram);
+                        final Matcher matcher = pattern.matcher(file.toString());
+                        if (matcher.matches()) {
+                            row.put("source", matcher.group(1));
+                            row.put("destination", matcher.group(2));
+                        } else {
+                            LOGGER.error("Unable to parse the input string: {}", file.toString());
+                        }
+                        return row;
+                    }).collect(Collectors.toList());
+            writeToCSV(rows, "output.csv");
         } catch (IOException e) {
-            LOGGER.error(e);
+            System.err.println("Error processing histogram log files: " + e.getMessage());
+        }
+    }
+
+    private static void writeToCSV(List<Map<String, String>> data, String fileName) {
+        try (FileWriter writer = new FileWriter(fileName)) {
+            // Get the header columns from the first row
+            List<String> headers = new ArrayList<>(data.get(0).keySet());
+
+            // Write the header row
+            writer.write(String.join(",", headers));
+            writer.write("\n");
+
+            // Write the data rows
+            for (Map<String, String> row : data) {
+                List<String> values = new ArrayList<>();
+                for (String header : headers) {
+                    values.add(row.get(header));
+                }
+                writer.write(String.join(",", values));
+                writer.write("\n");
+            }
+        } catch (IOException e) {
+            LOGGER.error("Error writing to CSV file: {}", e.getMessage());
+        }
+    }
+
+    private static HistogramLogReader getHistogramLogReader(Path file) throws RuntimeException {
+        try {
+            return new HistogramLogReader(newInputStream(file));
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
     }
 }
