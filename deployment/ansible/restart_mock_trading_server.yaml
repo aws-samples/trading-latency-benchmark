@@ -16,6 +16,6 @@
         kill -9 $pid
       done
   - name: start exchange server
-    shell: "tmux new -s test_client -d bash -c 'cd /home/ec2-user/mock-trading-server/target/release; ./mock-trading-server > output.log 2>&1'"
+    shell: tmux new-session -d -s test_client 'bash -c "cd /home/ec2-user/mock-trading-server; ./target/release/mock-trading-server > output.log 2>&1"'
     async: 45
     poll: 0

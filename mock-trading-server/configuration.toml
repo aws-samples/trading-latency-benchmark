@@ -1,7 +1,4 @@
 private_key="/home/ec2-user/localhost.key"
 cert_chain="/home/ec2-user/localhost.crt"
 use_ssl="true"
-use_openssl_engine="true"
-engine_id="dynamic"
-engine_so_path="/opt/openssl/1.1.1e/lib/engines-1.1/qatengine.so"
 cipher_list="AES256-GCM-SHA384"

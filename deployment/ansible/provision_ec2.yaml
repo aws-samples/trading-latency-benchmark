@@ -10,39 +10,65 @@
   - name: Get hostname
     command: echo {{ ansible_hostname.split('-')[1] }}
     register: hostname
-  - name: install baseline packages
+  - name: install dependencies
     become: yes
     become_user: root
-    ansible.builtin.yum:
-      name:
-        - java-11-openjdk
-        - maven
-        - make
-        - gcc
-        - patch
-        - glibc-devel
-        - git
-        - apr-devel
-        - openssl-devel
-        - wget
-        - vim
-        - tmux
-      state: latest
-    tags:
-      - java, maven, make, gcc, patch, glibc,devel, git
-  - name: copy run with qat engine script to ec2
-    copy:
-      src: ../run_with_qatengine.sh
-      dest: /home/ec2-user/run_with_qatengine.sh
-      owner: ec2-user
-      group: ec2-user
-      mode: 0755
-    tags:
-      - deploy
+    shell: |
+      yum remove mvn
+      amazon-linux-extras install -y java-openjdk11
+      export MAVEN_VERSION="3.9.7"
+      INSTALL_DIR="/opt/maven"
+      mkdir -p "${INSTALL_DIR}"
+      cd "$(mktemp -d)"
+      DOWNLOAD_URL="https://dlcdn.apache.org/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+      sudo wget "${DOWNLOAD_URL}"
+      sudo tar -xzf "apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+      sudo mv "apache-maven-${MAVEN_VERSION}" "${INSTALL_DIR}"
+      cd -
+      rm -rf "$(mktemp -d)"
+      export MAVEN_HOME=/opt/maven/apache-maven-${MAVEN_VERSION}
+      export PATH=$MAVEN_HOME/bin:$PATH
+      ln -sf $MAVEN_HOME/bin/mvn /usr/bin/mvn
+      source /etc/profile.d/maven.sh
+      yum install -y make gcc patch glibc-devel git apr-devel openssl-devel wget vim tmux
+  - name: Generate a new RSA private key with a key size of 4096
+    shell: openssl genrsa -out localhost.key 4096
+  - name: Create a new Certificate Signing Request (CSR) using the previously generated private key
+    shell: |
+      # Create a temporary configuration file
+      echo "[req]
+      distinguished_name=dn
+      [dn]
+      [ext]
+      subjectAltName=DNS:localhost" > /tmp/openssl.conf
+      
+      # Run the OpenSSL command with the temporary configuration file
+      openssl req -new -key localhost.key -out localhost.csr \
+      -subj "/C=NL/ST=Zuid-Holland/L=city/O=amazon/OU=amazon/CN=localhost/emailAddress=random@random.nl" \
+      -extensions ext \
+      -config /tmp/openssl.conf \
+      -sha512 \
+      -newhdr \
+      -passin pass:123456 \
+      -keyform PEM \
+      -outform PEM
+      
+      # Remove the temporary configuration file
+      rm /tmp/openssl.conf
+  - name: Generate Self Signed certificates
+    shell: |
+      openssl x509 -req -days 365 \
+      -in localhost.csr -signkey localhost.key \
+      -out localhost.crt \
+      -sha512
+      openssl pkcs12 -export -out keystore.p12 \
+      -inkey localhost.key \
+      -in localhost.crt \
+      -passout pass:123456
   - name: copy run without engine script to ec2
     copy:
-      src: ../run_without_qatengine.sh
-      dest: /home/ec2-user/run_without_qatengine.sh
+      src: ../run_client.sh
+      dest: /home/ec2-user/run_client.sh
       owner: ec2-user
       group: ec2-user
       mode: 0755
@@ -75,12 +101,26 @@
       mode: 0644
     tags:
       - deploy
-  - name: copy config properties to ec2
+  - name: copy pom xml
+    copy:
+      src: ../../pom.xml
+      dest: /home/ec2-user/hft-client/pom.xml
+      owner: ec2-user
+      group: ec2-user
+      mode: 0644
+    tags:
+      - deploy
+  - name: copy client config properties to ec2
     copy:
       src: ../../src/main/resources/config.properties
       dest: /home/ec2-user/config.properties
       owner: ec2-user
       group: ec2-user
+  - name: Build HFT Client
+    shell: |
+      cd /home/ec2-user/hft-client
+      mvn clean install
+      cp ./target/ExchangeFlow-1.0-SNAPSHOT.jar /home/ec2-user/
   - name: copy mock trading server
     copy:
       src: ../../mock-trading-server/
@@ -90,6 +130,20 @@
       mode: 0644
     tags:
       - deploy
+  - name: Build Exchange Server
+    become: yes
+    become_user: root
+    shell: |
+      [ -f /home/ec2-user/.cargo/env ] && source /home/ec2-user/.cargo/env
+      cd /home/ec2-user/mock-trading-server/
+      cargo clean
+      cargo build --release
+  - name: copy mock trading server configuration toml file
+    copy:
+      src: ../../mock-trading-server/configuration.toml
+      dest: /home/ec2-user/mock-trading-server/configuration.toml
+      owner: ec2-user
+      group: ec2-user
   - name: Download Rust Installer
     get_url:
       url: https://sh.rustup.rs
@@ -108,3 +162,19 @@
     become_user: root
     tags:
       - rust
+#  - name: "set target hosts"
+#    become: yes
+#    become_user: root
+#    replace:
+#      path: /home/ec2-user/config.properties
+#      regexp: '(^HOST=)(.*)$'
+#      replace: 'HOST=REPLACE_ME_WITH_COMMA_SEPERATED_LIST_OF_IPS'
+#      backup: no
+#  - name: "set ping interval"
+#    become: yes
+#    become_user: root
+#    replace:
+#      path: /home/ec2-user/config.properties
+#      regexp: '(^PING_INTERVAL=)(.*)$'
+#      replace: 'PING_INTERVAL=60000'
+#      backup: no

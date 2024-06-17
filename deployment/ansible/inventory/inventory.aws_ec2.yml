@@ -3,10 +3,12 @@
 
 plugin: amazon.aws.aws_ec2
 regions:
-  - us-east-1
+  - ap-southeast-1
 include_filters:
   - tag:Name:
-      - 'c7a-24xlarge'
+      - 'LowLatencyConnectStack/r4-xlarge-ap-southeast-1a'
+      - 'LowLatencyConnectStack/r4-xlarge-ap-southeast-1b'
+      - 'LowLatencyConnectStack/r4-xlarge-ap-southeast-1c'
 hostnames:
   - name: tag:Name
     separator: ''
