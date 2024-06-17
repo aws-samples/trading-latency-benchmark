@@ -33,38 +33,25 @@ Before you can use this network latency test stack, you'll need to ensure that y
 ### Deployment with Ansible
 
 1. Generate SSH key pairs for the instances
-2. Update `.aws_ec2.yml` inventory files under `deployment/ansible/inventory` with your EC2 instance names. As an example you can find 2 inventories one for tokyo one for virginia.
+2. Update `.aws_ec2.yml` inventory files under `deployment/ansible/inventory` with your EC2 instance names. As an example you can find an inventory file in that folder.
 3. Open `deploy.sh` file and update `INVENTORY` and `SSH_KEY_FILE`. `SSH_KEY_FILE` is the ssh key pair that you use to connect to EC2 instances.
 4. Run `deploy.sh`, The deploy.sh script handles deploying the application and dependencies to EC2 instances. It makes use of Ansible to provision the instances and run the deployment tasks.
 
 The `deploy.sh` script will:
-1. Deploys to two separate inventory groups: 
-   - intel_virginia - Intel-based instances with QAT (QuickAssistTechnology, qat_sw) enabled
-   - amd_virginia - AMD-based instances whicha are without QAT
-2. Provisions baseline packages on each instance:
-   - Java, Maven, compilers, OpenSSL, etc.
-3. Builds OpenSSL from source for improved performance
-4. Configures OpenSSL engines if QAT devices present
-5. Builds custom netty-tcnative with desired OpenSSL 1.1.1e
-6. Builds the Java client and Rust server applications
-7. Configures SSL settings on server based on inventory vars `instance_config.yaml`
-8. Copies across key scripts and config files
+1. Provision instances and deploys client and server to set of ec2 instances defined in inventory file.:
+2. Builds the hft java client and rust mock trading server applications on instances
+3. Creates self-signed ssl files on the remote ec2 instances  
+4. Copies across key scripts and config files for both client and server
 
 
 ### Start Running Tests
 
-`start_latency_test.yaml` playbook is used to start the exchange server and client processes for performance testing on AWS EC2 instances.
+`start_latency_test.yaml` playbook is used to start the client processes for performance testing on AWS EC2 instances.
 
 The playbook defines tasks to:
 
-    Start the exchange server process in screen on the server instances
+    Stop the exchange client
     Start the exchange client processes in screen on the client instances
-
-Steps:
-
-    Ensure server and client code is deployed
-    Update EC2 inventory file with tags
-    Run ansible-playbook restart.yml
 
 You can monitor client logs from `/home/ec2-user/output.log`and server logs from `/home/ec2-user/mock-trading-server/target/release/output.log`
 

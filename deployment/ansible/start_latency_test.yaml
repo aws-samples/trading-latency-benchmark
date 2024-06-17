@@ -4,8 +4,8 @@
 ---
 - name: restart exchange client
   hosts: aws_ec2
-  vars_files:
-    - instance_config.yaml
+#  vars_files:
+#    - instance_config.yaml
   collections:
     - amazon.aws.ec2_instance
   tasks:
@@ -21,7 +21,7 @@
       become: yes
       become_user: root
       shell: |
-        tmux new-session -d -s test_client 'bash -c "cd /home/ec2-user/; ./run_ping_test.sh > output.log 2>&1"'
+        tmux new-session -d -s test_client 'bash -c "cd /home/ec2-user/; ./run_client.sh > output.log 2>&1"'
       # depending on tmux version this could be instead
       # tmux new -s test_client -d bash -c 'cd /home/ec2-user/; ./{{ run_script[inventory_hostname] }} > output.log 2>&1'
       async: 45
