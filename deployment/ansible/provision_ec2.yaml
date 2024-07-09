@@ -29,7 +29,6 @@
       export MAVEN_HOME=/opt/maven/apache-maven-${MAVEN_VERSION}
       export PATH=$MAVEN_HOME/bin:$PATH
       ln -sf $MAVEN_HOME/bin/mvn /usr/bin/mvn
-      source /etc/profile.d/maven.sh
       yum install -y make gcc patch glibc-devel git apr-devel openssl-devel wget vim tmux
   - name: Generate a new RSA private key with a key size of 4096
     shell: openssl genrsa -out localhost.key 4096
@@ -130,20 +129,6 @@
       mode: 0644
     tags:
       - deploy
-  - name: Build Exchange Server
-    become: yes
-    become_user: root
-    shell: |
-      [ -f /home/ec2-user/.cargo/env ] && source /home/ec2-user/.cargo/env
-      cd /home/ec2-user/mock-trading-server/
-      cargo clean
-      cargo build --release
-  - name: copy mock trading server configuration toml file
-    copy:
-      src: ../../mock-trading-server/configuration.toml
-      dest: /home/ec2-user/mock-trading-server/configuration.toml
-      owner: ec2-user
-      group: ec2-user
   - name: Download Rust Installer
     get_url:
       url: https://sh.rustup.rs
@@ -162,6 +147,20 @@
     become_user: root
     tags:
       - rust
+  - name: Build Exchange Server
+    become: yes
+    become_user: root
+    shell: |
+      [ -f /home/ec2-user/.cargo/env ] && source /home/ec2-user/.cargo/env
+      cd /home/ec2-user/mock-trading-server/
+      cargo clean
+      cargo build --release
+  - name: copy mock trading server configuration toml file
+    copy:
+      src: ../../mock-trading-server/configuration.toml
+      dest: /home/ec2-user/mock-trading-server/configuration.toml
+      owner: ec2-user
+      group: ec2-user
 #  - name: "set target hosts"
 #    become: yes
 #    become_user: root
