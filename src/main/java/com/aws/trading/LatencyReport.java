@@ -81,7 +81,7 @@ public class LatencyReport {
         }
     }
 
-    private static void writeToCSV(List<Map<String, String>> data, String fileName) {
+    public static void writeToCSV(List<Map<String, String>> data, String fileName) {
         try (FileWriter writer = new FileWriter(fileName)) {
             // Get the header columns from the first row
             List<String> headers = new ArrayList<>(data.get(0).keySet());
@@ -104,7 +104,7 @@ public class LatencyReport {
         }
     }
 
-    private static HistogramLogReader getHistogramLogReader(Path file) throws RuntimeException {
+    public static HistogramLogReader getHistogramLogReader(Path file) throws RuntimeException {
         try {
             return new HistogramLogReader(newInputStream(file));
         } catch (IOException e) {
