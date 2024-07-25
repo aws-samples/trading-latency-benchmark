@@ -80,8 +80,8 @@ public class ExchangeClient {
             httpClientBuilder = httpClientBuilder.sslContext(sslContext);
             sslCtx = SslContextBuilder.forClient()
                     .sslProvider(SslProvider.OPENSSL_REFCNT)
-                    .ciphers(Arrays.asList(CIPHERS))
-                    .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                    .trustManager(tmf)
+                    .keyManager(kmf)
                     .build();
         }
 
