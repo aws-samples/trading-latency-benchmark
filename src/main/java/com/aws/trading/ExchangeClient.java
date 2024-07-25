@@ -78,18 +78,17 @@ public class ExchangeClient {
             tmf.init(ks);
             sslContext.init(kmf.getKeyManagers(), tmf.getTrustManagers(), null);
             httpClientBuilder = httpClientBuilder.sslContext(sslContext);
+            sslCtx = SslContextBuilder.forClient()
+                    .sslProvider(SslProvider.OPENSSL_REFCNT)
+                    .ciphers(Arrays.asList(CIPHERS))
+                    .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                    .build();
         }
 
         this.bootstrap = configureBootstrap(ioGroup)
                 .handler(
-                        getChannelInitializer(workerGroup, handler,
-                                SslContextBuilder.forClient()
-                                        .sslProvider(SslProvider.OPENSSL_REFCNT)
-                                        .ciphers(Arrays.asList(CIPHERS))
-                                        .trustManager(InsecureTrustManagerFactory.INSTANCE)
-                                        .build()
-                        )
-        );
+                        getChannelInitializer(workerGroup, handler, sslCtx)
+                );
         this.workerGroup = workerGroup;
         this.httpClient = httpClientBuilder
                 .connectTimeout(Duration.ofSeconds(10))
