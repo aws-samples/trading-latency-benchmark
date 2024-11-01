@@ -154,6 +154,7 @@
       [ -f /home/ec2-user/.cargo/env ] && source /home/ec2-user/.cargo/env
       cd /home/ec2-user/mock-trading-server/
       cargo clean
+      cargo update
       cargo build --release
   - name: copy mock trading server configuration toml file
     copy:
