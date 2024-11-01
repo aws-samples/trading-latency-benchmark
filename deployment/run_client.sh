@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT-0
 
 # -Dio.netty.handler.ssl.openssl.engine=qatengine
-java -Xms16g -Xmx16g -XX:ConcGCThreads=32 -XX:+UseTransparentHugePages \
+java -Xms16g -Xmx16g -XX:ConcGCThreads=32 \
  -XX:+UnlockExperimentalVMOptions -XX:+UseZGC -XX:+TieredCompilation -XX:+UseLargePages \
  -XX:LargePageSizeInBytes=2m -XX:+UnlockDiagnosticVMOptions \
  -XX:+DoEscapeAnalysis -XX:+UseCompressedOops -XX:+UseTLAB \
