@@ -1,4 +1,4 @@
 private_key="/home/ec2-user/localhost.key"
 cert_chain="/home/ec2-user/localhost.crt"
 use_ssl="true"
-cipher_list="AES256-GCM-SHA384"
+cipher_list="ECDHE-RSA-AES128-GCM-SHA256"
