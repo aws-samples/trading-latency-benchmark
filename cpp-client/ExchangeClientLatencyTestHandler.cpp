@@ -26,7 +26,7 @@
 #include <unordered_map>
 #include <openssl/rand.h>
 //#include <hdr_histogram.h>
-#include "libs/HdrHistogram_c/include/hdr/hdr_histogram.h"
+#include "hdr/hdr_histogram.h"
 using namespace std;
 using json = nlohmann::json;
 

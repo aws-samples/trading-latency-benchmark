@@ -1,0 +1,60 @@
+# Build directories
+build/
+cmake-build-*/
+
+# IDE specific files (if using CLion, VS Code, etc)
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Compiled files
+*.o
+*.obj
+*.exe
+*.out
+*.app
+*.dll
+*.so
+*.dylib
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+.cmake/
+
+# Dependencies fetched by CMake
+_deps/
+
+# Debug symbols
+*.pdb
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Log files
+*.log
+
+# Core dumps
+core
+
+# Project specific binaries
+hft_client
+
+# Environment files if any
+.env
+*.env
+
+# Any local configuration files
+config.local.json
