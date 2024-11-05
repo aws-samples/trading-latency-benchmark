@@ -40,11 +40,15 @@ public:
 
 
 private:
-
+    using ssl_client = websocketpp::client<websocketpp::config::asio_tls_client>;
+    using non_ssl_client = websocketpp::client<websocketpp::config::asio_client>;
     int m_apiToken;
     std::string m_uri;
     ExchangeClientLatencyTestHandler m_handler;
-    client m_client;
+    std::unique_ptr<ExchangeClientLatencyTestHandler::ssl_client> m_ssl_client;
+    std::unique_ptr<ExchangeClientLatencyTestHandler::non_ssl_client> m_non_ssl_client;
+
+
     std::thread m_thread;
     // Other private members and methods, if needed
 

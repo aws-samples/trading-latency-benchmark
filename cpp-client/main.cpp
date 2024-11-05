@@ -20,9 +20,12 @@
 
 
 int main() {
-    int apiToken = 123456;
-    std::string uri = "wss://localhost:8888";
+    // Use the API_TOKEN from Config
+    int apiToken = Config::API_TOKEN;
+    // Construct the URI using HOST and WEBSOCKET_PORT from Config
+    std::string uri = Config::HOST + ":" + std::to_string(Config::WEBSOCKET_PORT);
     ExchangeClient client(apiToken, uri);
+    client.connect();
     // Use the client object to interact with the exchange
     return 0;
 }

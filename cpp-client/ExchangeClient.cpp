@@ -24,35 +24,90 @@ using websocketpp::lib::placeholders::_2;
 using websocketpp::lib::bind;
 
 ExchangeClient::ExchangeClient(int apiToken, const std::string& uri)
-        : m_apiToken(apiToken), m_uri(uri), m_handler(apiToken, uri) {
+    : m_apiToken(apiToken), m_uri(uri), m_handler(apiToken, uri) {
+    
     if (Config::USE_SSL) {
         logger("Using SSL");
-        m_client.set_tls_init_handler(bind(&ExchangeClient::tls_init_handler, this));
-    }
-    m_client.init_asio();
-    m_client.set_open_handler(bind(&ExchangeClientLatencyTestHandler::on_open, &m_handler, &m_client, ::_1));
-    m_client.set_close_handler(bind(&ExchangeClientLatencyTestHandler::on_close, &m_handler, &m_client, ::_1));
-    m_client.set_message_handler(bind(&ExchangeClientLatencyTestHandler::on_message, &m_handler, &m_client, ::_1, ::_2));
-    m_client.get_alog().clear_channels(websocketpp::log::alevel::frame_header |
-                                       websocketpp::log::alevel::frame_payload |
-                                       websocketpp::log::alevel::control);
-    websocketpp::lib::error_code ec;
-    client::connection_ptr con = m_client.get_connection(m_uri, ec);
-    if (ec) {
-        logger("Failed to create connection: " + ec.message());
-        return;
-    }
+        m_ssl_client = std::make_unique<ExchangeClientLatencyTestHandler::ssl_client>();
+        m_ssl_client->set_tls_init_handler(std::bind(&ExchangeClient::tls_init_handler, this));
+        m_ssl_client->init_asio();
+        m_ssl_client->set_open_handler(bind(&ExchangeClientLatencyTestHandler::on_open<ExchangeClientLatencyTestHandler::ssl_client>, &m_handler, m_ssl_client.get(), ::_1));
+        m_ssl_client->set_close_handler(bind(&ExchangeClientLatencyTestHandler::on_close<ExchangeClientLatencyTestHandler::ssl_client>, &m_handler, m_ssl_client.get(), ::_1));
+        m_ssl_client->set_message_handler(bind(&ExchangeClientLatencyTestHandler::on_message<ExchangeClientLatencyTestHandler::ssl_client>, &m_handler, m_ssl_client.get(), ::_1, ::_2));
 
-    m_client.connect(con);
-    m_client.run();
+        m_ssl_client->get_alog().clear_channels(websocketpp::log::alevel::frame_header |
+                                                websocketpp::log::alevel::frame_payload |
+                                                websocketpp::log::alevel::control);
+    } else {
+        logger("Not using SSL");
+        m_non_ssl_client = std::make_unique<ExchangeClientLatencyTestHandler::non_ssl_client>();
+        m_non_ssl_client->init_asio();
+        m_non_ssl_client->set_open_handler(bind(&ExchangeClientLatencyTestHandler::on_open<ExchangeClientLatencyTestHandler::non_ssl_client>, &m_handler, m_non_ssl_client.get(), ::_1));
+        m_non_ssl_client->set_close_handler(bind(&ExchangeClientLatencyTestHandler::on_close<ExchangeClientLatencyTestHandler::non_ssl_client>, &m_handler, m_non_ssl_client.get(), ::_1));
+        m_non_ssl_client->set_message_handler(bind(&ExchangeClientLatencyTestHandler::on_message<ExchangeClientLatencyTestHandler::non_ssl_client>, &m_handler, m_non_ssl_client.get(), ::_1, ::_2));
+    
+        m_non_ssl_client->get_alog().clear_channels(websocketpp::log::alevel::frame_header |
+                                                    websocketpp::log::alevel::frame_payload |
+                                                    websocketpp::log::alevel::control);
+    }
 }
 
 ExchangeClient::~ExchangeClient() {
-    m_client.stop();
+    if (Config::USE_SSL) {
+        m_ssl_client->stop();
+    } else {
+        m_non_ssl_client->stop();
+    }
     if (m_thread.joinable()) {
         m_thread.join();
     }
 }
+
+void ExchangeClient::connect() {
+    websocketpp::lib::error_code ec;
+    std::string uri = (Config::USE_SSL ? "wss://" : "ws://") + m_uri;
+    
+    if (Config::USE_SSL) {
+        auto con = m_ssl_client->get_connection(uri, ec);
+        if (ec) {
+            logger("Failed to create SSL connection: " + ec.message());
+            return;
+        }
+        m_ssl_client->connect(con);
+        m_ssl_client->run();
+    } else {
+        auto con = m_non_ssl_client->get_connection(uri, ec);
+        if (ec) {
+            logger("Failed to create non-SSL connection: " + ec.message());
+            return;
+        }
+        m_non_ssl_client->connect(con);
+        m_non_ssl_client->run();
+    }
+}
+
+void ExchangeClient::close() {
+    logger("WebSocket Client sending close");
+    if (Config::USE_SSL) {
+        m_ssl_client->close(m_handler.get_hdl(), websocketpp::close::status::going_away, "");
+    } else {
+        m_non_ssl_client->close(m_handler.get_hdl(), websocketpp::close::status::going_away, "");
+    }
+}
+
+void ExchangeClient::disconnect() {
+    logger("Disconnecting...");
+    if (Config::USE_SSL) {
+        if (m_ssl_client->get_con_from_hdl(m_handler.get_hdl())->get_state() == websocketpp::session::state::open) {
+            m_ssl_client->close(m_handler.get_hdl(), websocketpp::close::status::normal, "");
+        }
+    } else {
+        if (m_non_ssl_client->get_con_from_hdl(m_handler.get_hdl())->get_state() == websocketpp::session::state::open) {
+            m_non_ssl_client->close(m_handler.get_hdl(), websocketpp::close::status::normal, "");
+        }
+    }
+}
+
 std::shared_ptr<boost::asio::ssl::context> ExchangeClient::tls_init_handler() {
     std::shared_ptr<boost::asio::ssl::context> ctx = std::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tlsv12_client);
     try {
@@ -84,22 +139,5 @@ void ExchangeClient::addBalances(const std::string& qt) {
         // ...
     } catch (const std::exception& e) {
         logger("Error: " + std::string(e.what()));
-    }
-}
-
-void ExchangeClient::connect() {
-    logger("ExchangeClient is connecting via websocket to " + m_uri);
-    // No need to explicitly connect, as the connection is established in the constructor
-}
-
-void ExchangeClient::close() {
-    logger("WebSocket Client sending close");
-    m_client.close(m_handler.get_hdl(), websocketpp::close::status::going_away, "");
-}
-
-void ExchangeClient::disconnect() {
-    logger("Disconnecting...");
-    if (m_client.get_con_from_hdl(m_handler.get_hdl())->get_state() == websocketpp::session::state::open) {
-        m_client.close(m_handler.get_hdl(), websocketpp::close::status::normal, "");
     }
 }
