@@ -23,16 +23,22 @@
 #include <websocketpp/config/asio_client.hpp>
 #include "ExchangeProtocol.h"
 
-typedef websocketpp::client<websocketpp::config::asio_tls_client> client;
 
 class ExchangeClientLatencyTestHandler {
 public:
-    ExchangeClientLatencyTestHandler(int apiToken, const std::string& uri);
+    using ssl_client = websocketpp::client<websocketpp::config::asio_tls_client>;
+    using non_ssl_client = websocketpp::client<websocketpp::config::asio_client>;
 
-    void on_open(client* c, websocketpp::connection_hdl hdl);
-    void on_close(client* c, websocketpp::connection_hdl hdl);
-    void on_message(client* c, websocketpp::connection_hdl hdl, client::message_ptr msg);
-    void sendCancelOrder(client* c, string_view clientId, string_view pair);
+    ExchangeClientLatencyTestHandler(int apiToken, const std::string& uri);
+    
+    template<typename T>
+    void on_open(T* c, websocketpp::connection_hdl hdl);
+    
+    template<typename T>
+    void on_message(T* c, websocketpp::connection_hdl hdl, typename T::message_ptr msg);
+
+    template<typename T>
+    void on_close(T* c, websocketpp::connection_hdl hdl);
     websocketpp::connection_hdl get_hdl() const;
 
     virtual ~ExchangeClientLatencyTestHandler();
@@ -54,7 +60,10 @@ private:
     mt19937 gen;
     struct hdr_histogram* histogram;
     void hdrPrint();
-    void sendOrder(client* c, websocketpp::connection_hdl hdl);
+    template<typename T>
+    void sendOrder(T* c, websocketpp::connection_hdl hdl);
+    template<typename T>
+    void sendCancelOrder(T* c, websocketpp::connection_hdl hdl, string_view clientId, string_view pair);
     bool calculateRoundTrip(chrono::steady_clock::time_point eventReceiveTime,
                             string_view clientId,
                             unordered_map<string, chrono::steady_clock::time_point>& sentTimeMap);

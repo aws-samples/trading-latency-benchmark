@@ -51,38 +51,11 @@ ExchangeClientLatencyTestHandler::~ExchangeClientLatencyTestHandler() {
     }
 }
 
-void ExchangeClientLatencyTestHandler::on_message(client* c, websocketpp::connection_hdl hdl, client::message_ptr msg) {
-    auto eventReceiveTime = chrono::steady_clock::now();
-
-    auto parsedObject = json::parse(msg->get_payload());
-    string_view type = parsedObject["type"].get<string_view>();
-
-    if (type == "BOOKED" || type == "DONE") {
-        //LOGGER.info("eventTime: {}, received ACK: {}",eventReceiveTime, parsedObject);
-        string_view clientId = parsedObject["client_id"].get<string_view>();
-        if (type == "BOOKED") {
-            if (calculateRoundTrip(eventReceiveTime, clientId, orderSentTimeMap)) return;
-            string_view pair = parsedObject["instrument_code"].get<string_view>();
-            sendCancelOrder(c, clientId, pair);
-        } else {
-            if (calculateRoundTrip(eventReceiveTime, clientId, cancelSentTimeMap)) return;
-            sendOrder(c, hdl);
-        }
-        if (orderResponseCount % Config::TEST_SIZE == 0) {
-            hdrPrint();
-        }
-    } else if (type == "AUTHENTICATED") {
-        logger(parsedObject.dump());
-        websocketpp::lib::error_code ec;
-        c->send(hdl, ExchangeProtocol::SUBSCRIBE_MSG,websocketpp::frame::opcode::text, ec);
-    } else if (type == "SUBSCRIPTIONS") {
-        logger(parsedObject.dump());
-        this->testStartTime = chrono::steady_clock::now();
-        sendOrder(c, hdl);
-    } else {
-        logger("Unhandled object " + parsedObject.dump());
-    }
+string ExchangeClientLatencyTestHandler::authMessage() {
+    // Replace with your authentication message implementation
+    return ExchangeProtocol::AUTH_MSG_HEADER + std::to_string(m_apiToken) + ExchangeProtocol::MSG_END;
 }
+
 
 std::string uuid_v4_gen()
 {
@@ -100,34 +73,20 @@ std::string uuid_v4_gen()
         uint8_t __rnd[16];
     } uuid;
 
-    int rc = RAND_bytes(uuid.__rnd, sizeof(uuid));
+    RAND_bytes(uuid.__rnd, sizeof(uuid));
     // Refer Section 4.2 of RFC-4122
     // https://tools.ietf.org/html/rfc4122#section-4.2
     uuid.clk_seq_hi_res = (uint8_t) ((uuid.clk_seq_hi_res & 0x3F) | 0x80);
     uuid.time_hi_and_version = (uint16_t) ((uuid.time_hi_and_version & 0x0FFF) | 0x4000);
 
-    char buffer[38];
-    snprintf(buffer, 38, "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+    char buffer[37];
+    snprintf(buffer, sizeof(buffer), "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
              uuid.time_low, uuid.time_mid, uuid.time_hi_and_version,
              uuid.clk_seq_hi_res, uuid.clk_seq_low,
              uuid.node[0], uuid.node[1], uuid.node[2],
              uuid.node[3], uuid.node[4], uuid.node[5]);
 
     return std::string(buffer);
-}
-void ExchangeClientLatencyTestHandler::sendOrder(client* c, websocketpp::connection_hdl hdl) {
-//    static random_device rd;
-//    static mt19937 gen(rd());
-//    static uniform_int_distribution<> dis(0, Config::COIN_PAIRS.size() - 1);
-//    string pair = Config::COIN_PAIRS[dis(gen)];
-    string_view pair = Config::COIN_PAIRS[0];
-    auto clientId = uuid_v4_gen();
-    string order = protocol->createBuyOrder(pair, clientId);
-    websocketpp::lib::error_code ec;
-    c->send(hdl, order,websocketpp::frame::opcode::text, ec);
-    auto time = chrono::steady_clock::now();
-    orderSentTimeMap.insert(std::make_pair(string(clientId), time));
-    orderResponseCount += 1;
 }
 
 bool ExchangeClientLatencyTestHandler::calculateRoundTrip(chrono::steady_clock::time_point eventReceiveTime, string_view clientId, unordered_map<string, chrono::steady_clock::time_point>& sentTimeMap) {
@@ -179,29 +138,31 @@ websocketpp::connection_hdl ExchangeClientLatencyTestHandler::get_hdl() const{
     return this->hdl;
 }
 
-void ExchangeClientLatencyTestHandler::on_open(client* c, websocketpp::connection_hdl hdl) {
-    std::cout << "WebSocket client is connected" << std::endl;
-    std::cout << "WebSocket client is authenticating for " << m_apiToken << std::endl;
-    this->hdl = hdl;
+template<typename T>
+void ExchangeClientLatencyTestHandler::sendOrder(T* c, websocketpp::connection_hdl m_hdl) {
+//    static random_device rd;
+//    static mt19937 gen(rd());
+//    static uniform_int_distribution<> dis(0, Config::COIN_PAIRS.size() - 1);
+//    string pair = Config::COIN_PAIRS[dis(gen)];
+    string_view pair = Config::COIN_PAIRS[0];
+    auto clientId = uuid_v4_gen();
+    string order = protocol->createBuyOrder(pair, clientId);
+    // std::cout << order << std::endl;
     websocketpp::lib::error_code ec;
-    c->send(hdl, authMessage(), websocketpp::frame::opcode::text, ec);
+    c->send(m_hdl, order,websocketpp::frame::opcode::text, ec);
+    auto time = chrono::steady_clock::now();
+    orderSentTimeMap.insert(std::make_pair(string(clientId), time));
+    orderResponseCount += 1;
 }
 
-void ExchangeClientLatencyTestHandler::on_close(client* c, websocketpp::connection_hdl hdl) {
-    std::cout << "connection closed" << std::endl;
-}
-
-string ExchangeClientLatencyTestHandler::authMessage() {
-    // Replace with your authentication message implementation
-    return ExchangeProtocol::AUTH_MSG_HEADER + std::to_string(m_apiToken) + ExchangeProtocol::MSG_END;
-}
-
-void ExchangeClientLatencyTestHandler::sendCancelOrder(client* c, string_view clientId, string_view pair) {
+template<typename T>
+void ExchangeClientLatencyTestHandler::sendCancelOrder(T* c, websocketpp::connection_hdl m_hdl, string_view clientId, string_view pair) {
     string cancelOrder = protocol->createCancelOrder(pair, clientId);
     // std::cout << cancelOrder << std::endl;
     try {
         websocketpp::lib::error_code ec;
-        c->send(hdl, cancelOrder, websocketpp::frame::opcode::text, ec);
+        c->send(m_hdl, cancelOrder, websocketpp::frame::opcode::text, ec);
+        // std::cout << "cancel is sent" << std::endl;
     } catch (const exception& e) {
         logger(e.what());
     }
@@ -210,3 +171,66 @@ void ExchangeClientLatencyTestHandler::sendCancelOrder(client* c, string_view cl
     cancelSentTimeMap.insert(std::make_pair(string(clientId), cancelSentTime));
     orderResponseCount += 1;
 }
+
+template<typename T>
+void ExchangeClientLatencyTestHandler::on_message(T* c, websocketpp::connection_hdl m_hdl, typename T::message_ptr msg) {
+    auto eventReceiveTime = chrono::steady_clock::now();
+
+    auto parsedObject = json::parse(msg->get_payload());
+    string_view type = parsedObject["type"].template get<string_view>();
+
+
+    if (type == "BOOKED" || type == "DONE") {
+        // logger("Order ack received");
+        string_view clientId = parsedObject["client_id"].template get<string_view>();
+        if (type == "BOOKED") {
+            if (calculateRoundTrip(eventReceiveTime, clientId, orderSentTimeMap)) return;
+            string_view pair = parsedObject["instrument_code"].template get<string_view>();
+            sendCancelOrder(c, m_hdl, clientId, pair);
+        } else {
+            if (calculateRoundTrip(eventReceiveTime, clientId, cancelSentTimeMap)) return;
+            sendOrder(c, m_hdl);
+        }
+        if (orderResponseCount % Config::TEST_SIZE == 0) {
+            hdrPrint();
+        }
+    } else if (type == "AUTHENTICATED") {
+        logger(parsedObject.dump());
+        websocketpp::lib::error_code ec;
+        c->send(m_hdl, ExchangeProtocol::SUBSCRIBE_MSG,websocketpp::frame::opcode::text, ec);
+    } else if (type == "SUBSCRIPTIONS") {
+        logger(parsedObject.dump());
+        this->testStartTime = chrono::steady_clock::now();
+        sendOrder(c, m_hdl);
+    } else {
+        logger("Unhandled object " + parsedObject.dump());
+    }
+}
+
+template<typename T>
+void ExchangeClientLatencyTestHandler::on_open(T* c, websocketpp::connection_hdl m_hdl) {
+    logger("WebSocket client is connected");
+    websocketpp::lib::error_code ec;
+    c->send(m_hdl, authMessage(), websocketpp::frame::opcode::text, ec);
+    if (ec) {
+        logger("Error sending message: " + ec.message());
+    } else {
+        logger("WebSocket client is authenticating for " + std::to_string(m_apiToken));
+    }
+}
+
+template<typename T>
+void ExchangeClientLatencyTestHandler::on_close(T* c, websocketpp::connection_hdl hdl) {
+    logger("Connection closed");
+}
+
+template void ExchangeClientLatencyTestHandler::sendOrder<ExchangeClientLatencyTestHandler::ssl_client>(ssl_client* c, websocketpp::connection_hdl hdl);
+template void ExchangeClientLatencyTestHandler::sendOrder<ExchangeClientLatencyTestHandler::non_ssl_client>(non_ssl_client* c, websocketpp::connection_hdl hdl);
+template void ExchangeClientLatencyTestHandler::sendCancelOrder<ExchangeClientLatencyTestHandler::ssl_client>(ssl_client* c, websocketpp::connection_hdl hdl, string_view clientId, string_view pair);
+template void ExchangeClientLatencyTestHandler::sendCancelOrder<ExchangeClientLatencyTestHandler::non_ssl_client>(non_ssl_client* c, websocketpp::connection_hdl hdl, string_view clientId, string_view pair);
+template void ExchangeClientLatencyTestHandler::on_open<ExchangeClientLatencyTestHandler::ssl_client>(ssl_client* c, websocketpp::connection_hdl hdl);
+template void ExchangeClientLatencyTestHandler::on_open<ExchangeClientLatencyTestHandler::non_ssl_client>(non_ssl_client* c, websocketpp::connection_hdl hdl);
+template void ExchangeClientLatencyTestHandler::on_message<ExchangeClientLatencyTestHandler::ssl_client>(ssl_client* c, websocketpp::connection_hdl hdl, ssl_client::message_ptr msg);
+template void ExchangeClientLatencyTestHandler::on_message<ExchangeClientLatencyTestHandler::non_ssl_client>(non_ssl_client* c, websocketpp::connection_hdl hdl, non_ssl_client::message_ptr msg);
+template void ExchangeClientLatencyTestHandler::on_close<ExchangeClientLatencyTestHandler::ssl_client>(ssl_client* c, websocketpp::connection_hdl hdl);
+template void ExchangeClientLatencyTestHandler::on_close<ExchangeClientLatencyTestHandler::non_ssl_client>(non_ssl_client* c, websocketpp::connection_hdl hdl);
