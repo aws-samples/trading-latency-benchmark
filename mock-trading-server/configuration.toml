@@ -1,4 +1,11 @@
+# Mock Trading Server Configuration
+
+# SSL/TLS Configuration
 private_key="/home/ec2-user/localhost.key"
 cert_chain="/home/ec2-user/localhost.crt"
-use_ssl="true"
-cipher_list="ECDHE-RSA-AES128-GCM-SHA256"
+use_ssl=true
+cipher_list="ECDHE-RSA-AES128-GCM-SHA256,ECDHE-RSA-AES256-GCM-SHA384,TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384"
+
+# Server Configuration
+port=8888
+host="0.0.0.0"
