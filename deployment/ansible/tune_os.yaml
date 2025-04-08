@@ -1,0 +1,666 @@
+---
+# ultra_low_latency_trading.yml - Amazon Linux 2023 compatible
+- name: Configure Ultra-Low Latency Trading System
+  hosts: aws_ec2
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    backup_dir: "/root/system_tuning_backup_{{ ansible_date_time.date }}"
+    isolated_cores: "2-15"  # Isolated cores for trading applications
+    housekeeping_cores: "0-1"  # Cores for system tasks and IRQs
+    disable_services:
+      - bluetooth
+      - cups
+      - avahi-daemon
+      - ModemManager
+      - NetworkManager-wait-online
+      - amazon-ssm-agent  # Added per your guidelines
+    busy_poll_value: 50
+    busy_read_value: 50
+  
+  tasks:
+    - name: Create backup directory
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: '0700'
+
+    # ==========================================
+    # PACKAGE INSTALLATION
+    # ==========================================
+    - name: Install required packages for Amazon Linux 2023
+      ansible.builtin.dnf:
+        name:
+          - numactl
+          - ethtool
+          - perf
+          - procps-ng
+          - chrony
+          - hwloc
+          - util-linux-core
+          - sysstat
+        state: present
+
+    - name: Create customized tuned directory
+      ansible.builtin.file:
+        path: /etc/tuned/ultra-low-latency
+        state: directory
+        mode: '0755'
+
+    # ==========================================
+    # CPU TUNING
+    # ==========================================
+    - name: Disable hyperthreading (immediately)
+      ansible.builtin.shell: |
+        for cpunum in $(cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | cut -s -d, -f2- | tr ',' '\n' | sort -un); do
+          echo 0 > /sys/devices/system/cpu/cpu$cpunum/online
+        done
+      changed_when: true
+      ignore_errors: yes
+    
+    - name: Set CPU to performance governor (apply immediately)
+      ansible.builtin.shell: |
+        for CPU in /sys/devices/system/cpu/cpu*/cpufreq/; do
+          if [ -f "${CPU}scaling_governor" ]; then
+            echo performance > ${CPU}scaling_governor
+          fi
+        done
+      changed_when: true
+
+    - name: Set CPU to max frequency (Intel)
+      ansible.builtin.shell: |
+        if [ -f /sys/devices/system/cpu/intel_pstate/min_perf_pct ]; then
+          echo 100 > /sys/devices/system/cpu/intel_pstate/min_perf_pct
+        fi
+      changed_when: true
+      ignore_errors: yes
+
+    - name: Set CPU to max frequency (AMD)
+      ansible.builtin.shell: |
+        for CPU in /sys/devices/system/cpu/cpu*/cpufreq/; do
+          if [ -f "${CPU}scaling_min_freq" ] && [ -f "${CPU}scaling_max_freq" ]; then
+            cat "${CPU}scaling_max_freq" > "${CPU}scaling_min_freq"
+          fi
+        done
+      changed_when: true
+      ignore_errors: yes
+
+    - name: Move kernel workqueues to housekeeping CPUs
+      ansible.builtin.shell: |
+        find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo 3 > {}' ';'
+      changed_when: true
+      ignore_errors: yes
+
+    - name: Configure NUMA affinity for writeback threads
+      ansible.builtin.shell: |
+        echo 0 | tee /sys/bus/workqueue/devices/writeback/numa
+      changed_when: true
+      ignore_errors: yes
+
+    - name: Disable CPU throttling
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/intel-pstate.conf
+        content: |
+          options intel_pstate no_hwp=1
+          options intel_pstate turbo_pct=100
+          options processor ignore_ppc=1
+        mode: '0644'
+
+    - name: Disable AMD CPU energy feature
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/amd-energy.conf
+        content: |
+          blacklist amd_energy
+        mode: '0644'
+      ignore_errors: yes
+
+    - name: Configure CPU isolation and kernel boot options in GRUB
+      ansible.builtin.lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX="(?!.*(intel_idle\.max_cstate))'
+        line: 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX transparent_hugepage=never audit=0 nmi_watchdog=0 nohz=on clocksource=tsc nosoftlockup mce=ignore_ce cpuidle.off=1 skew_tick=1 acpi_irq_nobalance intel_pstate=disable intel_idle.max_cstate=0 processor.max_cstate=0 idle=poll isolcpus={{ isolated_cores }} nohz_full={{ isolated_cores }} rcu_nocbs={{ isolated_cores }} tsc=reliable"'
+        backrefs: yes
+      register: grub_updated
+
+    - name: Update GRUB configuration
+      ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
+      when: grub_updated.changed
+
+    - name: Configure CPU partitioning variables
+      ansible.builtin.copy:
+        dest: /etc/tuned/cpu-partitioning-variables.conf
+        content: |
+          # Reserve CPUs 0-1 for system, {{ isolated_cores }} for trading application
+          isolated_cores={{ isolated_cores }}
+          no_balance_cores={{ isolated_cores }}
+        mode: '0644'
+      register: cpu_partitioning
+
+    # ==========================================
+    # MEMORY TUNING
+    # ==========================================
+    - name: Disable Transparent Huge Pages (apply immediately)
+      ansible.builtin.shell: |
+        if [ -d /sys/kernel/mm/transparent_hugepage ]; then
+          echo never > /sys/kernel/mm/transparent_hugepage/enabled
+          echo never > /sys/kernel/mm/transparent_hugepage/defrag
+          if [ -f /sys/kernel/mm/transparent_hugepage/khugepaged/defrag ]; then
+            echo 0 > /sys/kernel/mm/transparent_hugepage/khugepaged/defrag
+          fi
+        fi
+      changed_when: true
+      ignore_errors: yes
+
+    - name: Create THP disable service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/disable-thp.service
+        content: |
+          [Unit]
+          Description=Disable Transparent Huge Pages
+          After=syslog.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/sh -c "if [ -d /sys/kernel/mm/transparent_hugepage ]; then echo never > /sys/kernel/mm/transparent_hugepage/enabled; echo never > /sys/kernel/mm/transparent_hugepage/defrag; if [ -f /sys/kernel/mm/transparent_hugepage/khugepaged/defrag ]; then echo 0 > /sys/kernel/mm/transparent_hugepage/khugepaged/defrag; fi; fi"
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable THP disable service
+      ansible.builtin.systemd:
+        name: disable-thp.service
+        enabled: yes
+        daemon_reload: yes
+
+    # Calculate memory settings in shell and handle all calculations there
+    - name: Calculate memory settings and shared memory values
+      ansible.builtin.shell: |
+        TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        TOTAL_MEM_MB=$((TOTAL_MEM_KB / 1024))
+        HUGE_PAGES=$((TOTAL_MEM_MB / 4 / 2))
+        SHM_MAX=$((TOTAL_MEM_KB * 1024 / 2))
+        SHM_ALL=$((TOTAL_MEM_KB * 256))
+        echo "$HUGE_PAGES" > /proc/sys/vm/nr_hugepages 2>/dev/null || true
+        echo "$HUGE_PAGES;$SHM_MAX;$SHM_ALL"
+      changed_when: true
+      register: mem_calculations
+
+    # Parse the shell output and set variables
+    - name: Set memory variables from shell calculations
+      ansible.builtin.set_fact:
+        huge_pages: "{{ mem_calculations.stdout.split(';')[0] }}"
+        shmmax: "{{ mem_calculations.stdout.split(';')[1] }}"
+        shmall: "{{ mem_calculations.stdout.split(';')[2] }}"
+
+    - name: Configure memory tuning parameters
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-trading-memory.conf
+        content: |
+          vm.swappiness = 0
+          vm.zone_reclaim_mode = 0
+          vm.max_map_count = 262144
+          vm.min_free_kbytes = 1000000
+          vm.dirty_ratio = 80
+          vm.dirty_background_ratio = 5
+          vm.vfs_cache_pressure = 50
+          vm.nr_hugepages = {{ huge_pages }}
+
+          # Shared memory limits for IPC
+          kernel.shmmax = {{ shmmax }}
+          kernel.shmall = {{ shmall }}
+
+          # Mlock all pages
+          vm.mlockall = 1
+
+          # Compaction tuning to reduce latency spikes
+          vm.compaction_proactiveness = 0
+          vm.compact_unevictable_allowed = 0
+
+          # IO configuration - explicit control over dirty page handling
+          vm.dirty_background_bytes = 33554432
+          vm.dirty_bytes = 268435456
+          vm.dirty_expire_centisecs = 3000
+          vm.dirty_writeback_centisecs = 10
+        mode: '0644'
+
+    # ==========================================
+    # NETWORK TUNING
+    # ==========================================
+    - name: Configure network stack
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-trading-network.conf
+        content: |
+          # General network optimization
+          net.core.rmem_max = 16777216
+          net.core.wmem_max = 16777216
+          # Disable netfilter on loopback
+          net.ipv4.conf.lo.rp_filter = 0
+          net.core.rmem_default = 2097152
+          net.core.wmem_default = 2097152
+          net.core.optmem_max = 16777216
+          net.core.netdev_max_backlog = 1000000
+          net.core.somaxconn = 65536
+          net.core.netdev_budget = 600
+          net.core.flow_limit_table_len = 8192
+          net.core.default_qdisc = noqueue
+
+          # TCP stack optimization for low latency
+          net.ipv4.tcp_low_latency = 1
+          net.ipv4.tcp_timestamps = 0
+          net.ipv4.tcp_sack = 0
+          net.ipv4.tcp_dsack = 0
+          net.ipv4.tcp_slow_start_after_idle = 0
+          net.ipv4.tcp_fastopen = 3
+          net.ipv4.tcp_tw_reuse = 1
+          net.ipv4.tcp_rmem = 4096 1048576 2097152
+          net.ipv4.tcp_wmem = 4096 1048576 2097152
+          net.ipv4.tcp_mtu_probing = 1
+          net.ipv4.tcp_fin_timeout = 5
+          net.ipv4.tcp_keepalive_time = 60
+          net.ipv4.tcp_max_syn_backlog = 8192
+          net.ipv4.tcp_adv_win_scale = 2
+          net.ipv4.ip_local_port_range = 1024 65535
+          net.ipv4.tcp_notsent_lowat = 16384
+          net.ipv4.tcp_window_scaling = 1
+          net.ipv4.route.flush = 1
+
+          # UDP tuning for market data
+          net.ipv4.udp_rmem_min = 8192
+          net.ipv4.udp_wmem_min = 8192
+          net.ipv4.udp_mem = 65536 131072 262144
+
+          # Disable routing features
+          net.ipv4.conf.all.accept_redirects = 0
+          net.ipv4.conf.default.accept_redirects = 0
+          net.ipv4.conf.all.secure_redirects = 0
+          net.ipv4.conf.default.secure_redirects = 0
+          net.ipv4.conf.all.accept_source_route = 0
+          net.ipv4.conf.default.accept_source_route = 0
+          
+          # Enable busy polling for lower latency
+          net.core.busy_poll = {{ busy_poll_value }}
+          net.core.busy_read = {{ busy_read_value }}
+
+          # Increase multicast settings for market data
+          net.ipv4.igmp_max_memberships = 5000
+        mode: '0644'
+    - name: Configure interrupt affinity
+      ansible.builtin.shell: |
+        # Move all interrupts to housekeeping cores
+        for IRQ_DIR in /proc/irq/[0-9]*; do
+          if [ -d "\$IRQ_DIR" ] && [ -f "\$IRQ_DIR/smp_affinity_list" ]; then
+            echo "0-1" > "\$IRQ_DIR/smp_affinity_list" 2>/dev/null || true
+          fi
+        done
+      changed_when: true
+      ignore_errors: yes
+    - name: Get network interfaces
+      ansible.builtin.shell: ip -o link show | grep -v "lo" | awk '{print $2}' | cut -d':' -f1
+      register: network_interfaces
+      changed_when: false
+
+    - name: Configure network interfaces
+      ansible.builtin.blockinfile:
+        path: "/etc/NetworkManager/dispatcher.d/99-trading-{{ item }}.sh"
+        create: yes
+        mode: '0755'
+        block: |
+          #!/bin/bash
+          if [[ "$1" == "{{ item }}" && "$2" == "up" ]]; then
+            # Disable all offloading features as per guidelines
+            /sbin/ethtool -K {{ item }} rx off tx off sg off gso off gro off || true
+            
+            # Disable adaptive interrupt coalescing, set static moderation
+            /sbin/ethtool -C {{ item }} adaptive-rx off rx-usecs 1 tx-usecs 1 || true
+            
+            # Increase ring buffer sizes
+            /sbin/ethtool -G {{ item }} rx 4096 tx 4096 || true
+            
+            # Configure static IP (disable DHCP client)
+            if [[ "{{ item }}" == "eth0" ]]; then
+              IP_ADDR=$(ip -4 addr show dev {{ item }} | grep 'inet' | awk '{ print $2 }')
+              BRD_ADDR=$(ip -4 addr show dev {{ item }} | grep 'inet' | awk '{ print $4 }')
+              if [ ! -z "$IP_ADDR" ] && [ ! -z "$BRD_ADDR" ]; then
+                /usr/bin/dhclient -x -pf /var/run/dhclient-{{ item }}.pid || true
+                /usr/sbin/ip addr change $IP_ADDR brd $BRD_ADDR scope global dev {{ item }} valid_lft forever preferred_lft forever || true
+              fi
+            fi
+          fi
+      loop: "{{ network_interfaces.stdout_lines }}"
+
+    - name: Apply network optimizations immediately
+      ansible.builtin.shell: |
+        for IFACE in $(ip -o link show | grep -v "lo" | awk '{print $2}' | cut -d':' -f1); do
+          # Disable offloading features
+          ethtool -K $IFACE rx off tx off sg off gso off gro off || true
+          
+          # Disable adaptive interrupt coalescing
+          ethtool -C $IFACE adaptive-rx off rx-usecs 1 tx-usecs 1 || true
+          
+          # Increase ring buffer sizes if supported
+          ethtool -g $IFACE | grep -q "Pre-set maximums" && ethtool -G $IFACE rx 4096 tx 4096 || true
+        done
+      changed_when: true
+      ignore_errors: yes
+
+    # Configure Receive-Side Scaling (RSS) immediately
+    - name: Configure RSS (Receive Side Scaling)
+      ansible.builtin.shell: |
+        if [ -d /proc/irq ]; then
+          IRQS=($(grep eth0 /proc/interrupts | awk '{print $1}' | tr -d :))
+          for i in ${!IRQS[@]}; do 
+            echo $((i % 2)) > /proc/irq/${IRQS[i]}/smp_affinity_list || true
+          done
+        fi
+      changed_when: true
+      ignore_errors: yes
+
+    # Configure Transmit Packet Steering (TPS)
+    - name: Configure TPS (Transmit Packet Steering)
+      ansible.builtin.shell: |
+        TXQUEUES=($(ls -1qdv /sys/class/net/eth0/queues/tx-* 2>/dev/null || echo ""))
+        if [ ! -z "$TXQUEUES" ]; then
+          for i in ${!TXQUEUES[@]}; do
+            printf '%x' $((2**i)) > ${TXQUEUES[i]}/xps_cpus || true
+          done
+        fi
+      changed_when: true
+      ignore_errors: yes
+
+    # ==========================================
+    # TIME SYNCHRONIZATION
+    # ==========================================
+    - name: Configure chrony for precise time
+      ansible.builtin.copy:
+        dest: /etc/chrony.conf
+        content: |
+          # Use Amazon Time Sync Service
+          server 169.254.169.123 prefer iburst minpoll 4 maxpoll 4
+
+          # Record rate at which system clock gains/loses time
+          driftfile /var/lib/chrony/drift
+
+          # Allow clock to step in the first three updates
+          makestep 0.1 3
+
+          # Enable kernel synchronization of real-time clock
+          rtcsync
+
+          # Enable hardware timestamping if available
+          hwtimestamp *
+
+          # Increase logging
+          logchange 0.1
+          log measurements statistics tracking
+
+          # Serve time even when not synchronized
+          local stratum 10
+        mode: '0644'
+      register: chrony_conf
+
+    - name: Restart and enable chrony
+      ansible.builtin.systemd:
+        name: chronyd
+        state: restarted
+        enabled: yes
+      when: chrony_conf.changed
+
+    # ==========================================
+    # SYSTEM LIMITS AND KERNEL PARAMETERS
+    # ==========================================
+    - name: Configure system limits for trading users
+      ansible.builtin.copy:
+        dest: /etc/security/limits.d/99-trading-limits.conf
+        content: |
+          # Increase file descriptor limits
+          *               soft    nofile          1048576
+          *               hard    nofile          1048576
+
+          # Allow locking unlimited memory
+          *               soft    memlock         unlimited
+          *               hard    memlock         unlimited
+
+          # Increase max user processes
+          *               soft    nproc           65536
+          *               hard    nproc           65536
+
+          # Set real-time priorities
+          *               soft    rtprio          99
+          *               hard    rtprio          99
+
+          # Set real-time scheduling
+          *               soft    nice           -20
+          *               hard    nice           -20
+        mode: '0644'
+
+    - name: Configure kernel scheduler parameters
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-trading-kernel.conf
+        content: |
+          # CPU scheduler tuning
+          kernel.sched_min_granularity_ns = 10000000
+          kernel.sched_migration_cost_ns = 5000000
+          kernel.sched_wakeup_granularity_ns = 15000000
+          kernel.sched_latency_ns = 60000000
+          kernel.sched_rt_runtime_us = 990000  # 99% instead of -1 to avoid system lockups
+          
+          # Disable watchdog
+          kernel.watchdog = 0
+          kernel.nmi_watchdog = 0
+          kernel.softlockup_panic = 0
+          
+          # Other kernel settings
+          kernel.numa_balancing = 0
+          kernel.timer_migration = 0
+          kernel.panic_on_oops = 1
+          kernel.panic_on_rcu_stall = 1
+          kernel.printk = 3 3 3 3
+          kernel.perf_event_paranoid = -1
+        mode: '0644'
+
+    - name: Disable syscall auditing but leave auditd functioning
+      ansible.builtin.copy:
+        dest: /etc/audit/rules.d/disable-syscall-auditing.rules
+        content: |
+          -a never,task
+        mode: '0644'
+      ignore_errors: yes
+
+    # ==========================================
+    # I/O AND DISK TUNING
+    # ==========================================
+    - name: Apply I/O scheduler optimizations immediately
+      ansible.builtin.shell: |
+        for DISK in $(lsblk -d -o NAME | grep -v NAME); do
+          if [ -f "/sys/block/$DISK/queue/scheduler" ]; then
+            # Use mq-deadline scheduler (from guidelines)
+            echo "mq-deadline" > /sys/block/$DISK/queue/scheduler 2>/dev/null || echo "none" > /sys/block/$DISK/queue/scheduler || true
+            
+            # Configure FIFO batch if available
+            if [ -f "/sys/block/$DISK/queue/iosched/fifo_batch" ]; then
+              echo 1 > /sys/block/$DISK/queue/iosched/fifo_batch || true
+            fi
+            
+            # Other block settings
+            echo 0 > /sys/block/$DISK/queue/add_random || true
+            echo 0 > /sys/block/$DISK/queue/iostats || true
+            echo 32 > /sys/block/$DISK/queue/read_ahead_kb || true
+            
+            if [ -f "/sys/block/$DISK/queue/rotational" ]; then
+              echo 0 > /sys/block/$DISK/queue/rotational || true
+            fi
+            if [ -f "/sys/block/$DISK/queue/nomerges" ]; then
+              echo 2 > /sys/block/$DISK/queue/nomerges || true
+            fi
+            
+            # Set larger IO queue size for NVMe drives
+            if [[ $DISK == nvme* ]]; then
+              echo 1024 > /sys/block/$DISK/queue/nr_requests || true
+            fi
+          fi
+        done
+      changed_when: true
+      ignore_errors: yes
+
+    - name: Configure persistent I/O settings
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/99-trading-disk.rules
+        content: |
+          # Set scheduler to mq-deadline for all disks
+          ACTION=="add|change", KERNEL=="sd[a-z]|nvme[0-9]n[0-9]", ATTR{queue/scheduler}="mq-deadline"
+          ACTION=="add|change", KERNEL=="sd[a-z]|nvme[0-9]n[0-9]", ATTR{queue/add_random}="0"
+          ACTION=="add|change", KERNEL=="sd[a-z]|nvme[0-9]n[0-9]", ATTR{queue/iostats}="0"
+          ACTION=="add|change", KERNEL=="sd[a-z]|nvme[0-9]n[0-9]", ATTR{queue/read_ahead_kb}="32"
+          ACTION=="add|change", KERNEL=="sd[a-z]|nvme[0-9]n[0-9]", ATTR{queue/nomerges}="2"
+        mode: '0644'
+
+    # ==========================================
+    # SERVICE OPTIMIZATION - FIXED
+    # ==========================================
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
+    - name: Stop and disable irqbalance service
+      ansible.builtin.systemd:
+        name: irqbalance
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+
+    - name: Stop and disable unnecessary services if they exist
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop: "{{ disable_services }}"
+      when: item in ansible_facts.services
+      ignore_errors: yes
+
+    - name: Disable iptables
+      ansible.builtin.shell: |
+        modprobe -rv ip_tables || true
+      changed_when: true
+      ignore_errors: yes
+
+    - name: Configure ultra-low-latency tuned profile
+      ansible.builtin.copy:
+        dest: /etc/tuned/ultra-low-latency/tuned.conf
+        content: |
+          [main]
+          summary=Ultra-low latency profile for trading applications
+
+          [cpu]
+          force_latency=0
+          governor=performance
+
+          [vm]
+          transparent_hugepages=never
+
+          [sysctl]
+          kernel.numa_balancing=0
+          kernel.timer_migration=0
+        mode: '0644'
+
+    # ==========================================
+    # APPLY SYSCTL SETTINGS
+    # ==========================================
+    - name: Apply sysctl settings
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+
+    # ==========================================
+    # GENERATE REPORT
+    # ==========================================
+    - name: Get instance type information
+      ansible.builtin.shell: "curl -s http://169.254.169.254/latest/meta-data/instance-type || echo 'Not on EC2'"
+      register: instance_type
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Generate system report
+      ansible.builtin.copy:
+        dest: /root/trading_system_tuning_report.txt
+        content: |
+          ====================================================
+          ULTRA-LOW LATENCY TRADING SYSTEM TUNING REPORT
+          ====================================================
+          Date: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+          Hostname: {{ ansible_hostname }}
+          Instance Type: {{ instance_type.stdout }}
+          CPU: {{ ansible_processor[2] | default(ansible_processor[0]) }}
+          Kernel: {{ ansible_kernel }}
+          
+          APPLIED OPTIMIZATIONS:
+          1. CPU: 
+            - Disabled hyperthreading
+            - Disabled C-states & P-states, set performance governor
+            - Isolated cores ({{ isolated_cores }}) for trading applications
+            - Moved all kernel workqueues to cores {{ housekeeping_cores }}
+            - Set TSC as clock source
+          
+          2. Memory: 
+            - Disabled THP, configured explicit hugepages ({{ huge_pages }})
+            - Set VM dirty ratios for optimal I/O
+            - Disabled NUMA balancing
+          
+          3. Network: 
+            - Optimized TCP/IP stack for lowest latency
+            - Disabled all hardware offloading features
+            - Set static interrupt moderation (1 usec)
+            - Configured RSS and TPS for optimized packet processing
+            - Set static IP to avoid DHCP latency spikes
+          
+          4. I/O: 
+            - Set mq-deadline scheduler
+            - Optimized NVMe settings
+            - Disabled block layer statistics and entropy collection
+          
+          5. System: 
+            - Disabled unnecessary services including irqbalance
+            - Disabled iptables/firewall
+            - Disabled syscall auditing
+            - Configured RT priorities for trading processes
+          
+          6. Time Sync: 
+            - Configured Chrony for precise timing with AWS timeservers
+          
+          VALIDATION COMMANDS:
+          - Check hyperthreading: lscpu | grep Thread
+          - Check hugepages: grep Huge /proc/meminfo
+          - Check network offload: ethtool -k eth0
+          - Check isolated CPUs: cat /sys/devices/system/cpu/isolated
+          - Check scheduler: cat /sys/block/nvme0n1/queue/scheduler
+          - Check latency: ping -c 100 -i 0.01 127.0.0.1 | grep min/avg/max
+          ====================================================
+        mode: '0644'
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg: |
+          Ultra-low latency system tuning completed!
+          A system reboot is REQUIRED to apply all changes
+          Review the report at /root/trading_system_tuning_report.txt
+          
+          After reboot, verify with:
+          - cat /proc/cmdline (check kernel parameters)
+          - cat /sys/devices/system/cpu/isolated (check CPU isolation)
+          - cat /sys/kernel/mm/transparent_hugepage/enabled (should be "never")
+          - grep Huge /proc/meminfo (check hugepages)
+          
+          Run latency tests:
+          - Run your trading app on isolated cores using taskset/numactl
+          - Test network latency with specialized tools
+
+    # ==========================================
+    # REBOOT SYSTEM
+    # ==========================================
+    - name: Reboot system to apply all changes
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+        post_reboot_delay: 30
+        msg: "Rebooting to apply ultra-low latency tuning"
+        connect_timeout: 60
+        test_command: uptime

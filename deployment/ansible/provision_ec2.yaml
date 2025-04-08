@@ -119,7 +119,7 @@
     args:
       creates: keystore.p12
       
-  - name: copy run without engine script to ec2
+  - name: copy run client script to ec2
     copy:
       src: ../run_client.sh
       dest: /home/ec2-user/run_client.sh
@@ -128,7 +128,16 @@
       mode: 0755
     tags:
       - deploy
-      
+  - name: copy run server script to ec2
+    copy:
+      src: ../run_server.sh
+      dest: /home/ec2-user/run_server.sh
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy   
+
   - name: copy stop script to ec2
     copy:
       src: ../stop.sh

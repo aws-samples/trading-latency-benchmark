@@ -234,14 +234,36 @@ Because we tested such high rates of message per second, HDR Histogram can grow 
 Before starting tests we warmed up JVM processes by sending/receiving orders without measuring time. This enables JIT compiler to compile and optimize the code during runtime. Also we restarted processes every hour to reduce memory defragmentation. Since HDR is accumulative this can be done without effecting results. Also to reduce GC pressure following JVM parameters are applied at the client level;
 
 ```bash
-java -Xms16g -Xmx16g -XX:ConcGCThreads=32 -XX:+UseTransparentHugePages \
--XX:+UnlockExperimentalVMOptions -XX:+UseZGC -XX:+TieredCompilation -XX:+UseLargePages \
--XX:LargePageSizeInBytes=2m -XX:+UnlockDiagnosticVMOptions \
--XX:+DoEscapeAnalysis -XX:+UseCompressedOops -XX:+UseTLAB \
--XX:+UseCompressedOops -XX:InitiatingHeapOccupancyPercent=60 \
+# Add NUMA binding to separate from server memory
+numactl --membind=1 taskset -c 10-15 chrt -f 80 java \
+-Xms8g -Xmx8g \
+-XX:+AlwaysPreTouch \
+-XX:+UseLargePages \
+-XX:LargePageSizeInBytes=2m \
+-XX:+UnlockExperimentalVMOptions \
+-XX:+UseZGC \
+-XX:ConcGCThreads=2 \
+-XX:ZCollectionInterval=300 \
 -XX:+UseNUMA \
--server -Dsun.rmi.dgc.server.gcInterval=0x7FFFFFFFFFFFFFFE \
--Dsun.rmi.dgc.client.gcInterval=0x7FFFFFFFFFFFFFFE -Dfile.encoding=UTF \
+-XX:+UnlockDiagnosticVMOptions \
+-XX:GuaranteedSafepointInterval=0 \
+-XX:+UseCountedLoopSafepoints \
+-XX:+DisableExplicitGC \
+-XX:+DoEscapeAnalysis \
+-XX:+OptimizeStringConcat \
+-XX:+UseCompressedOops \
+-XX:+UseTLAB \
+-XX:+UseThreadPriorities \
+-XX:ThreadPriorityPolicy=1 \
+-XX:CompileThreshold=1000 \
+-XX:+TieredCompilation \
+-XX:CompileCommand=inline,com.aws.trading.*::* \
+-XX:-UseBiasedLocking \
+-Djava.nio.channels.spi.SelectorProvider=sun.nio.ch.EPollSelectorProvider \
+-Dsun.rmi.dgc.server.gcInterval=0x7FFFFFFFFFFFFFFE \
+-Dsun.rmi.dgc.client.gcInterval=0x7FFFFFFFFFFFFFFE \
+-Dfile.encoding=UTF-8 \
+-server \
 -jar ExchangeFlow-1.0-SNAPSHOT.jar latency-test
 ```
 
