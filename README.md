@@ -1,12 +1,12 @@
 # AWS EC2 Network Latency Test Stack for Trading Use Cases
 
-This repository contains a network latency test stack that consists of Java based trading client and Ansible playbooks to coordinate 
+This repository contains a network latency test stack that consists of a Java-based trading client and Ansible playbooks to coordinate 
 distributed tests.
 
-Java based trading client is designed to send limit and cancel orders,
+The Java-based trading client is designed to send limit and cancel orders,
 allowing you to measure round-trip times of the network communication.
 
-This repository also contains mock trading server that is developed in Rust. It responds to limit and cancel orders. 
+This repository also contains a mock trading server developed in Rust that responds to limit and cancel orders.
 
 ## Table of Contents
 
@@ -16,6 +16,7 @@ This repository also contains mock trading server that is developed in Rust. It 
 - [Deployment with Ansible](#deployment-with-ansible)
 - [Start Running Tests](#start-running-tests)
 - [Fetch and Analyze Logs](#fetch-and-analyze-logs)
+- [Available Commands](#available-commands)
 - [Generating Self Signed Certificates for Testing SSL connections](#generating-self-signed-certificates-for-testing-ssl-connections)
 - [Optimization used for Java Client](#optimization-used-for-java-client)
 - [Contributing](#contributing)
@@ -28,6 +29,8 @@ Before you can use this network latency test stack, you'll need to ensure that y
 
 **Java Development Kit (JDK)**: You'll need a JDK installed on your machine to compile and run the Java client. You can download the JDK from [OpenJDK](https://adoptopenjdk.net/) or [Oracle](https://www.oracle.com/java/).
 
+**OpenSSL**: Required for generating self-signed certificates for SSL/TLS connections.
+
 
 ## Getting Started
 ### Deployment with Ansible
@@ -38,7 +41,7 @@ Before you can use this network latency test stack, you'll need to ensure that y
 4. Run `deploy.sh`, The deploy.sh script handles deploying the application and dependencies to EC2 instances. It makes use of Ansible to provision the instances and run the deployment tasks.
 
 The `deploy.sh` script will:
-1. Provision instances and deploys client and server to set of ec2 instances defined in inventory file.:
+1. Provision instances and deploys client and server to set of ec2 instances defined in inventory file
 2. Builds the hft java client and rust mock trading server applications on instances
 3. Creates self-signed ssl files on the remote ec2 instances  
 4. Copies across key scripts and config files for both client and server
@@ -50,29 +53,68 @@ The `deploy.sh` script will:
 
 The playbook defines tasks to:
 
-    Stop the exchange client
-    Start the exchange client processes in screen on the client instances
+- Stop the exchange client
+- Start the exchange client processes in tmux on the client instances
 
-You can monitor client logs from `/home/ec2-user/output.log`and server logs from `/home/ec2-user/mock-trading-server/target/release/output.log`
+You can monitor client logs from `/home/ec2-user/output.log` and server logs from `/home/ec2-user/mock-trading-server/target/release/output.log`
 
 ### Fetch and Analyze Logs
 
 `deployment/show_latency_reports.sh` script fetches latency histogram logs from EC2 instances and analyzes them locally.
-Usage
 
-1. Open show_latency_reports.sh`
-2. set INVENTORY 
-3. set SSH_KEY_FILE
-4. run show_latency_reports.sh
+#### Usage
 
-Workflow
+You can run the script with the following options:
+
+```bash
+./deployment/show_latency_reports.sh [--inventory INVENTORY_FILE] [--key SSH_KEY_FILE] [--output OUTPUT_DIR]
+```
+
+For example:
+```bash
+./deployment/show_latency_reports.sh --inventory ./ansible/inventory/virginia_inventory.aws_ec2.yml --key ~/.ssh/virginia_keypair.pem
+```
+
+Or you can manually:
+
+1. Open `show_latency_reports.sh`
+2. Set `INVENTORY` 
+3. Set `SSH_KEY_FILE`
+4. Run `show_latency_reports.sh`
+
+#### Workflow
 
 The script performs the following steps:
 
-    Runs the fetch_histogram_logs.yaml Ansible playbook to copy logs from instances
-    Loops through fetched log files
-    Calls a Java program to analyze each log
-    The program outputs latency reports
+- Runs the fetch_histogram_logs.yaml Ansible playbook to copy logs from instances
+- Loops through fetched log files
+- Calls a Java program to analyze each log
+- The program outputs latency reports
+- Generates a summary report in Markdown format
+
+## Available Commands
+
+The Java application supports the following commands:
+
+```bash
+java -jar ExchangeFlow-1.0-SNAPSHOT.jar <command> [<args>]
+```
+
+Available commands:
+
+- `latency-test`: Run round-trip latency test between client and server
+- `ping-latency`: Run ping latency test to measure network round-trip time
+- `latency-report <path>`: Generate and print latency report from log file
+- `help`: Print help message
+
+Examples:
+```bash
+# Run latency test
+java -jar ExchangeFlow-1.0-SNAPSHOT.jar latency-test
+
+# Generate latency report from log file
+java -jar ExchangeFlow-1.0-SNAPSHOT.jar latency-report ./histogram_logs/latency.hlog
+```
 
 ### Generating Self Signed Certificates for Testing SSL connections
 
@@ -109,6 +151,9 @@ Enable SSL usage by setting use_ssl=true in its `configuration.toml` file.
 private_key = "/path/to/localhost.key"
 cert_chain = "/path/to/localhost.crt"
 use_ssl = true
+cipher_list = "ECDHE-RSA-AES128-GCM-SHA256"
+port = 8888
+host = "0.0.0.0"
 ```
 
 ## Optimization used for Java Client
@@ -213,4 +258,3 @@ See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more inform
 ## License
 
 This library is licensed under the MIT-0 License. See the LICENSE file.
-
