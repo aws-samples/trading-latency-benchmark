@@ -235,11 +235,9 @@ Before starting tests we warmed up JVM processes by sending/receiving orders wit
 
 ```bash
 # Add NUMA binding to separate from server memory
-numactl --membind=1 taskset -c 10-15 chrt -f 80 java \
--Xms8g -Xmx8g \
+numactl --localalloc -- taskset -c 2-4 chrt -f 80 java \
+-Xms7g -Xmx7g \
 -XX:+AlwaysPreTouch \
--XX:+UseLargePages \
--XX:LargePageSizeInBytes=2m \
 -XX:+UnlockExperimentalVMOptions \
 -XX:+UseZGC \
 -XX:ConcGCThreads=2 \
@@ -263,6 +261,16 @@ numactl --membind=1 taskset -c 10-15 chrt -f 80 java \
 -Dsun.rmi.dgc.server.gcInterval=0x7FFFFFFFFFFFFFFE \
 -Dsun.rmi.dgc.client.gcInterval=0x7FFFFFFFFFFFFFFE \
 -Dfile.encoding=UTF-8 \
+-Dio.netty.allocator.numDirectArenas=3 \
+-Dio.netty.allocator.numHeapArenas=0 \
+-Dio.netty.allocator.tinyCacheSize=256 \
+-Dio.netty.allocator.smallCacheSize=64 \
+-Dio.netty.allocator.normalCacheSize=32 \
+-Dio.netty.buffer.checkBounds=false \
+-Dio.netty.buffer.checkAccessible=false \
+-Dio.netty.leakDetection.level=DISABLED \
+-Dio.netty.recycler.maxCapacity=32 \
+-Dio.netty.eventLoop.maxPendingTasks=1024 \
 -server \
 -jar ExchangeFlow-1.0-SNAPSHOT.jar latency-test
 ```
