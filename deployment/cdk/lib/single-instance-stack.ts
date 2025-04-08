@@ -1,7 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import { Vpc, SubnetType, Instance, InstanceType, InstanceClass, InstanceSize, MachineImage, SecurityGroup, Port, Peer, AmazonLinuxEdition, AmazonLinuxVirt, AmazonLinuxStorage, BlockDeviceVolume } from 'aws-cdk-lib/aws-ec2';
 
-export class SingleMetalInstanceStack extends cdk.Stack {
+export class SingleInstanceStack extends cdk.Stack {
     constructor(scope: cdk.App, id: string, props?: cdk.StackProps) {
         super(scope, id, props);
 
@@ -30,11 +30,11 @@ export class SingleMetalInstanceStack extends cdk.Stack {
             'Allow SSH access from the public internet'
         );
 
-        const ami = MachineImage.genericLinux( {'us-east-1':'AMI_ID'});
+        const ami = MachineImage.latestAmazonLinux2023();
 
-        new Instance(this, 'c7i-metal-24xl', {
+        new Instance(this, 'c7i-metal-4xl', {
             vpc: testVpc,
-            instanceType: InstanceType.of(InstanceClass.C7I, InstanceSize.XLARGE24METAL),
+            instanceType: InstanceType.of(InstanceClass.C7I, InstanceSize.XLARGE4),
             machineImage: ami,
             securityGroup,
             vpcSubnets: {
