@@ -7,17 +7,10 @@
   
   vars:
     backup_dir: "/root/system_tuning_backup_{{ ansible_date_time.date }}"
-    isolated_cores: "2-15"  # Isolated cores for trading applications
+    isolated_cores: "2-7"  # Isolated cores for trading applications
     housekeeping_cores: "0-1"  # Cores for system tasks and IRQs
-    disable_services:
-      - bluetooth
-      - cups
-      - avahi-daemon
-      - ModemManager
-      - NetworkManager-wait-online
-      - amazon-ssm-agent  # Added per your guidelines
-    busy_poll_value: 50
-    busy_read_value: 50
+    busy_poll_value: 50 # Adjust between 25-100
+    busy_read_value: 50 # Adjust between 25-100
   
   tasks:
     - name: Create backup directory
@@ -59,6 +52,29 @@
       changed_when: true
       ignore_errors: yes
     
+    - name: Create hyperthreading disable service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/disable-hyperthreading.service
+        content: |
+          [Unit]
+          Description=Disable Hyperthreading
+          After=syslog.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash -c "for cpunum in $(cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | cut -s -d, -f2- | tr ',' '\n' | sort -un); do echo 0 > /sys/devices/system/cpu/cpu$cpunum/online; done"
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+    
+    - name: Enable hyperthreading disable service
+      ansible.builtin.systemd:
+        name: disable-hyperthreading.service
+        enabled: yes
+        daemon_reload: yes
+
     - name: Set CPU to performance governor (apply immediately)
       ansible.builtin.shell: |
         for CPU in /sys/devices/system/cpu/cpu*/cpufreq/; do
@@ -68,12 +84,60 @@
         done
       changed_when: true
 
+    - name: Create CPU performance governor service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/cpu-performance-governor.service
+        content: |
+          [Unit]
+          Description=Set CPU to performance governor
+          After=syslog.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash -c "for CPU in /sys/devices/system/cpu/cpu*/cpufreq/; do if [ -f \\"$${CPU}scaling_governor\\" ]; then echo performance > $${CPU}scaling_governor; fi; done"
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+    
+    - name: Enable CPU performance governor service
+      ansible.builtin.systemd:
+        name: cpu-performance-governor.service
+        enabled: yes
+        daemon_reload: yes
+
     - name: Set CPU to max frequency (Intel)
       ansible.builtin.shell: |
         if [ -f /sys/devices/system/cpu/intel_pstate/min_perf_pct ]; then
           echo 100 > /sys/devices/system/cpu/intel_pstate/min_perf_pct
         fi
       changed_when: true
+      ignore_errors: yes
+
+    - name: Create Intel max frequency service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/intel-max-freq.service
+        content: |
+          [Unit]
+          Description=Set Intel CPU to max frequency
+          After=syslog.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash -c "if [ -f /sys/devices/system/cpu/intel_pstate/min_perf_pct ]; then echo 100 > /sys/devices/system/cpu/intel_pstate/min_perf_pct; fi"
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      ignore_errors: yes
+    
+    - name: Enable Intel max frequency service
+      ansible.builtin.systemd:
+        name: intel-max-freq.service
+        enabled: yes
+        daemon_reload: yes
       ignore_errors: yes
 
     - name: Set CPU to max frequency (AMD)
@@ -86,24 +150,96 @@
       changed_when: true
       ignore_errors: yes
 
-    - name: Move kernel workqueues to housekeeping CPUs
+    - name: Create AMD max frequency service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/amd-max-freq.service
+        content: |
+          [Unit]
+          Description=Set AMD CPU to max frequency
+          After=syslog.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash -c "for CPU in /sys/devices/system/cpu/cpu*/cpufreq/; do if [ -f \\"$${CPU}scaling_min_freq\\" ] && [ -f \\"$${CPU}scaling_max_freq\\" ]; then cat \\"$${CPU}scaling_max_freq\\" > \\"$${CPU}scaling_min_freq\\"; fi; done"
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      ignore_errors: yes
+    
+    - name: Enable AMD max frequency service
+      ansible.builtin.systemd:
+        name: amd-max-freq.service
+        enabled: yes
+        daemon_reload: yes
+      ignore_errors: yes
+
+    # First apply the setting immediately for the current session
+    - name: Move kernel workqueues to housekeeping CPUs (immediate)
       ansible.builtin.shell: |
         find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo 3 > {}' ';'
       changed_when: true
       ignore_errors: yes
 
-    - name: Configure NUMA affinity for writeback threads
-      ansible.builtin.shell: |
-        echo 0 | tee /sys/bus/workqueue/devices/writeback/numa
-      changed_when: true
-      ignore_errors: yes
+    # Create a systemd service for persistence across reboots
+    - name: Create systemd service for persistent workqueue CPU affinity
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/workqueue-affinity.service
+        content: |
+          [Unit]
+          Description=Set workqueue CPU affinity to housekeeping cores
+          DefaultDependencies=no
+          Conflicts=shutdown.target
+          After=local-fs.target
+          Before=basic.target
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash -c "find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo 3 > {}' ';'"
+          RemainAfterExit=yes
+          
+          [Install]
+          WantedBy=basic.target
+        mode: '0644'
+
+    # Enable the service to run at boot
+    - name: Enable workqueue affinity service
+      ansible.builtin.systemd:
+        name: workqueue-affinity.service
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Create systemd service to set writeback NUMA on boot
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/fix-writeback-numa.service
+        content: |
+          [Unit]
+          Description=Set writeback threads to NUMA node 0
+          DefaultDependencies=no
+          After=local-fs.target
+          ConditionPathExists=/sys/bus/workqueue/devices/writeback/numa
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/sh -c "echo 0 > /sys/bus/workqueue/devices/writeback/numa"
+          RemainAfterExit=yes
+          
+          [Install]
+          WantedBy=sysinit.target
+        mode: '0644'
+
+    - name: Enable and start writeback NUMA service
+      ansible.builtin.systemd:
+        name: fix-writeback-numa.service
+        enabled: yes
+        daemon_reload: yes
+        state: started
 
     - name: Disable CPU throttling
       ansible.builtin.copy:
         dest: /etc/modprobe.d/intel-pstate.conf
         content: |
-          options intel_pstate no_hwp=1
-          options intel_pstate turbo_pct=100
           options processor ignore_ppc=1
         mode: '0644'
 
@@ -157,15 +293,17 @@
         content: |
           [Unit]
           Description=Disable Transparent Huge Pages
-          After=syslog.target
-
+          DefaultDependencies=no
+          After=local-fs.target
+          ConditionPathExists=/sys/kernel/mm/transparent_hugepage
+          
           [Service]
           Type=oneshot
           ExecStart=/bin/sh -c "if [ -d /sys/kernel/mm/transparent_hugepage ]; then echo never > /sys/kernel/mm/transparent_hugepage/enabled; echo never > /sys/kernel/mm/transparent_hugepage/defrag; if [ -f /sys/kernel/mm/transparent_hugepage/khugepaged/defrag ]; then echo 0 > /sys/kernel/mm/transparent_hugepage/khugepaged/defrag; fi; fi"
           RemainAfterExit=yes
-
+          
           [Install]
-          WantedBy=multi-user.target
+          WantedBy=sysinit.target
         mode: '0644'
 
     - name: Enable THP disable service
@@ -193,6 +331,29 @@
         huge_pages: "{{ mem_calculations.stdout.split(';')[0] }}"
         shmmax: "{{ mem_calculations.stdout.split(';')[1] }}"
         shmall: "{{ mem_calculations.stdout.split(';')[2] }}"
+
+    - name: Create hugepages service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/configure-hugepages.service
+        content: |
+          [Unit]
+          Description=Configure Huge Pages
+          After=syslog.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/sh -c "echo {{ huge_pages }} > /proc/sys/vm/nr_hugepages"
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable hugepages service
+      ansible.builtin.systemd:
+        name: configure-hugepages.service
+        enabled: yes
+        daemon_reload: yes
 
     - name: Configure memory tuning parameters
       ansible.builtin.copy:
@@ -286,6 +447,7 @@
           # Increase multicast settings for market data
           net.ipv4.igmp_max_memberships = 5000
         mode: '0644'
+
     - name: Configure interrupt affinity
       ansible.builtin.shell: |
         # Move all interrupts to housekeeping cores
@@ -296,10 +458,45 @@
         done
       changed_when: true
       ignore_errors: yes
+
+    - name: Create interrupt affinity service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/set-interrupt-affinity.service
+        content: |
+          [Unit]
+          Description=Set interrupt affinity to housekeeping cores
+          After=syslog.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash -c "for IRQ_DIR in /proc/irq/[0-9]*; do if [ -d \"\\$IRQ_DIR\" ] && [ -f \"\\$IRQ_DIR/smp_affinity_list\" ]; then echo \"0-1\" > \"\\$IRQ_DIR/smp_affinity_list\" 2>/dev/null || true; fi; done"
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable interrupt affinity service
+      ansible.builtin.systemd:
+        name: set-interrupt-affinity.service
+        enabled: yes
+        daemon_reload: yes
+
     - name: Get network interfaces
       ansible.builtin.shell: ip -o link show | grep -v "lo" | awk '{print $2}' | cut -d':' -f1
       register: network_interfaces
       changed_when: false
+
+    # Create udev rules for persistent network settings
+    - name: Create udev rules for network interfaces
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/99-trading-network.rules
+        content: |
+          # Set network adapter optimizations for trading
+          SUBSYSTEM=="net", ACTION=="add", KERNEL=="eth*", RUN+="/usr/bin/ethtool -K $name rx off tx off sg off gso off gro off"
+          SUBSYSTEM=="net", ACTION=="add", KERNEL=="eth*", RUN+="/usr/bin/ethtool -C $name adaptive-rx off rx-usecs 0 tx-usecs 0"
+          SUBSYSTEM=="net", ACTION=="add", KERNEL=="eth*", RUN+="/usr/bin/ethtool -G $name rx 4096 tx 4096"
+        mode: '0644'
 
     - name: Configure network interfaces
       ansible.builtin.blockinfile:
@@ -335,9 +532,11 @@
         for IFACE in $(ip -o link show | grep -v "lo" | awk '{print $2}' | cut -d':' -f1); do
           # Disable offloading features
           ethtool -K $IFACE rx off tx off sg off gso off gro off || true
+
+          ethtool -C $IFACE adaptive-rx off
           
           # Disable adaptive interrupt coalescing
-          ethtool -C $IFACE adaptive-rx off rx-usecs 1 tx-usecs 1 || true
+          ethtool -C $IFACE adaptive-rx off rx-usecs 0 tx-usecs 0 || true
           
           # Increase ring buffer sizes if supported
           ethtool -g $IFACE | grep -q "Pre-set maximums" && ethtool -G $IFACE rx 4096 tx 4096 || true
@@ -345,29 +544,55 @@
       changed_when: true
       ignore_errors: yes
 
-    # Configure Receive-Side Scaling (RSS) immediately
-    - name: Configure RSS (Receive Side Scaling)
-      ansible.builtin.shell: |
-        if [ -d /proc/irq ]; then
-          IRQS=($(grep eth0 /proc/interrupts | awk '{print $1}' | tr -d :))
-          for i in ${!IRQS[@]}; do 
-            echo $((i % 2)) > /proc/irq/${IRQS[i]}/smp_affinity_list || true
-          done
-        fi
-      changed_when: true
-      ignore_errors: yes
+    # Create systemd service for RSS configuration
+    - name: Create RSS configuration service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/configure-rss.service
+        content: |
+          [Unit]
+          Description=Configure RSS (Receive Side Scaling)
+          After=network-online.target
+          Wants=network-online.target
 
-    # Configure Transmit Packet Steering (TPS)
-    - name: Configure TPS (Transmit Packet Steering)
-      ansible.builtin.shell: |
-        TXQUEUES=($(ls -1qdv /sys/class/net/eth0/queues/tx-* 2>/dev/null || echo ""))
-        if [ ! -z "$TXQUEUES" ]; then
-          for i in ${!TXQUEUES[@]}; do
-            printf '%x' $((2**i)) > ${TXQUEUES[i]}/xps_cpus || true
-          done
-        fi
-      changed_when: true
-      ignore_errors: yes
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash -c 'if [ -d /proc/irq ]; then IRQS=($(grep eth0 /proc/interrupts | awk "{print $1}" | tr -d :)); for i in ${!IRQS[@]}; do echo $((i % 2)) > /proc/irq/${IRQS[i]}/smp_affinity_list || true; done; fi'
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable RSS configuration service
+      ansible.builtin.systemd:
+        name: configure-rss.service
+        enabled: yes
+        daemon_reload: yes
+
+    # Create systemd service for TPS configuration
+    - name: Create TPS configuration service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/configure-tps.service
+        content: |
+          [Unit]
+          Description=Configure TPS (Transmit Packet Steering)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash -c 'TXQUEUES=($(ls -1qdv /sys/class/net/eth0/queues/tx-* 2>/dev/null || echo "")); if [ ! -z "$TXQUEUES" ]; then for i in ${!TXQUEUES[@]}; do printf "%%x" $((2**i)) > ${TXQUEUES[i]}/xps_cpus || true; done; fi'
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable TPS configuration service
+      ansible.builtin.systemd:
+        name: configure-tps.service
+        enabled: yes
+        daemon_reload: yes
 
     # ==========================================
     # TIME SYNCHRONIZATION
@@ -504,6 +729,29 @@
       changed_when: true
       ignore_errors: yes
 
+    - name: Create I/O scheduler service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/configure-io-scheduler.service
+        content: |
+          [Unit]
+          Description=Configure I/O schedulers for drives
+          After=local-fs.target
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash -c 'for DISK in $(lsblk -d -o NAME | grep -v NAME); do if [ -f "/sys/block/$DISK/queue/scheduler" ]; then echo "mq-deadline" > /sys/block/$DISK/queue/scheduler 2>/dev/null || echo "none" > /sys/block/$DISK/queue/scheduler || true; if [ -f "/sys/block/$DISK/queue/iosched/fifo_batch" ]; then echo 1 > /sys/block/$DISK/queue/iosched/fifo_batch || true; fi; echo 0 > /sys/block/$DISK/queue/add_random || true; echo 0 > /sys/block/$DISK/queue/iostats || true; echo 32 > /sys/block/$DISK/queue/read_ahead_kb || true; if [ -f "/sys/block/$DISK/queue/rotational" ]; then echo 0 > /sys/block/$DISK/queue/rotational || true; fi; if [ -f "/sys/block/$DISK/queue/nomerges" ]; then echo 2 > /sys/block/$DISK/queue/nomerges || true; fi; if [[ $DISK == nvme* ]]; then echo 1024 > /sys/block/$DISK/queue/nr_requests || true; fi; fi; done'
+          RemainAfterExit=yes
+          
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable I/O scheduler service
+      ansible.builtin.systemd:
+        name: configure-io-scheduler.service
+        enabled: yes
+        daemon_reload: yes
+
     - name: Configure persistent I/O settings
       ansible.builtin.copy:
         dest: /etc/udev/rules.d/99-trading-disk.rules
@@ -514,6 +762,9 @@
           ACTION=="add|change", KERNEL=="sd[a-z]|nvme[0-9]n[0-9]", ATTR{queue/iostats}="0"
           ACTION=="add|change", KERNEL=="sd[a-z]|nvme[0-9]n[0-9]", ATTR{queue/read_ahead_kb}="32"
           ACTION=="add|change", KERNEL=="sd[a-z]|nvme[0-9]n[0-9]", ATTR{queue/nomerges}="2"
+          ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/nr_requests}="1024"
+          ACTION=="add|change", KERNEL=="sd[a-z]|nvme[0-9]n[0-9]", ATTR{queue/rotational}="0"
+          ACTION=="add|change", KERNEL=="sd[a-z]|nvme[0-9]n[0-9]", ATTR{queue/iosched/fifo_batch}="1"
         mode: '0644'
 
     # ==========================================
@@ -529,20 +780,89 @@
         enabled: no
       ignore_errors: yes
 
-    - name: Stop and disable unnecessary services if they exist
+    - name: Create systemd unit to disable irqbalance on boot
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/disable-irqbalance.service
+        content: |
+          [Unit]
+          Description=Disable irqbalance service
+          Before=irqbalance.service
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/systemctl stop irqbalance.service
+          ExecStart=/bin/systemctl mask irqbalance.service
+          RemainAfterExit=yes
+          
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable irqbalance disable service
       ansible.builtin.systemd:
-        name: "{{ item }}"
+        name: disable-irqbalance.service
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Stop and disable amazon-ssm-agent service
+      ansible.builtin.systemd:
+        name: amazon-ssm-agent
         state: stopped
         enabled: no
-      loop: "{{ disable_services }}"
-      when: item in ansible_facts.services
       ignore_errors: yes
+
+    - name: Create systemd unit to disable amazon-ssm-agent on boot
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/disable-amazon-ssm-agent.service
+        content: |
+          [Unit]
+          Description=Disable amazon-ssm-agent service
+          Before=amazon-ssm-agent.service
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/systemctl stop amazon-ssm-agent.service
+          ExecStart=/bin/systemctl mask amazon-ssm-agent.service
+          RemainAfterExit=yes
+          
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable amazon-ssm-agent disable service
+      ansible.builtin.systemd:
+        name: disable-amazon-ssm-agent.service
+        enabled: yes
+        daemon_reload: yes
 
     - name: Disable iptables
       ansible.builtin.shell: |
         modprobe -rv ip_tables || true
       changed_when: true
       ignore_errors: yes
+
+    - name: Create systemd unit to disable iptables on boot
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/disable-iptables.service
+        content: |
+          [Unit]
+          Description=Disable iptables
+          After=local-fs.target
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/sh -c "/sbin/modprobe -rv ip_tables || true"
+          RemainAfterExit=yes
+          
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable iptables disable service
+      ansible.builtin.systemd:
+        name: disable-iptables.service
+        enabled: yes
+        daemon_reload: yes
 
     - name: Configure ultra-low-latency tuned profile
       ansible.builtin.copy:
@@ -563,12 +883,99 @@
           kernel.timer_migration=0
         mode: '0644'
 
+    # Enable the tuned profile
+    - name: Create tuned activation service
+      ansible.builtin.copy: 
+        dest: /etc/systemd/system/activate-tuned-profile.service
+        content: |
+          [Unit]
+          Description=Activate ultra-low-latency tuned profile
+          After=tuned.service
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/sbin/tuned-adm profile ultra-low-latency
+          RemainAfterExit=yes
+          
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable tuned profile service
+      ansible.builtin.systemd:
+        name: activate-tuned-profile.service
+        enabled: yes
+        daemon_reload: yes
+
     # ==========================================
     # APPLY SYSCTL SETTINGS
     # ==========================================
     - name: Apply sysctl settings
       ansible.builtin.command: sysctl --system
       changed_when: true
+
+    # Create a persistent script that runs on early boot
+    - name: Create a unified boot script for optimizations
+      ansible.builtin.copy:
+        dest: /etc/rc.d/rc.local
+        content: |
+          #!/bin/bash
+          # Ultra-low latency trading system boot optimizations
+          
+          # Apply workqueue CPU affinity (highest priority)
+          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo 3 > {}' ';' || true
+          
+          # Set writeback NUMA 
+          if [ -f /sys/bus/workqueue/devices/writeback/numa ]; then
+            echo 0 > /sys/bus/workqueue/devices/writeback/numa || true
+          fi
+          
+          # Apply sysctl settings early
+          /sbin/sysctl --system
+          
+          # Set CPU governor to performance
+          for CPU in /sys/devices/system/cpu/cpu*/cpufreq/; do
+            if [ -f "\${CPU}scaling_governor" ]; then
+              echo performance > \${CPU}scaling_governor
+            fi
+          done
+          
+          # Disable hyperthreading
+          for cpunum in \$(cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | cut -s -d, -f2- | tr ',' '\n' | sort -un); do
+            echo 0 > /sys/devices/system/cpu/cpu\$cpunum/online
+          done
+          
+          # Disable THP explicitly
+          if [ -d /sys/kernel/mm/transparent_hugepage ]; then
+            echo never > /sys/kernel/mm/transparent_hugepage/enabled
+            echo never > /sys/kernel/mm/transparent_hugepage/defrag
+          fi
+          
+          exit 0
+        mode: '0755'
+    - name: Create rc-local service file to ensure rc.local runs early
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/rc-local.service
+        content: |
+          [Unit]
+          Description=Legacy System Startup Script
+          ConditionFileIsExecutable=/etc/rc.d/rc.local
+          After=network.target
+          
+          [Service]
+          Type=forking
+          ExecStart=/etc/rc.d/rc.local start
+          TimeoutSec=0
+          RemainAfterExit=yes
+          
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+    - name: Enable rc-local service
+      ansible.builtin.systemd:
+        name: rc-local
+        enabled: yes
+        daemon_reload: yes
 
     # ==========================================
     # GENERATE REPORT
@@ -626,6 +1033,14 @@
           6. Time Sync: 
             - Configured Chrony for precise timing with AWS timeservers
           
+          7. Persistence:
+            - All optimizations now persist across reboots using:
+              * systemd services
+              * sysctl conf files
+              * udev rules
+              * kernel command line parameters
+              * rc.local boot script
+          
           VALIDATION COMMANDS:
           - Check hyperthreading: lscpu | grep Thread
           - Check hugepages: grep Huge /proc/meminfo
@@ -640,7 +1055,15 @@
       ansible.builtin.debug:
         msg: |
           Ultra-low latency system tuning completed!
-          A system reboot is REQUIRED to apply all changes
+          All configuration changes have been made persistent across reboots.
+          
+          Key improvements made:
+          - Added systemd services for runtime settings that need to be applied after boot
+          - Created udev rules for persistent hardware configurations
+          - Added boot script for early optimizations
+          - Enhanced NetworkManager integration for persistent network settings
+          
+          A system reboot is REQUIRED to apply all changes.
           Review the report at /root/trading_system_tuning_report.txt
           
           After reboot, verify with:
@@ -663,3 +1086,29 @@
         msg: "Rebooting to apply ultra-low latency tuning"
         connect_timeout: 60
         test_command: uptime
+
+    - name: Verify script tuning
+      ansible.builtin.copy:
+        dest: /usr/local/bin/verify-services.sh
+        content: |
+          #!/bin/bash
+          echo "=== SYSTEM TUNING VERIFICATION ==="
+          echo "Date: \$(date)"
+          
+          echo -e "\n=== WORKQUEUE CPUMASK ==="
+          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo "\$(basename \$(dirname {})): \$(cat {})"' \; || echo "Not available"
+          
+          echo -e "\n=== WRITEBACK NUMA ==="
+          cat /sys/bus/workqueue/devices/writeback/numa 2>/dev/null || echo "Not available"
+          
+          echo -e "\n=== TRANSPARENT HUGEPAGES ==="
+          cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo "Not available"
+          
+          echo -e "\n=== CPU GOVERNOR ==="
+          cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null || echo "Not available"
+          
+          echo -e "\n=== DISK SCHEDULER ==="
+          for disk in \$(lsblk -d -o NAME | grep -v NAME); do
+            echo "\$disk: \$(cat /sys/block/\$disk/queue/scheduler 2>/dev/null || echo "Not available")"
+          done
+        mode: '0755'
