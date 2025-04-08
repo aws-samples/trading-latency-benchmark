@@ -6,7 +6,7 @@ regions:
   - us-east-1
 include_filters:
   - tag:Name:
-      - 'SingleInstanceStack/c7i-metal-4xl'
+      - 'SingleInstanceStack/c7i-4xlarge'
 hostnames:
   - name: tag:Name
     separator: ''
