@@ -31,11 +31,7 @@ export class LowLatencyConnectStack extends cdk.Stack {
     );
 
 
-    const ami = MachineImage.latestAmazonLinux2({
-      edition: AmazonLinuxEdition.STANDARD,
-      virtualization: AmazonLinuxVirt.HVM,
-      storage: AmazonLinuxStorage.EBS,
-    });
+    const ami = MachineImage.latestAmazonLinux2023();
     const availabilityZones = testVpc.availabilityZones
 
     for (let i = 0; i < availabilityZones.length; i++) {
