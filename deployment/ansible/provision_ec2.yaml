@@ -27,6 +27,14 @@
         - vim
         - tmux
         - java-17-amazon-corretto
+        - numactl
+        - ethtool
+        - perf
+        - procps-ng
+        - chrony
+        - hwloc
+        - util-linux-core
+        - sysstat
       state: present
     
   - name: Create Maven installation directory
