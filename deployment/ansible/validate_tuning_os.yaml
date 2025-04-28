@@ -1,0 +1,735 @@
+---
+# ultra_low_latency_trading_validation.yml - Amazon Linux 2023
+- name: Validate Ultra-Low Latency Trading System Configuration
+  hosts: aws_ec2
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    isolated_cores: "2-15"
+    housekeeping_cores: "0-1"
+    disable_services:
+      - bluetooth
+      - cups
+      - avahi-daemon
+      - ModemManager
+      - NetworkManager-wait-online
+      - amazon-ssm-agent
+    busy_poll_value: 50
+    busy_read_value: 50
+    validation_report: "/root/low_latency_validation_report.txt"
+  
+  tasks:
+    - name: Create validation report file
+      ansible.builtin.file:
+        path: "{{ validation_report }}"
+        state: touch
+        mode: '0644'
+
+    - name: Initialize validation report
+      ansible.builtin.copy:
+        dest: "{{ validation_report }}"
+        content: |
+          =====================================================
+          ULTRA-LOW LATENCY TRADING SYSTEM VALIDATION REPORT
+          =====================================================
+          Date: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+          Hostname: {{ ansible_hostname }}
+          
+          VALIDATION RESULTS:
+          =====================================================
+          
+        mode: '0644'
+
+    # ==========================================
+    # PACKAGE INSTALLATION VALIDATION
+    # ==========================================
+    - name: Validate required packages are installed
+      ansible.builtin.dnf:
+        name:
+          - numactl
+          - ethtool
+          - perf
+          - procps-ng
+          - chrony
+          - hwloc
+          - util-linux-core
+          - sysstat
+        state: present
+      check_mode: yes
+      register: package_validation
+      ignore_errors: yes
+
+    - name: Report on package installation status
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "PACKAGES: {{ 'PASS' if not package_validation.changed else 'FAIL - Missing packages' }}"
+
+    # Verify tuned profile
+    - name: Verify ultra-low-latency tuned profile exists
+      ansible.builtin.stat:
+        path: /etc/tuned/ultra-low-latency/tuned.conf
+      register: tuned_profile
+
+    - name: Report on tuned profile
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "TUNED PROFILE: {{ 'PASS' if tuned_profile.stat.exists else 'FAIL - Ultra-low-latency tuned profile missing' }}"
+
+    # ==========================================
+    # CPU TUNING VALIDATION
+    # ==========================================
+    - name: Check hyperthreading status
+      ansible.builtin.shell: |
+        if [ $(grep -c processor /proc/cpuinfo) -eq $(grep -c "core id" /proc/cpuinfo) ]; then
+          echo "disabled"
+        else
+          echo "enabled"
+        fi
+      register: ht_status
+      changed_when: false
+
+    - name: Report on hyperthreading status
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "HYPERTHREADING: {{ 'PASS' if ht_status.stdout == 'disabled' else 'FAIL - Hyperthreading is still enabled' }}"
+
+    # Check CPU governor
+    - name: Check CPU governor settings
+      ansible.builtin.shell: |
+        incorrect_governors=$(for CPU in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+          if [ -f "$CPU" ] && [ "$(cat $CPU)" != "performance" ]; then
+            echo "$CPU"
+          fi
+        done | wc -l)
+        echo $incorrect_governors
+      register: cpu_governor
+      changed_when: false
+
+    - name: Report on CPU governor
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "CPU GOVERNOR: {{ 'PASS' if cpu_governor.stdout|int == 0 else 'FAIL - ' + cpu_governor.stdout + ' CPUs not set to performance governor' }}"
+
+    # Check Intel pstate
+    - name: Check Intel pstate settings
+      ansible.builtin.shell: |
+        if [ -f /sys/devices/system/cpu/intel_pstate/min_perf_pct ]; then
+          current=$(cat /sys/devices/system/cpu/intel_pstate/min_perf_pct)
+          if [ "$current" == "100" ]; then
+            echo "pass"
+          else
+            echo "fail: $current"
+          fi
+        else
+          echo "n/a"
+        fi
+      register: intel_pstate
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Report on Intel pstate
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "INTEL PSTATE: {{ 'PASS' if intel_pstate.stdout == 'pass' else 'N/A' if intel_pstate.stdout == 'n/a' else 'FAIL - ' + intel_pstate.stdout }}"
+      when: intel_pstate.stdout != "n/a"
+
+    # Check AMD CPU frequency
+    - name: Check CPU frequency settings (AMD)
+      ansible.builtin.shell: |
+        if ls /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq >/dev/null 2>&1; then
+          incorrect=$(for CPU in /sys/devices/system/cpu/cpu*/cpufreq/; do
+            if [ -f "${CPU}scaling_min_freq" ] && [ -f "${CPU}scaling_max_freq" ]; then
+              min=$(cat "${CPU}scaling_min_freq")
+              max=$(cat "${CPU}scaling_max_freq")
+              if [ "$min" != "$max" ]; then
+                echo "$(basename $(dirname $CPU))"
+              fi
+            fi
+          done | wc -l)
+          echo $incorrect
+        else
+          echo "n/a"
+        fi
+      register: amd_freq
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Report on CPU frequency settings
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "CPU FREQUENCY: {{ 'PASS' if amd_freq.stdout == '0' else 'N/A' if amd_freq.stdout == 'n/a' else 'FAIL - ' + amd_freq.stdout + ' CPUs not set to max frequency' }}"
+      when: amd_freq.stdout != "n/a"
+
+    # Check kernel workqueues
+    - name: Verify kernel workqueue CPU masks
+      ansible.builtin.shell: |
+        incorrect=$(find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'mask=$(cat {}) && if [ "$mask" != "3" ]; then echo {}; fi' \; | wc -l)
+        echo $incorrect
+      register: workqueue
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Report on kernel workqueues
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "KERNEL WORKQUEUES: {{ 'PASS' if workqueue.stdout == '0' else 'FAIL - ' + workqueue.stdout + ' workqueues not assigned to housekeeping CPUs' }}"
+
+    # Check writeback threads affinity
+    - name: Check writeback thread NUMA affinity
+      ansible.builtin.shell: |
+        if [ -f /sys/bus/workqueue/devices/writeback/numa ]; then
+          numa=$(cat /sys/bus/workqueue/devices/writeback/numa)
+          echo "$([ "$numa" = "0" ] && echo "pass" || echo "fail: $numa")"
+        else
+          echo "not found"
+        fi
+      register: writeback_numa
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Report on writeback NUMA affinity
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "WRITEBACK NUMA: {{ 'PASS' if writeback_numa.stdout == 'pass' else 'FAIL - ' + writeback_numa.stdout }}"
+
+    # Check CPU isolation
+    - name: Check isolated CPUs
+      ansible.builtin.shell: |
+        if [ -f /sys/devices/system/cpu/isolated ]; then
+          isolated=$(cat /sys/devices/system/cpu/isolated)
+          if [ "$isolated" = "{{ isolated_cores }}" ]; then
+            echo "pass"
+          else
+            echo "fail: $isolated"
+          fi
+        else
+          echo "not found"
+        fi
+      register: isolated_cpus
+      changed_when: false
+
+    - name: Report on CPU isolation
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "CPU ISOLATION: {{ 'PASS' if isolated_cpus.stdout == 'pass' else 'FAIL - ' + isolated_cpus.stdout }}"
+
+    # Check GRUB parameters
+    - name: Check kernel command line parameters
+      ansible.builtin.shell: |
+        cmdline=$(cat /proc/cmdline)
+        errors=0
+        for param in "isolcpus={{ isolated_cores }}" "nohz_full={{ isolated_cores }}" "rcu_nocbs={{ isolated_cores }}" "idle=poll" "nosoftlockup" "clocksource=tsc"; do
+          if ! echo "$cmdline" | grep -q "$param"; then
+            errors=$((errors+1))
+          fi
+        done
+        echo "$errors"
+      register: cmdline_params
+      changed_when: false
+
+    - name: Report on kernel parameters
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "KERNEL PARAMETERS: {{ 'PASS' if cmdline_params.stdout == '0' else 'FAIL - ' + cmdline_params.stdout + ' required kernel parameters missing' }}"
+
+    # ==========================================
+    # MEMORY TUNING VALIDATION
+    # ==========================================
+    # Check Transparent Huge Pages
+    - name: Check Transparent Huge Pages
+      ansible.builtin.shell: |
+        if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
+          thp=$(cat /sys/kernel/mm/transparent_hugepage/enabled | tr -d '[]')
+          if [ "$thp" == "never" ]; then
+            echo "pass"
+          else
+            echo "fail: $thp"
+          fi
+        else
+          echo "not found"
+        fi
+      register: thp_status
+      changed_when: false
+
+    - name: Report on Transparent Huge Pages
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "TRANSPARENT HUGE PAGES: {{ 'PASS' if thp_status.stdout == 'pass' else 'FAIL - ' + thp_status.stdout }}"
+
+    # Check THP defrag
+    - name: Check THP defrag
+      ansible.builtin.shell: |
+        if [ -f /sys/kernel/mm/transparent_hugepage/defrag ]; then
+          defrag=$(cat /sys/kernel/mm/transparent_hugepage/defrag | tr -d '[]')
+          if [ "$defrag" == "never" ]; then
+            echo "pass"
+          else
+            echo "fail: $defrag"
+          fi
+        else
+          echo "not found"
+        fi
+      register: thp_defrag
+      changed_when: false
+
+    - name: Report on THP defrag
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "THP DEFRAG: {{ 'PASS' if thp_defrag.stdout == 'pass' else 'FAIL - ' + thp_defrag.stdout }}"
+
+    # Check THP khugepaged
+    - name: Check THP khugepaged
+      ansible.builtin.shell: |
+        if [ -f /sys/kernel/mm/transparent_hugepage/khugepaged/defrag ]; then
+          khugepaged=$(cat /sys/kernel/mm/transparent_hugepage/khugepaged/defrag)
+          if [ "$khugepaged" == "0" ]; then
+            echo "pass"
+          else
+            echo "fail: $khugepaged"
+          fi
+        else
+          echo "not found"
+        fi
+      register: khugepaged
+      changed_when: false
+
+    - name: Report on THP khugepaged
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "THP KHUGEPAGED: {{ 'PASS' if khugepaged.stdout == 'pass' else 'FAIL - ' + khugepaged.stdout }}"
+
+    # Check hugepages
+    - name: Check hugepages configuration
+      ansible.builtin.shell: |
+        TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        TOTAL_MEM_MB=$((TOTAL_MEM_KB / 1024))
+        EXPECTED_HUGE_PAGES=$((TOTAL_MEM_MB / 4 / 2))
+        ACTUAL_HUGE_PAGES=$(grep HugePages_Total /proc/meminfo | awk '{print $2}')
+        
+        if [ "$ACTUAL_HUGE_PAGES" -ge "$EXPECTED_HUGE_PAGES" ]; then
+          echo "pass"
+        else
+          echo "fail: expected $EXPECTED_HUGE_PAGES, got $ACTUAL_HUGE_PAGES"
+        fi
+      register: hugepages
+      changed_when: false
+
+    - name: Report on hugepages
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "HUGEPAGES: {{ 'PASS' if hugepages.stdout == 'pass' else 'FAIL - ' + hugepages.stdout }}"
+
+    # Check memory sysctl parameters
+    - name: Check memory sysctl parameters
+      ansible.builtin.shell: |
+        errors=0
+        # Check swappiness
+        if [ "$(sysctl -n vm.swappiness)" -ne 0 ]; then
+          errors=$((errors+1))
+        fi
+        # Check zone_reclaim_mode
+        if [ "$(sysctl -n vm.zone_reclaim_mode)" -ne 0 ]; then
+          errors=$((errors+1))
+        fi
+        # Check min_free_kbytes
+        if [ "$(sysctl -n vm.min_free_kbytes)" -lt 1000000 ]; then
+          errors=$((errors+1))
+        fi
+        # Check dirty_ratio
+        if [ "$(sysctl -n vm.dirty_ratio)" -ne 80 ]; then
+          errors=$((errors+1))
+        fi
+        echo "$errors"
+      register: memory_sysctl
+      changed_when: false
+
+    - name: Report on memory sysctl parameters
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "MEMORY SYSCTL: {{ 'PASS' if memory_sysctl.stdout == '0' else 'FAIL - ' + memory_sysctl.stdout + ' memory parameters not set correctly' }}"
+
+    # Check shared memory limits
+    - name: Check shared memory limits
+      ansible.builtin.shell: |
+        TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        SHM_MAX=$((TOTAL_MEM_KB * 1024 / 2))
+        SHM_ALL=$((TOTAL_MEM_KB * 256))
+        
+        errors=0
+        if [ "$(sysctl -n kernel.shmmax)" -lt "$SHM_MAX" ]; then
+          errors=$((errors+1))
+        fi
+        if [ "$(sysctl -n kernel.shmall)" -lt "$SHM_ALL" ]; then
+          errors=$((errors+1))
+        fi
+        echo "$errors"
+      register: shm_limits
+      changed_when: false
+
+    - name: Report on shared memory limits
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "SHARED MEMORY LIMITS: {{ 'PASS' if shm_limits.stdout == '0' else 'FAIL - ' + shm_limits.stdout + ' shared memory parameters not set correctly' }}"
+
+    # ==========================================
+    # NETWORK TUNING VALIDATION
+    # ==========================================
+    # Check network sysctl parameters
+    - name: Check network sysctl parameters
+      ansible.builtin.shell: |
+        errors=0
+        
+        # Check core network parameters
+        if [ "$(sysctl -n net.core.rmem_max)" -lt 16777216 ]; then errors=$((errors+1)); fi
+        if [ "$(sysctl -n net.core.wmem_max)" -lt 16777216 ]; then errors=$((errors+1)); fi
+        if [ "$(sysctl -n net.core.netdev_max_backlog)" -lt 1000000 ]; then errors=$((errors+1)); fi
+        if [ "$(sysctl -n net.core.somaxconn)" -lt 65536 ]; then errors=$((errors+1)); fi
+        
+        # Check TCP parameters
+        if [ "$(sysctl -n net.ipv4.tcp_low_latency)" -ne 1 ]; then errors=$((errors+1)); fi
+        if [ "$(sysctl -n net.ipv4.tcp_timestamps)" -ne 0 ]; then errors=$((errors+1)); fi
+        if [ "$(sysctl -n net.ipv4.tcp_sack)" -ne 0 ]; then errors=$((errors+1)); fi
+        
+        # Check busy polling
+        if [ "$(sysctl -n net.core.busy_poll)" -ne {{ busy_poll_value }} ]; then errors=$((errors+1)); fi
+        if [ "$(sysctl -n net.core.busy_read)" -ne {{ busy_read_value }} ]; then errors=$((errors+1)); fi
+        
+        echo "$errors"
+      register: network_sysctl
+      changed_when: false
+
+    - name: Report on network sysctl parameters
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "NETWORK SYSCTL: {{ 'PASS' if network_sysctl.stdout == '0' else 'FAIL - ' + network_sysctl.stdout + ' network parameters not set correctly' }}"
+
+    # Check network interfaces offloading
+    - name: Get network interfaces
+      ansible.builtin.shell: ip -o link show | grep -v "lo" | awk '{print $2}' | cut -d':' -f1
+      register: network_interfaces
+      changed_when: false
+
+    - name: Check network interface settings
+      ansible.builtin.shell: |
+        interface="{{ item }}"
+        errors=0
+        
+        # Check offloading is disabled
+        for feature in rx tx sg gso gro; do
+          if ethtool -k $interface 2>/dev/null | grep -q "$feature: on"; then
+            errors=$((errors+1))
+          fi
+        done
+        
+        # Check interrupt coalescing
+        if ethtool -c $interface 2>/dev/null | grep -q "Adaptive RX: on"; then
+          errors=$((errors+1))
+        fi
+        
+        echo "$errors"
+      register: interface_settings
+      changed_when: false
+      ignore_errors: yes
+      loop: "{{ network_interfaces.stdout_lines }}"
+
+    - name: Report on network interface settings
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "NETWORK INTERFACE {{ item.item }}: {{ 'PASS' if item.stdout == '0' else 'FAIL - ' + item.stdout + ' offload features still enabled' }}"
+      loop: "{{ interface_settings.results }}"
+      when: item.rc == 0
+
+    # Check interrupt affinity
+    - name: Check interrupt affinity
+      ansible.builtin.shell: |
+        incorrect=0
+        total=0
+        
+        for IRQ_DIR in /proc/irq/[0-9]*; do
+          if [ -d "$IRQ_DIR" ] && [ -f "$IRQ_DIR/smp_affinity_list" ]; then
+            total=$((total+1))
+            affinity=$(cat "$IRQ_DIR/smp_affinity_list" 2>/dev/null || echo "unknown")
+            
+            # Check network and storage device IRQs
+            if grep -q "eth\|nvme" "$IRQ_DIR/actions" 2>/dev/null; then
+              if ! echo "$affinity" | grep -E "^(0-1|0|1)$" >/dev/null 2>&1; then
+                incorrect=$((incorrect+1))
+              fi
+            fi
+          fi
+        done
+        
+        echo "$incorrect/$total"
+      register: irq_affinity
+      changed_when: false
+
+    - name: Report on interrupt affinity
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "INTERRUPT AFFINITY: {{ 'PASS' if irq_affinity.stdout.split('/')[0] == '0' else 'FAIL - ' + irq_affinity.stdout + ' interrupts not properly assigned to housekeeping CPUs' }}"
+
+    # ==========================================
+    # TIME SYNCHRONIZATION VALIDATION
+    # ==========================================
+    # Check chrony service
+    - name: Check chrony service status
+      ansible.builtin.service:
+        name: chronyd
+        state: started
+        enabled: yes
+      check_mode: yes
+      register: chrony_service
+      ignore_errors: yes
+
+    - name: Report on chrony service
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "CHRONY SERVICE: {{ 'PASS' if not chrony_service.changed else 'FAIL - Chronyd service not running or not enabled' }}"
+
+    # Check chrony configuration
+    - name: Check chrony configuration for Amazon Time Sync Service
+      ansible.builtin.shell: |
+        if grep -q "169.254.169.123" /etc/chrony.conf; then
+          echo "pass"
+        else
+          echo "fail"
+        fi
+      register: chrony_config
+      changed_when: false
+
+    - name: Report on chrony configuration
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "CHRONY CONFIG: {{ 'PASS' if chrony_config.stdout == 'pass' else 'FAIL - Amazon Time Sync Service not configured' }}"
+
+    # ==========================================
+    # SYSTEM LIMITS AND KERNEL PARAMETERS
+    # ==========================================
+    # Check system limits configuration
+    - name: Check system limits configuration file
+      ansible.builtin.stat:
+        path: /etc/security/limits.d/99-trading-limits.conf
+      register: limits_file
+
+    - name: Check system limits content
+      ansible.builtin.shell: |
+        if [ -f /etc/security/limits.d/99-trading-limits.conf ]; then
+          if grep -q "nofile.*1048576" /etc/security/limits.d/99-trading-limits.conf && \
+             grep -q "memlock.*unlimited" /etc/security/limits.d/99-trading-limits.conf && \
+             grep -q "rtprio.*99" /etc/security/limits.d/99-trading-limits.conf; then
+            echo "pass"
+          else
+            echo "fail"
+          fi
+        else
+          echo "missing"
+        fi
+      register: limits_content
+      changed_when: false
+
+    - name: Report on system limits
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "SYSTEM LIMITS: {{ 'PASS' if limits_content.stdout == 'pass' else 'FAIL - ' + limits_content.stdout }}"
+
+    # Check kernel scheduler parameters
+    - name: Check kernel scheduler parameters
+      ansible.builtin.shell: |
+        errors=0
+        
+        # Check scheduler parameters
+        if [ "$(sysctl -n kernel.sched_min_granularity_ns)" -lt 10000000 ]; then errors=$((errors+1)); fi
+        if [ "$(sysctl -n kernel.sched_migration_cost_ns)" -lt 5000000 ]; then errors=$((errors+1)); fi
+        
+        # Check watchdog parameters
+        if [ "$(sysctl -n kernel.watchdog)" -ne 0 ]; then errors=$((errors+1)); fi
+        if [ "$(sysctl -n kernel.nmi_watchdog)" -ne 0 ]; then errors=$((errors+1)); fi
+        
+        # Check NUMA balancing
+        if [ "$(sysctl -n kernel.numa_balancing)" -ne 0 ]; then errors=$((errors+1)); fi
+        if [ "$(sysctl -n kernel.timer_migration)" -ne 0 ]; then errors=$((errors+1)); fi
+        
+        echo "$errors"
+      register: kernel_sysctl
+      changed_when: false
+
+    - name: Report on kernel scheduler parameters
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "KERNEL SCHEDULER: {{ 'PASS' if kernel_sysctl.stdout == '0' else 'FAIL - ' + kernel_sysctl.stdout + ' kernel scheduler parameters not set correctly' }}"
+
+    # ==========================================
+    # I/O AND DISK TUNING VALIDATION
+    # ==========================================
+    # Check I/O schedulers
+    - name: Check I/O schedulers
+      ansible.builtin.shell: |
+        errors=0
+        for DISK in $(lsblk -d -o NAME | grep -v NAME); do
+          if [ -f "/sys/block/$DISK/queue/scheduler" ]; then
+            scheduler=$(cat "/sys/block/$DISK/queue/scheduler" | tr -d '[]')
+            if [ "$scheduler" != "mq-deadline" ] && [ "$scheduler" != "none" ]; then
+              errors=$((errors+1))
+            fi
+          fi
+        done
+        echo "$errors"
+      register: io_scheduler
+      changed_when: false
+
+    - name: Report on I/O schedulers
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "I/O SCHEDULERS: {{ 'PASS' if io_scheduler.stdout == '0' else 'FAIL - ' + io_scheduler.stdout + ' disks not using mq-deadline or none scheduler' }}"
+
+    # Check block device settings
+    - name: Check block device settings
+      ansible.builtin.shell: |
+        errors=0
+        disks=0
+        
+        for DISK in $(lsblk -d -o NAME | grep -v NAME); do
+          disks=$((disks+1))
+          
+          # Check add_random
+          if [ -f "/sys/block/$DISK/queue/add_random" ]; then
+            if [ "$(cat /sys/block/$DISK/queue/add_random)" -ne 0 ]; then
+              errors=$((errors+1))
+            fi
+          fi
+          
+          # Check iostats
+          if [ -f "/sys/block/$DISK/queue/iostats" ]; then
+            if [ "$(cat /sys/block/$DISK/queue/iostats)" -ne 0 ]; then
+              errors=$((errors+1))
+            fi
+          fi
+          
+          # Check read_ahead_kb
+          if [ -f "/sys/block/$DISK/queue/read_ahead_kb" ]; then
+            if [ "$(cat /sys/block/$DISK/queue/read_ahead_kb)" -ne 32 ]; then
+              errors=$((errors+1))
+            fi
+          fi
+        done
+        
+        echo "$errors/$disks"
+      register: block_settings
+      changed_when: false
+
+    - name: Report on block device settings
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "BLOCK DEVICE SETTINGS: {{ 'PASS' if block_settings.stdout.split('/')[0] == '0' else 'FAIL - ' + block_settings.stdout + ' block device parameters not set correctly' }}"
+
+    # ==========================================
+    # SERVICE OPTIMIZATION VALIDATION
+    # ==========================================
+    # Check irqbalance service
+    - name: Check irqbalance service status
+      ansible.builtin.shell: |
+        if systemctl is-active irqbalance >/dev/null 2>&1; then
+          echo "fail"
+        else
+          echo "pass"
+        fi
+      register: irqbalance
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Report on irqbalance service
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "IRQBALANCE SERVICE: {{ 'PASS' if irqbalance.stdout == 'pass' else 'FAIL - irqbalance service is still running' }}"
+
+    # Check disabled services
+    - name: Check disabled services
+      ansible.builtin.shell: |
+        service="{{ item }}"
+        if systemctl list-unit-files | grep -q "$service"; then
+          if systemctl is-active "$service" >/dev/null 2>&1; then
+            echo "fail"
+          else
+            echo "pass"
+          fi
+        else
+          echo "not installed"
+        fi
+      register: service_status
+      changed_when: false
+      ignore_errors: yes
+      loop: "{{ disable_services }}"
+
+    - name: Report on disabled services
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "SERVICE {{ item.item }}: {{ 'PASS' if item.stdout == 'pass' or item.stdout == 'not installed' else 'FAIL - service is still running' }}"
+      loop: "{{ service_status.results }}"
+      when: item is defined
+
+    # Check iptables status
+    - name: Check iptables module status
+      ansible.builtin.shell: |
+        if lsmod | grep -q ip_tables; then
+          echo "fail"
+        else
+          echo "pass"
+        fi
+      register: iptables
+      changed_when: false
+
+    - name: Report on iptables
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: "IPTABLES: {{ 'PASS' if iptables.stdout == 'pass' else 'FAIL - iptables module is still loaded' }}"
+
+    # ==========================================
+    # GENERATE SUMMARY REPORT
+    # ==========================================
+    - name: Count failures in the report
+      ansible.builtin.shell: |
+        grep -c "FAIL" {{ validation_report }}
+      register: failure_count
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Count total checks in the report
+      ansible.builtin.shell: |
+        grep -c ": " {{ validation_report }}
+      register: total_checks
+      changed_when: false
+
+    - name: Generate summary report
+      ansible.builtin.lineinfile:
+        path: "{{ validation_report }}"
+        line: |
+          
+          =====================================================
+          SUMMARY: {{ (total_checks.stdout|int - failure_count.stdout|int) }} of {{ total_checks.stdout }} checks passed
+          OVERALL STATUS: {{ 'PASS' if failure_count.stdout == '0' else 'FAIL - ' + failure_count.stdout + ' checks failed' }}
+          =====================================================
+          
+          See detailed report above for specific failures.
+          
+          RECOMMENDED ACTIONS:
+          - For failed checks, verify the corresponding settings in the tuning playbook
+          - Investigate hardware-specific failures that may require custom adjustments
+          - Consider reapplying specific tuning settings for failed checks
+          - Run this validation playbook again after making fixes
+        insertafter: EOF
+
+    - name: Display validation summary
+      ansible.builtin.debug:
+        msg: |
+          Ultra-Low Latency Trading System Validation Complete
+          
+          Results: {{ (total_checks.stdout|int - failure_count.stdout|int) }} of {{ total_checks.stdout }} checks passed
+          Status: {{ 'PASS - All system tuning parameters verified!' if failure_count.stdout == '0' else 'FAIL - ' + failure_count.stdout + ' checks failed' }}
+          
+          Detailed validation report available at: {{ validation_report }}
+
+    - name: Fail playbook if validation checks failed
+      ansible.builtin.fail:
+        msg: "Validation failed: {{ failure_count.stdout }} checks failed. Review the report at {{ validation_report }} for details."
+      when: failure_count.stdout|int > 0

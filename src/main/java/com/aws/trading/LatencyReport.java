@@ -49,35 +49,106 @@ public class LatencyReport {
             printHelpMessage();
             System.exit(0);
         }
-        try (Stream<Path> paths = Files.walk(Paths.get(args[1]))) {
-            List<Map<String, String>> rows = paths.filter(Files::isRegularFile)
-                    .filter(path -> path.toString().endsWith(".hlog"))
-                    .map(file -> {
-                        LOGGER.info("loading histogram from file {}", file);
-                        HistogramLogReader logReader = getHistogramLogReader(file);
-                        Histogram histogram = null;
-                        while (logReader.hasNext()) {
-                            Histogram iter = (Histogram) logReader.nextIntervalHistogram();
-                            if (null == histogram) {
-                                histogram = iter;
-                            } else {
-                                histogram.add(iter);
+        
+        // Check if we're processing a single file or a directory
+        Path path = Paths.get(args[1]);
+        if (Files.isRegularFile(path)) {
+            // Process a single histogram file
+            processSingleHistogramFile(path, args);
+        } else {
+            // Process a directory of histogram files
+            try (Stream<Path> paths = Files.walk(path)) {
+                List<Map<String, String>> rows = paths.filter(Files::isRegularFile)
+                        .filter(file -> file.toString().endsWith(".hlog"))
+                        .map(file -> {
+                            LOGGER.info("loading histogram from file {}", file);
+                            HistogramLogReader logReader = getHistogramLogReader(file);
+                            Histogram histogram = null;
+                            while (logReader.hasNext()) {
+                                Histogram iter = (Histogram) logReader.nextIntervalHistogram();
+                                if (null == histogram) {
+                                    histogram = iter;
+                                } else {
+                                    histogram.add(iter);
+                                }
                             }
-                        }
-                        assert histogram != null;
-                        final LinkedHashMap<String, String> row = LatencyTools.createLatencyReport(histogram);
-                        final Matcher matcher = pattern.matcher(file.toString());
-                        if (matcher.matches()) {
-                            row.put("source", matcher.group(1));
-                            row.put("destination", matcher.group(2));
-                        } else {
-                            LOGGER.error("Unable to parse the input string: {}", file.toString());
-                        }
-                        return row;
-                    }).collect(Collectors.toList());
-            writeToCSV(rows, "output.csv");
-        } catch (IOException e) {
-            System.err.println("Error processing histogram log files: " + e.getMessage());
+                            assert histogram != null;
+                            final LinkedHashMap<String, String> row = LatencyTools.createLatencyReport(histogram);
+                            final Matcher matcher = pattern.matcher(file.toString());
+                            if (matcher.matches()) {
+                                row.put("source", matcher.group(1));
+                                row.put("destination", matcher.group(2));
+                            } else {
+                                LOGGER.error("Unable to parse the input string: {}", file.toString());
+                            }
+                            return row;
+                        }).collect(Collectors.toList());
+                
+                // Write results to CSV
+                if (!rows.isEmpty()) {
+                    String outputFile = args.length > 2 ? args[2] : "output.csv";
+                    writeToCSV(rows, outputFile);
+                    System.out.println("CSV report written to: " + outputFile);
+                } else {
+                    System.err.println("No histogram files found in directory: " + path);
+                }
+            } catch (IOException e) {
+                System.err.println("Error processing histogram log files: " + e.getMessage());
+            }
+        }
+    }
+    
+    private static void processSingleHistogramFile(Path file, String[] args) {
+        try {
+            LOGGER.info("Processing histogram file: {}", file);
+            HistogramLogReader logReader = getHistogramLogReader(file);
+            Histogram histogram = null;
+            
+            while (logReader.hasNext()) {
+                Histogram iter = (Histogram) logReader.nextIntervalHistogram();
+                if (null == histogram) {
+                    histogram = iter;
+                } else {
+                    histogram.add(iter);
+                }
+            }
+            
+            if (histogram != null) {
+                // Print formatted report to stdout for shell script to parse
+                printFormattedReport(histogram);
+                
+                // Optionally save CSV if a filename is provided
+                if (args.length > 2) {
+                    LinkedHashMap<String, String> row = LatencyTools.createLatencyReport(histogram);
+                    List<Map<String, String>> rows = new ArrayList<>();
+                    rows.add(row);
+                    writeToCSV(rows, args[2]);
+                    System.out.println("CSV report written to: " + args[2]);
+                }
+            } else {
+                System.err.println("No histogram data found in file: " + file);
+            }
+        } catch (Exception e) {
+            System.err.println("Error processing histogram file: " + e.getMessage());
+        }
+    }
+    
+    private static void printFormattedReport(Histogram histogram) {
+        // Print summary statistics in a format that can be easily parsed by the shell script
+        System.out.println("Latency Report Summary");
+        System.out.println("=====================");
+        System.out.println("Min latency: " + LatencyTools.formatNanos(histogram.getMinValue()));
+        System.out.println("Max latency: " + LatencyTools.formatNanos(histogram.getMaxValue()));
+        System.out.println("Mean latency: " + LatencyTools.formatNanos((long)histogram.getMean()));
+        System.out.println("Total count: " + histogram.getTotalCount());
+        System.out.println();
+        
+        System.out.println("Percentile Distribution");
+        System.out.println("======================");
+        for (double percentile : LatencyTools.PERCENTILES) {
+            System.out.printf("%.2f%%: %s\n", 
+                percentile, 
+                LatencyTools.formatNanos(histogram.getValueAtPercentile(percentile)));
         }
     }
 
