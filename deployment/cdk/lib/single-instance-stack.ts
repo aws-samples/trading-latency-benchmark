@@ -183,44 +183,12 @@ export class TradingBenchmarkSingleInstanceStack extends cdk.Stack {
     
     // Helper method to parse instance type string into InstanceType
     private parseInstanceTypeString(instanceTypeStr: string): InstanceType {
-        const parts = instanceTypeStr.split('.');
-        if (parts.length !== 2) {
-            throw new Error(`Invalid instance type format: ${instanceTypeStr}`);
+        // Use the built-in CDK method to create an instance type directly from string
+        // This allows any valid EC2 instance type without restrictions
+        try {
+            return new InstanceType(instanceTypeStr);
+        } catch (error) {
+            throw new Error(`Invalid instance type: ${instanceTypeStr}`);
         }
-
-        const classKey = parts[0].toLowerCase();
-        const sizeKey = parts[1].toLowerCase();
-        
-        // Direct mapping to InstanceClass and InstanceSize enums
-        let instanceClass: InstanceClass;
-        let instanceSize: InstanceSize;
-        
-        // Map class
-        switch (classKey) {
-            case 'c7i': instanceClass = InstanceClass.C7I; break;
-            case 'c6in': instanceClass = InstanceClass.C6IN; break;
-            case 'c6i': instanceClass = InstanceClass.C6I; break;
-            case 'c5': instanceClass = InstanceClass.C5; break;
-            case 'r6i': instanceClass = InstanceClass.R6I; break;
-            case 'r4': instanceClass = InstanceClass.R4; break;
-            case 'm6i': instanceClass = InstanceClass.M6I; break;
-            case 't3': instanceClass = InstanceClass.T3; break;
-            default: throw new Error(`Unknown instance class: ${classKey}`);
-        }
-        
-        // Map size
-        switch (sizeKey) {
-            case 'large': instanceSize = InstanceSize.LARGE; break;
-            case 'xlarge': instanceSize = InstanceSize.XLARGE; break;
-            case '2xlarge': instanceSize = InstanceSize.XLARGE2; break;
-            case '4xlarge': instanceSize = InstanceSize.XLARGE4; break;
-            case '8xlarge': instanceSize = InstanceSize.XLARGE8; break;
-            case '16xlarge': instanceSize = InstanceSize.XLARGE16; break;
-            case '24xlarge': instanceSize = InstanceSize.XLARGE24; break;
-            case '32xlarge': instanceSize = InstanceSize.XLARGE32; break;
-            default: throw new Error(`Unknown instance size: ${sizeKey}`);
-        }
-
-        return InstanceType.of(instanceClass, instanceSize);
     }
 }
