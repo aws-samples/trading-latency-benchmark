@@ -44,7 +44,9 @@ Before using this benchmark suite, ensure you have the following prerequisites:
 
 ### 1. Deploy Infrastructure with CDK
 
-First, deploy the required AWS infrastructure using CDK:
+First, deploy the required AWS infrastructure using CDK. You have several deployment options:
+
+#### Default Single Instance Deployment
 
 ```bash
 cd deployment/cdk
@@ -52,7 +54,33 @@ npm install
 cdk deploy
 ```
 
-This will create EC2 instances in your AWS account according to the configuration in the CDK stack.
+#### Client-Server Architecture with Cluster Placement Group
+
+For optimal network performance between client and server, deploy them in a Cluster Placement Group:
+
+```bash
+cd deployment/cdk
+npm install
+cdk deploy --context deploymentType=cluster
+```
+
+You can also specify instance types for client and server:
+
+```bash
+cdk deploy --context deploymentType=cluster --context clientInstanceType=c7i.4xlarge --context serverInstanceType=c6in.4xlarge
+```
+
+#### Multi-AZ Deployment
+
+To test latency across multiple availability zones:
+
+```bash
+cd deployment/cdk
+npm install
+cdk deploy --context deploymentType=multi-az
+```
+
+These commands will create EC2 instances in your AWS account according to the selected architecture.
 
 ### 2. Run the Benchmark Tests
 

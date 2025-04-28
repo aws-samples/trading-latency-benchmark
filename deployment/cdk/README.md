@@ -1,53 +1,85 @@
-# AWS Low Latency Stack
+# Trading Latency Benchmark CDK
 
-This AWS Cloud Development Kit (AWS CDK) to create instances in each AZs us-east-1. T
-The use case for this is to run ping clients from each AZs to detect which AZ is closest to the endpoint or which endpoint closest to the region.
-Therefore stack provisions a VPC with public subnets across multiple Availability Zones and launches an Amazon EC2 instance of type `r4.xlarge` in each Availability Zone.
+This directory contains the AWS CDK code for deploying the infrastructure required for the trading latency benchmark.
+
+## Available Deployment Options
+
+The CDK code supports multiple deployment architectures:
+
+1. **Single Instance Stack** (default): Deploys two EC2 instances for benchmarking different instance types
+2. **Cluster Placement Group Stack**: Deploys client and server instances within a Cluster Placement Group for optimal network performance
+3. **Multi-AZ Stack**: Deploys instances across multiple availability zones to measure cross-AZ latency
 
 ## Prerequisites
 
-- AWS account
-- AWS CLI
-- Node.js >=14.x
-- AWS CDK
+- AWS CDK v2 installed
+- Node.js 14.x or later
+- AWS CLI configured with appropriate credentials
 
-## Project Structure
+## Installation
 
-The main code resides in the `lib/low-latency-connect-stack.ts` file, which defines the `LowLatencyConnectStack` class that extends `cdk.Stack`.
-
-## Deployment
-
-1. Install the required dependencies:
-```
+```bash
 npm install
 ```
 
-2. Bootstrap the AWS environment (only required the first time):
-```
-cdk bootstrap
-```
+## Deployment
 
-3. Deploy the stack:
+### Default Deployment (Single Instance Stack)
+
 ```bash
 cdk deploy
 ```
 
-
-## Architecture
-
-The deployment creates the following resources:
-
-- **VPC**: A Virtual Private Cloud (VPC) with six public subnets, one in each of the six Availability Zones in the `us-east-1` region.
-- **Security Group**: A security group allowing inbound SSH traffic from any IPv4 address.
-- **EC2 Instances**: Six Amazon EC2 instances of type `r4.xlarge` are launched, one in each public subnet. The instances use Amazon Linux 2 as the operating system and have a 100 GB EBS volume attached.
-
-## Cleanup
-
-To remove the resources created by this stack:
+You can specify instance types:
 
 ```bash
-cdk destroy
+cdk deploy --context instanceType1=c7i.4xlarge --context instanceType2=c6in.4xlarge
 ```
 
-## License
-This library is licensed under the MIT-0 License. See the LICENSE file.
+### Cluster Placement Group Deployment
+
+Deploy client and server instances within a Cluster Placement Group for minimal network latency:
+
+```bash
+cdk deploy --context deploymentType=cluster
+```
+
+You can also specify instance types for client and server:
+
+```bash
+cdk deploy --context deploymentType=cluster --context clientInstanceType=c7i.4xlarge --context serverInstanceType=c6in.4xlarge
+```
+
+### Multi-AZ Deployment
+
+Deploy instances across multiple availability zones to measure cross-AZ latency:
+
+```bash
+cdk deploy --context deploymentType=multi-az
+```
+
+You can specify the instance type for all AZ instances:
+
+```bash
+cdk deploy --context deploymentType=multi-az --context instanceType=r4.xlarge
+```
+
+## Context Parameters
+
+| Parameter | Description | Default Value | Example Values |
+|-----------|-------------|---------------|---------------|
+| `deploymentType` | Type of deployment architecture | `single` | `single`, `cluster`, `multi-az` |
+| `instanceType1` | EC2 instance type for first instance in single mode | `c7i.4xlarge` | `c7i.4xlarge`, `c6i.8xlarge` |
+| `instanceType2` | EC2 instance type for second instance in single mode | `c6in.4xlarge` | `c6in.4xlarge`, `r6i.4xlarge` |
+| `clientInstanceType` | EC2 instance type for client in cluster mode | `c7i.4xlarge` | `c7i.4xlarge`, `c6i.8xlarge` |
+| `serverInstanceType` | EC2 instance type for server in cluster mode | `c6in.4xlarge` | `c6in.4xlarge`, `r6i.4xlarge` |
+| `instanceType` | EC2 instance type for all instances in multi-az mode | `r4.xlarge` | `r4.xlarge`, `c5.4xlarge` |
+
+## Useful Commands
+
+* `npm run build`   compile typescript to js
+* `npm run watch`   watch for changes and compile
+* `npm run test`    perform the jest unit tests
+* `cdk deploy`      deploy this stack to your default AWS account/region
+* `cdk diff`        compare deployed stack with current state
+* `cdk synth`       emits the synthesized CloudFormation template
