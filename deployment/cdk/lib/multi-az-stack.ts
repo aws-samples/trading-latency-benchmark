@@ -160,11 +160,4 @@ export class TradingBenchmarkMultiAzStack extends cdk.Stack {
       throw new Error(`Invalid instance type: ${instanceTypeStr}`);
     }
   }
-      case '24xlarge': instanceSize = InstanceSize.XLARGE24; break;
-      case '32xlarge': instanceSize = InstanceSize.XLARGE32; break;
-      default: throw new Error(`Unknown instance size: ${sizeKey}`);
-    }
-
-    return InstanceType.of(instanceClass, instanceSize);
-  }
 }
