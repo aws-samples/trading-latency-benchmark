@@ -32,9 +32,23 @@ export class SingleInstanceStack extends cdk.Stack {
 
         const ami = MachineImage.latestAmazonLinux2023();
 
-        new Instance(this, 'c7i-metal-4xl', {
+        new Instance(this, 'c7i-4xl', {
             vpc: testVpc,
             instanceType: InstanceType.of(InstanceClass.C7I, InstanceSize.XLARGE4),
+            machineImage: ami,
+            securityGroup,
+            vpcSubnets: {
+                availabilityZones: ['us-east-1a']
+            },
+            keyName: 'virginia',
+            blockDevices: [{
+                deviceName: "/dev/xvda",
+                volume: BlockDeviceVolume.ebs(512)
+            }]
+        });
+        new Instance(this, 'c6in-4xl', {
+            vpc: testVpc,
+            instanceType: InstanceType.of(InstanceClass.C6IN, InstanceSize.XLARGE4),
             machineImage: ami,
             securityGroup,
             vpcSubnets: {

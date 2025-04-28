@@ -105,7 +105,7 @@ for log_file in $(find "$OUTPUT_DIR" -name "*.hlog" -type f); do
     
     # Run the Java program to analyze the log
     echo "Running analysis for $instance_name..."
-    REPORT_OUTPUT=$(java -jar target/ExchangeFlow-1.0-SNAPSHOT.jar latency-report "$log_file")
+    REPORT_OUTPUT=$(java -jar ../target/ExchangeFlow-1.0-SNAPSHOT.jar latency-report "$log_file")
     
     if [ $? -ne 0 ]; then
         echo "Error: Failed to generate report for $log_file"
@@ -116,12 +116,12 @@ for log_file in $(find "$OUTPUT_DIR" -name "*.hlog" -type f); do
     echo "$REPORT_OUTPUT"
     
     # Extract key metrics for summary
-    min=$(echo "$REPORT_OUTPUT" | grep "Min latency" | awk '{print $3}')
-    p50=$(echo "$REPORT_OUTPUT" | grep "50.00%" | awk '{print $2}')
-    p90=$(echo "$REPORT_OUTPUT" | grep "90.00%" | awk '{print $2}')
-    p99=$(echo "$REPORT_OUTPUT" | grep "99.00%" | awk '{print $2}')
-    p999=$(echo "$REPORT_OUTPUT" | grep "99.90%" | awk '{print $2}')
-    max=$(echo "$REPORT_OUTPUT" | grep "Max latency" | awk '{print $3}')
+    min=$(echo "$REPORT_OUTPUT" | grep "Min latency:" | awk '{print $3}')
+    p50=$(echo "$REPORT_OUTPUT" | grep "50.00%:" | awk '{print $2}')
+    p90=$(echo "$REPORT_OUTPUT" | grep "90.00%:" | awk '{print $2}')
+    p99=$(echo "$REPORT_OUTPUT" | grep "99.00%:" | awk '{print $2}')
+    p999=$(echo "$REPORT_OUTPUT" | grep "99.90%:" | awk '{print $2}')
+    max=$(echo "$REPORT_OUTPUT" | grep "Max latency:" | awk '{print $3}')
     
     # Add to summary file
     echo "| $instance_name | $min | $p50 | $p90 | $p99 | $p999 | $max |" >> "$OUTPUT_DIR/$REPORT_SUMMARY_FILE"
