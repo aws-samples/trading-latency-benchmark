@@ -1,5 +1,5 @@
 {
-  "app": "npx ts-node --prefer-ts-exts bin/low-latency-connect.ts",
+  "app": "npx ts-node --prefer-ts-exts bin/trading-benchmark.ts",
   "watch": {
     "include": [
       "**"

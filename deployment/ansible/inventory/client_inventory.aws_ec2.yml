@@ -6,8 +6,7 @@ regions:
   - us-east-1
 include_filters:
   - tag:Name:
-    - 'Trading-Client'
-    - 'Trading-Server'
+      - 'Trading-Client'
 hostnames:
   - name: tag:Name
     separator: ''
