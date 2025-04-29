@@ -18,9 +18,12 @@
 package com.aws.trading;
 
 import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.*;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.channel.epoll.EpollSocketChannel;
+import io.netty.channel.epoll.Epoll;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
@@ -165,11 +168,28 @@ public class ExchangeClient {
      * @return The configured Bootstrap
      */
     private static Bootstrap configureBootstrap(MultithreadEventLoopGroup workerGroup) {
+        Class<? extends Channel> channelClass;
+        
+        if (USE_IOURING) {
+            channelClass = IOUringSocketChannel.class;
+            LOGGER.info("Using IOUringSocketChannel for socket connections");
+        } else if (Epoll.isAvailable()) {
+            channelClass = EpollSocketChannel.class;
+            LOGGER.info("Using EpollSocketChannel for socket connections");
+        } else {
+            channelClass = NioSocketChannel.class;
+            LOGGER.info("Using NioSocketChannel for socket connections");
+        }
+        
         return new Bootstrap()
                 .group(workerGroup)
-                .channel(USE_IOURING ? IOUringSocketChannel.class : NioSocketChannel.class)
+                .channel(channelClass)
                 .option(ChannelOption.SO_KEEPALIVE, true)
-                .option(ChannelOption.TCP_NODELAY, true); // Added TCP_NODELAY for lower latency
+                .option(ChannelOption.TCP_NODELAY, true) // Disable Nagle's algorithm for lower latency
+                .option(ChannelOption.SO_REUSEADDR, true) // Allow socket address reuse
+                .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT) // Use pooled allocator for better memory management
+                .option(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(8 * 1024, 32 * 1024)) // Optimize write buffer size
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 1000); // Set connection timeout
     }
 
     /**
@@ -254,6 +274,12 @@ public class ExchangeClient {
         return new ChannelInitializer<>() {
             @Override
             public void initChannel(SocketChannel channel) throws Exception {
+                // Configure channel for low latency
+                channel.config().setAllocator(PooledByteBufAllocator.DEFAULT);
+                channel.config().setOption(ChannelOption.TCP_NODELAY, true);
+                channel.config().setOption(ChannelOption.SO_REUSEADDR, true);
+                channel.config().setWriteBufferWaterMark(new WriteBufferWaterMark(8 * 1024, 32 * 1024));
+                
                 ChannelPipeline pipeline = channel.pipeline();
                 if (null != sslCtx) {
                     pipeline.addLast(sslCtx.newHandler(channel.alloc(), 

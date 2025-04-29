@@ -18,8 +18,10 @@
 package com.aws.trading;
 
 import io.netty.channel.MultithreadEventLoopGroup;
+import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.incubator.channel.uring.IOUringEventLoopGroup;
+import io.netty.channel.epoll.Epoll;
 import net.openhft.affinity.AffinityStrategies;
 import net.openhft.affinity.AffinityThreadFactory;
 import org.HdrHistogram.Histogram;
@@ -68,8 +70,22 @@ public class RoundTripLatencyTester {
     public RoundTripLatencyTester() throws URISyntaxException, UnrecoverableKeyException, CertificateException, IOException, NoSuchAlgorithmException, KeyStoreException, KeyManagementException {
         this.websocketURI = new URI(MessageFormat.format("{0}://{1}:{2,number,#}", USE_SSL ? "wss" : "ws", HOST, WEBSOCKET_PORT));
         this.httpURI = new URI(MessageFormat.format("{0}://{1}:{2,number,#}", USE_SSL ? "https" : "http", HOST, HTTP_PORT));
-        this.nettyIOGroup = USE_IOURING ? new IOUringEventLoopGroup(NETTY_THREAD_COUNT, NETTY_IO_THREAD_FACTORY) : new NioEventLoopGroup(NETTY_THREAD_COUNT, NETTY_IO_THREAD_FACTORY);
-        this.workerGroup = USE_IOURING ? new IOUringEventLoopGroup(NETTY_THREAD_COUNT, NETTY_WORKER_THREAD_FACTORY) : new NioEventLoopGroup(NETTY_THREAD_COUNT, NETTY_WORKER_THREAD_FACTORY);
+        
+        // Use IOUring if enabled, otherwise use Epoll if available, otherwise fallback to NIO
+        if (USE_IOURING) {
+            this.nettyIOGroup = new IOUringEventLoopGroup(NETTY_THREAD_COUNT, NETTY_IO_THREAD_FACTORY);
+            this.workerGroup = new IOUringEventLoopGroup(NETTY_THREAD_COUNT, NETTY_WORKER_THREAD_FACTORY);
+            LOGGER.info("Using IOUringEventLoopGroup for networking");
+        } else if (Epoll.isAvailable()) {
+            this.nettyIOGroup = new EpollEventLoopGroup(NETTY_THREAD_COUNT, NETTY_IO_THREAD_FACTORY);
+            this.workerGroup = new EpollEventLoopGroup(NETTY_THREAD_COUNT, NETTY_WORKER_THREAD_FACTORY);
+            LOGGER.info("Using EpollEventLoopGroup for networking");
+        } else {
+            this.nettyIOGroup = new NioEventLoopGroup(NETTY_THREAD_COUNT, NETTY_IO_THREAD_FACTORY);
+            this.workerGroup = new NioEventLoopGroup(NETTY_THREAD_COUNT, NETTY_WORKER_THREAD_FACTORY);
+            LOGGER.info("Using NioEventLoopGroup for networking");
+        }
+        
         var apiToken1 = API_TOKEN;
         for (int i = 0; i < exchangeClients.length; i++) {
             LOGGER.info("Creating exchang client with api token {}", apiToken1);
@@ -95,6 +111,7 @@ public class RoundTripLatencyTester {
         for (ExchangeClient exchangeClient : exchangeClients) {
             exchangeClient.connect();
         }
+        LOGGER.info("All exchange clients connected successfully");
         testStartTime = System.nanoTime();
         histogramStartTime = testStartTime;
     }
