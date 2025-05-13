@@ -452,8 +452,8 @@
       ansible.builtin.shell: |
         # Move all interrupts to housekeeping cores
         for IRQ_DIR in /proc/irq/[0-9]*; do
-          if [ -d "\$IRQ_DIR" ] && [ -f "\$IRQ_DIR/smp_affinity_list" ]; then
-            echo "0-1" > "\$IRQ_DIR/smp_affinity_list" 2>/dev/null || true
+          if [ -d "$IRQ_DIR" ] && [ -f "$IRQ_DIR/smp_affinity_list" ]; then
+            echo "0-1" > "$IRQ_DIR/smp_affinity_list" 2>/dev/null || true
           fi
         done
       changed_when: true
@@ -469,7 +469,7 @@
 
           [Service]
           Type=oneshot
-          ExecStart=/bin/bash -c "for IRQ_DIR in /proc/irq/[0-9]*; do if [ -d \"\\$IRQ_DIR\" ] && [ -f \"\\$IRQ_DIR/smp_affinity_list\" ]; then echo \"0-1\" > \"\\$IRQ_DIR/smp_affinity_list\" 2>/dev/null || true; fi; done"
+          ExecStart=/bin/bash -c "for IRQ_DIR in /proc/irq/[0-9]*; do if [ -d \"$IRQ_DIR\" ] && [ -f \"$IRQ_DIR/smp_affinity_list\" ]; then echo \"0-1\" > \"$IRQ_DIR/smp_affinity_list\" 2>/dev/null || true; fi; done"
           RemainAfterExit=yes
 
           [Install]
@@ -935,14 +935,14 @@
           
           # Set CPU governor to performance
           for CPU in /sys/devices/system/cpu/cpu*/cpufreq/; do
-            if [ -f "\${CPU}scaling_governor" ]; then
-              echo performance > \${CPU}scaling_governor
+            if [ -f "${CPU}scaling_governor" ]; then
+              echo performance > ${CPU}scaling_governor
             fi
           done
           
           # Disable hyperthreading
-          for cpunum in \$(cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | cut -s -d, -f2- | tr ',' '\n' | sort -un); do
-            echo 0 > /sys/devices/system/cpu/cpu\$cpunum/online
+          for cpunum in $(cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | cut -s -d, -f2- | tr ',' '\n' | sort -un); do
+            echo 0 > /sys/devices/system/cpu/cpu$cpunum/online
           done
           
           # Disable THP explicitly
@@ -1093,10 +1093,10 @@
         content: |
           #!/bin/bash
           echo "=== SYSTEM TUNING VERIFICATION ==="
-          echo "Date: \$(date)"
+          echo "Date: $(date)"
           
           echo -e "\n=== WORKQUEUE CPUMASK ==="
-          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo "\$(basename \$(dirname {})): \$(cat {})"' \; || echo "Not available"
+          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo "$(basename $(dirname {})): $(cat {})"' \; || echo "Not available"
           
           echo -e "\n=== WRITEBACK NUMA ==="
           cat /sys/bus/workqueue/devices/writeback/numa 2>/dev/null || echo "Not available"
@@ -1108,7 +1108,7 @@
           cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null || echo "Not available"
           
           echo -e "\n=== DISK SCHEDULER ==="
-          for disk in \$(lsblk -d -o NAME | grep -v NAME); do
-            echo "\$disk: \$(cat /sys/block/\$disk/queue/scheduler 2>/dev/null || echo "Not available")"
+          for disk in $(lsblk -d -o NAME | grep -v NAME); do
+            echo "$disk: $(cat /sys/block/$disk/queue/scheduler 2>/dev/null || echo "Not available")"
           done
         mode: '0755'
