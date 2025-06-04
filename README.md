@@ -164,6 +164,11 @@ The benchmark implements several optimization techniques commonly used in high-f
 3. **Separate Execution and IO Threads**: Keeps network I/O threads dedicated to communication
 4. **HDR Histogram for Latency Recording**: Efficiently records latency measurements with high precision
 
+### Sequence Diagram
+The benchmark contains a simple HFT client and Matching Engine written in Java to simulate a basic order flow sequence for latency measurements, as per the following diagram:
+
+![HFT Client Sequence Diagram](assets/images/hft-client-sequence-diagram.png)
+
 ## Contributing
 
 See [CONTRIBUTING](CONTRIBUTING.md) for details on how to contribute to this project.
