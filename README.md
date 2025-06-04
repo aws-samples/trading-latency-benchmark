@@ -32,7 +32,7 @@ The benchmark suite consists of:
 4. **Ansible Playbooks**: Scripts to provision instances, run tests, and collect results
 5. **Analysis Tools**: Utilities to process and visualize latency data using HDR Histograms
 
-## Sequence Diagram
+### Sequence Diagram
 The benchmark contains a simple HFT client and Matching Engine written in Java to simulate a basic order flow sequence for latency measurements, as per the following diagram:
 
 ![HFT Client Sequence Diagram](assets/images/hft-client-sequence-diagram.png)
