@@ -23,6 +23,7 @@ Financial markets operate at extremely high speeds, where being just a few micro
 5. Test the impact of network conditions on trading application performance
 
 ### Components
+
 The benchmark suite consists of:
 
 1. **Java Trading Client**: A high-performance client that sends limit and cancel orders and measures round-trip times
@@ -30,6 +31,11 @@ The benchmark suite consists of:
 3. **CDK Infrastructure**: AWS CDK code to deploy the required EC2 instances and networking components
 4. **Ansible Playbooks**: Scripts to provision instances, run tests, and collect results
 5. **Analysis Tools**: Utilities to process and visualize latency data using HDR Histograms
+
+## Sequence Diagram
+The benchmark contains a simple HFT client and Matching Engine written in Java to simulate a basic order flow sequence for latency measurements, as per the following diagram:
+
+![HFT Client Sequence Diagram](assets/images/hft-client-sequence-diagram.png)
 
 ## Prerequisites
 
@@ -163,11 +169,6 @@ The benchmark implements several optimization techniques commonly used in high-f
 2. **Composite Buffers**: Reduces unnecessary object allocations and copy operations
 3. **Separate Execution and IO Threads**: Keeps network I/O threads dedicated to communication
 4. **HDR Histogram for Latency Recording**: Efficiently records latency measurements with high precision
-
-### Sequence Diagram
-The benchmark contains a simple HFT client and Matching Engine written in Java to simulate a basic order flow sequence for latency measurements, as per the following diagram:
-
-![HFT Client Sequence Diagram](assets/images/hft-client-sequence-diagram.png)
 
 ## Contributing
 
