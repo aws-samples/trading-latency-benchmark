@@ -45,12 +45,12 @@
 #define UMEM_RX_FIRST_FRAME_IX TX_FRAMES
 #define FRAME_SIZE 4096
 
-// Debug print macro
+// Debug print macro - DISABLED for performance
 static int g_debug_enabled = 0;
 #define DEBUG_PRINT(fmt, ...)                                  \
     do                                                         \
     {                                                          \
-        if (g_debug_enabled)                                   \
+        if (0)                                                 \
             fprintf(stderr, "DEBUG CPP: " fmt, ##__VA_ARGS__); \
     } while (0)
 

@@ -49,6 +49,13 @@ This benchmark implementation showcases AF_XDP (eXpress Data Path) zero-copy net
 - **PacketMultiplexerMain.cpp** - Main packet multiplexer application
 - **ControlClient.cpp** - Control client for managing multiplexer destinations
 - **TestClient.cpp** - UDP test client for sending test packets
+- **MarketDataProviderClient.cpp** - Market data provider client for round-trip latency benchmarking
+
+#### Recent Updates
+- **Renamed from Binance**: All components have been renamed from "Binance" to "MarketDataProvider" for generic market data use
+- **Updated Build Targets**: `binance_trade_client` → `market_data_provider_client`
+- **Updated Scripts**: All benchmark scripts now use the new executable names
+- **Consistent Branding**: All documentation, comments, and examples use "MarketDataProvider" terminology
 
 ### XDP Programs
 - **unicast_filter.c** - **NEW** XDP program for filtering unicast UDP packets
@@ -100,6 +107,108 @@ make clean
 ### Packet Multiplexer (Zero-Copy UDP Multiplexer)
 
 The packet multiplexer demonstrates end-to-end AF_XDP zero-copy performance for market data distribution. It listens for incoming UDP packets and multiplexes them to multiple subscribers with minimal latency.
+
+### Performance Benchmarking with Market Data Provider Trade Feed
+
+The project includes a comprehensive performance benchmark that compares AF_XDP zero-copy against standard UDP sockets using realistic Market Data Provider trade messages.
+
+#### Market Data Provider Client - Round-Trip Latency Benchmark
+
+The `market_data_provider_client` measures end-to-end round-trip latency through the AF_XDP packet multiplexer:
+
+**How it works:**
+1. **Listens for UDP messages** as a subscriber to the packet multiplexer
+2. **Adds itself as a subscriber** to receive echoed messages
+3. **Sends Market Data Provider trade messages** with sequential trade IDs
+4. **Receives echoed messages** and calculates round-trip time using trade ID correlation
+5. **Generates comprehensive report** with packet loss, throughput, and latency histogram
+
+**Message Format:**
+```json
+{
+    "e":"trade",                        // Static
+    "E":1234567890123,                  // Static (optimized)
+    "s":"BTC-USDT",                     // Static
+    "t":0000000001,                     // Sequential trade ID (variable)
+    "p":"45000",                        // Static
+    "q":"1.5",                          // Static
+    "b":1000000001,                     // Static
+    "a":1000000002,                     // Static
+    "T":1234567890000,                  // Static
+    "S":"1",                            // Static
+    "X":"MARKET"                        // Static
+}
+```
+
+**Usage:**
+```bash
+./market_data_provider_client <multiplexer_ip> <multiplexer_port> <local_ip> <local_port> <total_messages> <messages_per_sec>
+
+# Example: Send 1 million messages at 10,000 msg/sec
+./market_data_provider_client 10.0.0.71 9000 10.0.0.34 9001 1000000 10000
+```
+
+**Parameters:**
+- `multiplexer_ip/port`: Packet multiplexer endpoint
+- `local_ip/port`: Local endpoint to receive echoed messages
+- `total_messages`: Total number of messages to send (e.g., 1000000)
+- `messages_per_sec`: Target sending rate
+
+**Output Statistics:**
+- **Packet Loss**: Total and percentage of lost packets
+- **Throughput**: Actual vs target message rate
+- **Round-Trip Time (RTT)**: Min/Avg/Max in microseconds
+- **Latency Percentiles**: P50, P90, P95, P99, P99.9
+- **Latency Histogram**: Distribution of RTT values
+
+#### Automated Performance Benchmark
+
+The `run_performance_benchmark.sh` script provides an automated way to compare AF_XDP zero-copy performance against standard UDP sockets:
+
+**Features:**
+- Tests multiple message rates (1K, 5K, 10K, 50K, 100K msg/sec)
+- Compares AF_XDP zero-copy vs standard socket modes
+- Generates detailed latency statistics and percentiles
+- Creates CSV reports and comparison tables
+- Handles setup, warmup, and cleanup automatically
+
+**Usage:**
+```bash
+# Run the complete benchmark (requires root for AF_XDP)
+sudo ./run_performance_benchmark.sh
+```
+
+**Configuration:**
+Edit the script to match your setup:
+```bash
+INTERFACE="enp39s0"         # Your network interface
+MULTIPLEXER_IP="10.0.0.71"  # Packet multiplexer IP
+MULTIPLEXER_PORT="9000"     # Packet multiplexer port
+SUBSCRIBER_IP="10.0.0.34"   # Subscriber IP
+SUBSCRIBER_PORT="9000"      # Subscriber port
+MESSAGE_RATES=(1000 5000 10000 50000 100000)  # Test rates
+TEST_DURATION=30            # Test duration in seconds
+```
+
+**Output:**
+The benchmark generates:
+- `benchmark_results.csv` - Raw performance data
+- `results/` directory with detailed logs
+- Performance comparison report showing improvement percentages
+
+**Example Output:**
+```
+Message Rate Comparison (Average Latency in microseconds):
+-------------------------------------------------------------
+Rate (msg/s)    AF_XDP Zero-Copy    Standard Socket    Improvement
+-------------------------------------------------------------
+1000            2.5 μs              45.3 μs            94.48%
+5000            3.1 μs              52.7 μs            94.12%
+10000           3.8 μs              68.2 μs            94.43%
+50000           5.2 μs              125.6 μs           95.86%
+100000          8.4 μs              234.1 μs           96.41%
+-------------------------------------------------------------
+```
 
 #### Real-World Setup Example
 

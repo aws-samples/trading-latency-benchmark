@@ -1,21 +1,3 @@
-/*
- * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
- * SPDX-License-Identifier: MIT-0
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of this
- * software and associated documentation files (the "Software"), to deal in the Software
- * without restriction, including without limitation the rights to use, copy, modify,
- * merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
- * PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
- * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
- * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
- * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
-
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -g
 INCLUDES = -I. 
@@ -23,11 +5,11 @@ LDFLAGS = -L/usr/local/lib -Wl,-rpath,/usr/local/lib
 LDLIBS = -lxdp -lbpf -lelf -lpthread
 
 # Source files  
-SOURCES = AFXDPSocket.cpp NetworkInterfaceConfigurator.cpp PacketMultiplexer.cpp
+SOURCES = AFXDPSocket.cpp NetworkInterfaceConfigurator.cpp PacketReplicator.cpp
 OBJECTS = $(SOURCES:.cpp=.o)
 
 # Executables and XDP programs
-TARGETS = packet_multiplexer control_client test_client
+TARGETS = packet_replicator control_client test_client market_data_provider_client
 XDP_PROGRAMS = unicast_filter.o
 
 # Default target
@@ -37,8 +19,8 @@ all: $(TARGETS) $(XDP_PROGRAMS)
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
-# Packet Multiplexer (Main application)
-packet_multiplexer: PacketMultiplexerMain.o $(OBJECTS)
+# Packet Replicator (Main application)
+packet_replicator: PacketReplicatorMain.o $(OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 # Control Client 
@@ -47,6 +29,10 @@ control_client: ControlClient.o
 
 # Test Client
 test_client: TestClient.o
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+# Market Data Provider Client (Performance benchmark)
+market_data_provider_client: MarketDataProviderClient.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 # XDP Program (BPF bytecode)
@@ -126,8 +112,8 @@ check-deps:
 help:
 	@echo "Available targets:"
 	@echo "  all                - Build all targets"
-	@echo "  packet_multiplexer - Build packet multiplexer (Zero-copy UDP multiplexer)"
-	@echo "  control_client     - Build control client (Manage multiplexer destinations)"
+	@echo "  packet_replicator  - Build packet replicator (Zero-copy UDP replicator)"
+	@echo "  control_client     - Build control client (Manage replicator destinations)"
 	@echo "  test_client        - Build test client (Send UDP test packets)"
 	@echo "  clean              - Remove all built files"
 	@echo "  install-deps       - Install development and runtime dependencies"
@@ -135,15 +121,15 @@ help:
 	@echo "  check-deps         - Check library dependencies"
 	@echo "  help               - Show this help"
 	@echo ""
-	@echo "Packet Multiplexer Usage:"
+	@echo "Packet Replicator Usage:"
 	@echo "  1. Install dependencies: make install-deps"
 	@echo "  2. Build project: make"
-	@echo "  3. Start multiplexer: sudo ./packet_multiplexer <interface> <listen_ip> <listen_port>"
-	@echo "  4. Add destinations: ./control_client <multiplexer_ip> add <dest_ip> <dest_port>"
+	@echo "  3. Start replicator: sudo ./packet_replicator <interface> <listen_ip> <listen_port>"
+	@echo "  4. Add destinations: ./control_client <replicator_ip> add <dest_ip> <dest_port>"
 	@echo "  5. Send test packets: ./test_client <listen_ip> <listen_port>"
 	@echo ""
 	@echo "Example workflow:"
-	@echo "  Terminal 1: sudo ./packet_multiplexer eth0 192.168.1.100 8080"
+	@echo "  Terminal 1: sudo ./packet_replicator eth0 192.168.1.100 8080"
 	@echo "  Terminal 2: ./control_client 192.168.1.100 add 10.0.0.5 9000"
 	@echo "  Terminal 3: ./test_client 192.168.1.100 8080"
 

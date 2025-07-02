@@ -25,7 +25,7 @@
 #include <bpf/bpf_endian.h>
 
 // Required for logging in XDP programs
-#define DEBUG 1
+#define DEBUG 0
 #define bpf_debug(fmt, ...)                 \
     ({                                      \
         if (DEBUG)                          \
@@ -88,7 +88,7 @@ int unicast_filter(struct xdp_md *ctx)
     void *data = (void *)(long)ctx->data;
 
     // Count all packets
-    increment_counter(0);
+    // increment_counter(0);
 
     // Ensure we have enough data for an Ethernet header
     if (data + sizeof(struct ethhdr) > data_end)
@@ -106,7 +106,7 @@ int unicast_filter(struct xdp_md *ctx)
     }
 
     // IPv4 packet found
-    increment_counter(1);
+    // increment_counter(1);
 
     // Access IPv4 header with proper bounds checking
     struct iphdr *iph = (void *)(eth + 1);
@@ -123,7 +123,7 @@ int unicast_filter(struct xdp_md *ctx)
     }
 
     // UDP packet found
-    increment_counter(2);
+    // increment_counter(2);
 
     // Safely calculate UDP header position
     __u32 ip_hdr_size = iph->ihl * 4;
@@ -163,7 +163,7 @@ int unicast_filter(struct xdp_md *ctx)
     }
 
     // Target packet found - log and redirect
-    increment_counter(3);
+    // increment_counter(3);
 
     __u8 *saddr = (__u8 *)&iph->saddr;
     __u8 *daddr = (__u8 *)&iph->daddr;
@@ -171,8 +171,8 @@ int unicast_filter(struct xdp_md *ctx)
     __u16 target_port_host = bpf_ntohs(config->target_port);
 
     // bpf_debug("XDP: Target UDP packet %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d",
-              saddr[0], saddr[1], saddr[2], saddr[3], src_port,
-              daddr[0], daddr[1], daddr[2], daddr[3], target_port_host);
+    //           saddr[0], saddr[1], saddr[2], saddr[3], src_port,
+    //           daddr[0], daddr[1], daddr[2], daddr[3], target_port_host);
 
     // Get the actual queue index from the context
     __u32 queue_idx = ctx->rx_queue_index;
@@ -185,8 +185,8 @@ int unicast_filter(struct xdp_md *ctx)
 
     // Redirect packet to the AF_XDP socket for zero-copy processing
     // bpf_debug("XDP: Redirecting target UDP packet on queue %d to socket %d",
-              queue_idx, *fd_ptr);
+    //           queue_idx, *fd_ptr);
 
-    increment_counter(4);
+    // increment_counter(4);
     return bpf_redirect_map(&xsks_map, queue_idx, XDP_DROP);
 }
