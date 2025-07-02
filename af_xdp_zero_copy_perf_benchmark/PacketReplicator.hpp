@@ -29,6 +29,10 @@
 #include <set>
 #include <array>
 #include <netinet/in.h>
+#include <cstdint>
+#include <chrono>
+#include <immintrin.h>  // For CPU pause instruction
+#include <sched.h>      // For CPU affinity
 
 /**
  * High-performance packet replicator using AF_XDP zero copy
@@ -75,14 +79,39 @@ private:
     mutable std::mutex destinations_mutex_;
     std::set<Destination> destinations_;
     
-    // Statistics (per-queue and total)
+    // HFT OPTIMIZATIONS: Lock-free frame counter
+    alignas(64) std::atomic<uint32_t> tx_frame_counter_{0};  // Cache-aligned atomic counter
+    
+    // HFT OPTIMIZATIONS: Lock-free packet buffer pool
+    static constexpr int BUFFER_POOL_SIZE = 1024;
+    struct alignas(64) PacketBuffer {
+        uint8_t data[4096];
+        std::atomic<bool> in_use{false};
+        uint64_t timestamp{0};
+    };
+    std::array<PacketBuffer, BUFFER_POOL_SIZE> buffer_pool_;
+    alignas(64) std::atomic<uint32_t> buffer_pool_index_{0};
+    
+    // HFT OPTIMIZATIONS: Thread-local destination cache
+    struct alignas(64) ThreadLocalDestCache {
+        std::vector<Destination> cached_destinations;
+        std::chrono::steady_clock::time_point last_update;
+        static constexpr std::chrono::milliseconds CACHE_TIMEOUT{100};
+    };
+    static thread_local ThreadLocalDestCache dest_cache_;
+    
+    // HFT OPTIMIZATIONS: CPU affinity for threads
+    std::vector<int> cpu_cores_;
+    bool enable_cpu_affinity_{true};
+    
+    // Statistics (per-queue and total) - Cache aligned for performance
     static constexpr int MAX_QUEUES = 8;  // Support up to 8 queues
-    std::array<std::atomic<uint64_t>, MAX_QUEUES> packets_received_per_queue_;
-    std::array<std::atomic<uint64_t>, MAX_QUEUES> packets_sent_per_queue_;
-    std::atomic<uint64_t> packets_received_;
-    std::atomic<uint64_t> packets_sent_;
-    std::atomic<uint64_t> bytes_received_;
-    std::atomic<uint64_t> bytes_sent_;
+    alignas(64) std::array<std::atomic<uint64_t>, MAX_QUEUES> packets_received_per_queue_;
+    alignas(64) std::array<std::atomic<uint64_t>, MAX_QUEUES> packets_sent_per_queue_;
+    alignas(64) std::atomic<uint64_t> packets_received_;
+    alignas(64) std::atomic<uint64_t> packets_sent_;
+    alignas(64) std::atomic<uint64_t> bytes_received_;
+    alignas(64) std::atomic<uint64_t> bytes_sent_;
 
 public:
     /**
@@ -376,6 +405,71 @@ private:
      * @param ip_address Destination IP address to resolve
      */
     void triggerArpResolution(const std::string& ip_address);
+
+    // HFT OPTIMIZATION METHODS
+    
+    /**
+     * Get a free buffer from the lock-free buffer pool
+     * 
+     * @return Pointer to free buffer, or nullptr if none available
+     */
+    PacketBuffer* getBufferFromPool();
+    
+    /**
+     * Return a buffer to the lock-free buffer pool
+     * 
+     * @param buffer Buffer to return
+     */
+    void returnBufferToPool(PacketBuffer* buffer);
+    
+    /**
+     * Setup CPU affinity for a thread
+     * 
+     * @param thread_id Thread to set affinity for
+     * @param cpu_core CPU core to bind to
+     * @return True if successful
+     */
+    bool setCpuAffinity(std::thread& thread, int cpu_core);
+    
+    /**
+     * Initialize CPU core assignments for optimal performance
+     */
+    void initializeCpuCores();
+    
+    /**
+     * Get cached destinations for current thread (lock-free)
+     * 
+     * @return Vector of cached destinations
+     */
+    std::vector<Destination> getCachedDestinations();
+    
+    /**
+     * Update thread-local destination cache
+     */
+    void updateDestinationCache();
+    
+    /**
+     * Fast UDP payload extraction with branch prediction hints
+     * Optimized version with minimal branching
+     * 
+     * @param packetData Pointer to packet data
+     * @param packetLen  Length of the packet
+     * @param payloadData Output pointer to payload data
+     * @param payloadLen  Output length of payload
+     * @return True if UDP payload was successfully extracted
+     */
+    inline bool extractUdpPayloadFast(const uint8_t* packetData, size_t packetLen,
+                                     const uint8_t*& payloadData, size_t& payloadLen);
+    
+    /**
+     * Lock-free frame management using bitwise operations
+     * 
+     * @param tx_frames Total number of TX frames (must be power of 2)
+     * @return Next frame index
+     */
+    inline uint32_t getNextFrameIndexFast(uint32_t tx_frames) {
+        return tx_frame_counter_.fetch_add(1, std::memory_order_relaxed) & (tx_frames - 1);
+    }
 };
 
 #endif // PACKET_REPLICATOR_HPP

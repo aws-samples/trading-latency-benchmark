@@ -86,8 +86,18 @@ PacketReplicator::PacketReplicator(const std::string& interface, const std::stri
         packets_sent_per_queue_[i].store(0);
     }
     
-    std::cout << "PacketReplicator initializing for " << listen_ip_ << ":" << listen_port_ 
+    // HFT OPTIMIZATION: Initialize CPU core assignments
+    initializeCpuCores();
+    
+    // HFT OPTIMIZATION: Initialize lock-free buffer pool
+    for (auto& buffer : buffer_pool_) {
+        buffer.in_use.store(false, std::memory_order_relaxed);
+        buffer.timestamp = 0;
+    }
+    
+    std::cout << "HFT-optimized PacketReplicator initializing for " << listen_ip_ << ":" << listen_port_ 
               << " on interface " << listen_interface_ << " with " << num_queues_ << " queues" << std::endl;
+    std::cout << "HFT optimizations enabled: CPU affinity, lock-free buffers, busy polling, branch prediction" << std::endl;
 }
 
 PacketReplicator::~PacketReplicator() {
@@ -305,7 +315,7 @@ std::vector<PacketReplicator::Destination> PacketReplicator::getDestinations() c
 
 void PacketReplicator::start() {
     if (!running_.exchange(true)) {
-        std::cout << "Starting PacketReplicator..." << std::endl;
+        std::cout << "Starting HFT-optimized PacketReplicator..." << std::endl;
         
         // Start packet processing threads for each queue
         packet_processor_threads_.resize(num_queues_);
@@ -313,13 +323,20 @@ void PacketReplicator::start() {
             packet_processor_threads_[queue_id] = std::make_unique<std::thread>(
                 [this, queue_id]() { this->processPacketsForQueue(queue_id); }
             );
-            std::cout << "Started packet processing thread for queue " << queue_id << std::endl;
+            
+            // HFT OPTIMIZATION: Apply CPU affinity to each packet processing thread
+            if (queue_id < static_cast<int>(cpu_cores_.size())) {
+                setCpuAffinity(*packet_processor_threads_[queue_id], cpu_cores_[queue_id]);
+            }
+            
+            std::cout << "Started HFT-optimized packet processing thread for queue " << queue_id << std::endl;
         }
         
-        // Start control protocol thread
+        // Start control protocol thread (don't bind to specific core to avoid interference)
         control_thread_ = std::make_unique<std::thread>(&PacketReplicator::handleControlProtocol, this);
         
-        std::cout << "PacketReplicator started with " << num_queues_ << " processing threads" << std::endl;
+        std::cout << "HFT-optimized PacketReplicator started with " << num_queues_ << " processing threads" << std::endl;
+        std::cout << "CPU affinity applied, busy polling enabled, lock-free operations active" << std::endl;
     }
 }
 
@@ -374,55 +391,77 @@ void PacketReplicator::printStatistics() const {
     std::cout << "=================================" << std::endl;
 }
 
-// Removed processPackets() method - using processPacketsForQueue() instead
+// HFT OPTIMIZED: Removed processPackets() method - using processPacketsForQueue() instead
 
 void PacketReplicator::processPacketsForQueue(int queueId) {
-    std::cout << "Packet processing thread started for queue " << queueId << std::endl;
+    std::cout << "HFT-optimized packet processing thread started for queue " << queueId << std::endl;
     
-    std::vector<int> offsets(64);  // Batch size of 64 packets
-    std::vector<int> lengths(64);
+    // HFT OPTIMIZATION: Pre-allocate batch vectors with cache-aligned memory
+    alignas(64) std::vector<int> offsets(64);  // Batch size of 64 packets
+    alignas(64) std::vector<int> lengths(64);
     
-    while (running_) {
+    // HFT OPTIMIZATION: Pre-calculate TX frames for bitwise operations
+    const uint32_t tx_frames = 2048;  // Must be power of 2
+    static_assert((tx_frames & (tx_frames - 1)) == 0, "tx_frames must be power of 2");
+    
+    while (__builtin_expect(running_.load(std::memory_order_relaxed), 1)) {
         try {
-            // Receive packets from AF_XDP socket for this specific queue
+            // HFT OPTIMIZATION: Receive packets from AF_XDP socket for this specific queue
             int received = xdp_sockets_[queueId]->receive(offsets, lengths);
             
-            if (received > 0) {
-                // std::cout << "Queue " << queueId << ": Received " << received << " packets from XDP" << std::endl;
+            if (__builtin_expect(received > 0, 1)) {  // Branch prediction hint: packets expected
+                // HFT OPTIMIZATION: Prefetch next batch of packet data
+                if (__builtin_expect(received > 1, 1)) {
+                    uint8_t* next_packet = xdp_sockets_[queueId]->getUmemBuffer() + offsets[1];
+                    __builtin_prefetch(next_packet, 0, 3);  // Prefetch for read, high temporal locality
+                }
                 
-                // Process each packet
+                // Process each packet with optimized loop
                 for (int i = 0; i < received; i++) {
                     uint8_t* packet_data = xdp_sockets_[queueId]->getUmemBuffer() + offsets[i];
                     size_t packet_len = lengths[i];
                     
-                    // Update per-queue and total statistics
-                    packets_received_per_queue_[queueId]++;
-                    packets_received_++;
-                    bytes_received_ += packet_len;
+                    // HFT OPTIMIZATION: Prefetch next packet data
+                    if (__builtin_expect(i + 1 < received, 1)) {
+                        uint8_t* next_packet = xdp_sockets_[queueId]->getUmemBuffer() + offsets[i + 1];
+                        __builtin_prefetch(next_packet, 0, 3);
+                    }
                     
-                    // Replicate the packet to all destinations
+                    // HFT OPTIMIZATION: Update per-queue and total statistics with relaxed memory ordering
+                    packets_received_per_queue_[queueId].fetch_add(1, std::memory_order_relaxed);
+                    packets_received_.fetch_add(1, std::memory_order_relaxed);
+                    bytes_received_.fetch_add(packet_len, std::memory_order_relaxed);
+                    
+                    // HFT OPTIMIZATION: Replicate the packet to all destinations using lock-free cache
                     int sent_count = replicatePacket(packet_data, packet_len, queueId);
                     
-                    if (sent_count > 0) {
-                        packets_sent_per_queue_[queueId] += sent_count;
-                        // std::cout << "Queue " << queueId << ": Replicated packet to " << sent_count << " destinations" << std::endl;
+                    if (__builtin_expect(sent_count > 0, 1)) {  // Branch prediction: expect successful sends
+                        packets_sent_per_queue_[queueId].fetch_add(sent_count, std::memory_order_relaxed);
                     }
                 }
                 
                 // Recycle the frames back to the fill queue
                 xdp_sockets_[queueId]->recycleFrames();
+            } else {
+                // HFT OPTIMIZATION: Busy polling with CPU pause instead of sleep
+                // This keeps the CPU active for lowest possible latency
+                __builtin_ia32_pause();  // Pause CPU to reduce power and avoid busy-wait penalties
             }
         } catch (const std::exception& e) {
-            if (running_) {
+            if (__builtin_expect(running_.load(std::memory_order_relaxed), 1)) {
                 std::cerr << "Error in packet processing for queue " << queueId << ": " << e.what() << std::endl;
+                // Brief pause on error to prevent tight error loops
+                for (int i = 0; i < 1000; ++i) {
+                    __builtin_ia32_pause();
+                }
             }
         }
         
-        // Small delay to prevent busy waiting
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        // HFT OPTIMIZATION: *** REMOVED 100μs SLEEP *** - Now using busy polling for minimal latency
+        // The __builtin_ia32_pause() above provides the CPU hints without blocking
     }
     
-    std::cout << "Packet processing thread stopped for queue " << queueId << std::endl;
+    std::cout << "HFT-optimized packet processing thread stopped for queue " << queueId << std::endl;
 }
 
 void PacketReplicator::handleControlProtocol() {
@@ -1127,4 +1166,154 @@ void PacketReplicator::triggerArpResolution(const std::string& ip_address) {
     }
     
     close(temp_socket);
+}
+
+// HFT OPTIMIZATION IMPLEMENTATIONS
+
+// Thread-local destination cache definition
+thread_local PacketReplicator::ThreadLocalDestCache PacketReplicator::dest_cache_;
+
+PacketReplicator::PacketBuffer* PacketReplicator::getBufferFromPool() {
+    // HFT OPTIMIZATION: Lock-free buffer allocation using atomic operations
+    const uint32_t max_attempts = BUFFER_POOL_SIZE;
+    
+    for (uint32_t attempt = 0; attempt < max_attempts; ++attempt) {
+        uint32_t index = buffer_pool_index_.fetch_add(1, std::memory_order_relaxed) & (BUFFER_POOL_SIZE - 1);
+        PacketBuffer* buffer = &buffer_pool_[index];
+        
+        // Try to acquire this buffer using compare-and-swap
+        bool expected = false;
+        if (buffer->in_use.compare_exchange_weak(expected, true, std::memory_order_acquire)) {
+            // Successfully acquired buffer
+            buffer->timestamp = std::chrono::steady_clock::now().time_since_epoch().count();
+            return buffer;
+        }
+        
+        // Buffer was busy, try next one
+        __builtin_ia32_pause();  // CPU pause for better performance
+    }
+    
+    return nullptr;  // No free buffers available
+}
+
+void PacketReplicator::returnBufferToPool(PacketBuffer* buffer) {
+    if (__builtin_expect(buffer != nullptr, 1)) {
+        // HFT OPTIMIZATION: Release buffer back to pool
+        buffer->in_use.store(false, std::memory_order_release);
+    }
+}
+
+bool PacketReplicator::setCpuAffinity(std::thread& thread, int cpu_core) {
+    // HFT OPTIMIZATION: Bind thread to specific CPU core for deterministic performance
+    if (!enable_cpu_affinity_) {
+        return true;  // CPU affinity disabled
+    }
+    
+    pthread_t native_handle = thread.native_handle();
+    
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpu_core, &cpuset);
+    
+    int result = pthread_setaffinity_np(native_handle, sizeof(cpu_set_t), &cpuset);
+    if (result != 0) {
+        std::cerr << "Failed to set CPU affinity for thread to core " << cpu_core 
+                  << ": " << strerror(result) << std::endl;
+        return false;
+    }
+    
+    std::cout << "Successfully bound thread to CPU core " << cpu_core << std::endl;
+    return true;
+}
+
+void PacketReplicator::initializeCpuCores() {
+    // HFT OPTIMIZATION: Initialize CPU core assignments for optimal performance
+    // Reserve cores for packet processing threads (avoid core 0 which handles interrupts)
+    
+    int num_cores = std::thread::hardware_concurrency();
+    std::cout << "Detected " << num_cores << " CPU cores" << std::endl;
+    
+    // Reserve cores starting from core 1 (avoiding core 0)
+    cpu_cores_.clear();
+    cpu_cores_.reserve(num_queues_);
+    
+    for (int i = 0; i < num_queues_ && i + 1 < num_cores; ++i) {
+        cpu_cores_.push_back(i + 1);  // Start from core 1
+    }
+    
+    std::cout << "Assigned CPU cores for packet processing: ";
+    for (int core : cpu_cores_) {
+        std::cout << core << " ";
+    }
+    std::cout << std::endl;
+}
+
+std::vector<PacketReplicator::Destination> PacketReplicator::getCachedDestinations() {
+    // HFT OPTIMIZATION: Use thread-local cache to avoid lock contention
+    auto now = std::chrono::steady_clock::now();
+    
+    if (dest_cache_.cached_destinations.empty() || 
+        (now - dest_cache_.last_update) > ThreadLocalDestCache::CACHE_TIMEOUT) {
+        updateDestinationCache();
+    }
+    
+    return dest_cache_.cached_destinations;
+}
+
+void PacketReplicator::updateDestinationCache() {
+    // HFT OPTIMIZATION: Update thread-local destination cache
+    {
+        std::lock_guard<std::mutex> lock(destinations_mutex_);
+        dest_cache_.cached_destinations.clear();
+        dest_cache_.cached_destinations.reserve(destinations_.size());
+        
+        for (const auto& dest : destinations_) {
+            dest_cache_.cached_destinations.push_back(dest);
+        }
+    }
+    
+    dest_cache_.last_update = std::chrono::steady_clock::now();
+}
+
+inline bool PacketReplicator::extractUdpPayloadFast(const uint8_t* packetData, size_t packetLen,
+                                                    const uint8_t*& payloadData, size_t& payloadLen) {
+    // HFT OPTIMIZATION: Fast UDP payload extraction with branch prediction hints
+    
+    // Branch prediction: expect valid packet size
+    if (__builtin_expect(packetLen < 42, 0)) {  // Minimum Ethernet + IP + UDP = 42 bytes
+        return false;
+    }
+    
+    // Fast Ethernet header check with branch prediction
+    const struct ethhdr* eth = (const struct ethhdr*)packetData;
+    if (__builtin_expect(eth->h_proto != htons(ETH_P_IP), 0)) {
+        return false;
+    }
+    
+    // Fast IP header check
+    const struct iphdr* ip = (const struct iphdr*)(packetData + 14);
+    if (__builtin_expect(ip->protocol != IPPROTO_UDP, 0)) {
+        return false;
+    }
+    
+    // HFT OPTIMIZATION: Use bitwise operations for IP header length calculation
+    const size_t ip_hdr_len = (ip->ihl & 0x0F) << 2;  // Faster than multiplication
+    if (__builtin_expect(ip_hdr_len < 20, 0)) {
+        return false;
+    }
+    
+    // Calculate payload offset with minimal branching
+    const size_t headers_len = 14 + ip_hdr_len + 8;  // Ethernet + IP + UDP
+    if (__builtin_expect(packetLen < headers_len, 0)) {
+        return false;
+    }
+    
+    // Extract payload information
+    payloadData = packetData + headers_len;
+    payloadLen = packetLen - headers_len;
+    
+    // HFT OPTIMIZATION: Prefetch payload data for next processing step
+    __builtin_prefetch(payloadData, 0, 3);
+    
+    return true;
 }

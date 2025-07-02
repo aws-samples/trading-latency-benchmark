@@ -1,7 +1,14 @@
 CXX = g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -g
+# HFT OPTIMIZED COMPILATION FLAGS
+CXXFLAGS = -std=c++17 -Wall -Wextra -O3 -march=native -mtune=native
+CXXFLAGS += -flto -fno-omit-frame-pointer -g
+CXXFLAGS += -DNDEBUG -ffast-math -funroll-loops
+CXXFLAGS += -msse4.2 -mavx2 -mfma  # Enable SIMD instructions for maximum performance
+CXXFLAGS += -fno-stack-protector  # Remove stack protection overhead for HFT
+CXXFLAGS += -fomit-frame-pointer  # Optimize register usage
 INCLUDES = -I. 
 LDFLAGS = -L/usr/local/lib -Wl,-rpath,/usr/local/lib
+LDFLAGS += -Wl,--no-as-needed -Wl,-O1  # Optimized linking
 LDLIBS = -lxdp -lbpf -lelf -lpthread
 
 # Source files  
