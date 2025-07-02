@@ -16,7 +16,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "PacketMultiplexer.hpp"
+#include "PacketReplicator.hpp"
 #include <stdexcept>
 #include <iostream>
 #include <sstream>
@@ -38,8 +38,26 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
+// Debug logging control - DISABLED for performance
+#define DEBUG_TX 0
+#define DEBUG_PACKET 0
+
+#define DEBUG_TX_PRINT(fmt, ...) \
+    do { \
+        if (DEBUG_TX) { \
+            std::cout << fmt << std::endl; \
+        } \
+    } while(0)
+
+#define DEBUG_PACKET_PRINT(fmt, ...) \
+    do { \
+        if (DEBUG_PACKET) { \
+            std::cout << fmt << std::endl; \
+        } \
+    } while(0)
+
 // Destination implementation
-PacketMultiplexer::Destination::Destination(const std::string& ip, uint16_t p) 
+PacketReplicator::Destination::Destination(const std::string& ip, uint16_t p) 
     : ip_address(ip), port(p) {
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -49,15 +67,15 @@ PacketMultiplexer::Destination::Destination(const std::string& ip, uint16_t p)
     }
 }
 
-bool PacketMultiplexer::Destination::operator<(const Destination& other) const {
+bool PacketReplicator::Destination::operator<(const Destination& other) const {
     if (ip_address != other.ip_address) {
         return ip_address < other.ip_address;
     }
     return port < other.port;
 }
 
-// PacketMultiplexer implementation
-PacketMultiplexer::PacketMultiplexer(const std::string& interface, const std::string& listenIp, uint16_t listenPort)
+// PacketReplicator implementation
+PacketReplicator::PacketReplicator(const std::string& interface, const std::string& listenIp, uint16_t listenPort)
     : listen_interface_(interface), listen_ip_(listenIp), listen_port_(listenPort),
       num_queues_(4), output_xdp_socket_(nullptr), control_socket_(-1), output_socket_(-1), running_(false),
       packets_received_(0), packets_sent_(0), bytes_received_(0), bytes_sent_(0) {
@@ -68,11 +86,11 @@ PacketMultiplexer::PacketMultiplexer(const std::string& interface, const std::st
         packets_sent_per_queue_[i].store(0);
     }
     
-    std::cout << "PacketMultiplexer initializing for " << listen_ip_ << ":" << listen_port_ 
+    std::cout << "PacketReplicator initializing for " << listen_ip_ << ":" << listen_port_ 
               << " on interface " << listen_interface_ << " with " << num_queues_ << " queues" << std::endl;
 }
 
-PacketMultiplexer::~PacketMultiplexer() {
+PacketReplicator::~PacketReplicator() {
     stop();
     
     if (control_socket_ >= 0) {
@@ -83,7 +101,7 @@ PacketMultiplexer::~PacketMultiplexer() {
     }
 }
 
-PacketMultiplexer::PacketMultiplexer(PacketMultiplexer&& other) noexcept
+PacketReplicator::PacketReplicator(PacketReplicator&& other) noexcept
     : listen_interface_(std::move(other.listen_interface_)),
       listen_ip_(std::move(other.listen_ip_)),
       listen_port_(other.listen_port_),
@@ -111,7 +129,7 @@ PacketMultiplexer::PacketMultiplexer(PacketMultiplexer&& other) noexcept
     other.running_ = false;
 }
 
-PacketMultiplexer& PacketMultiplexer::operator=(PacketMultiplexer&& other) noexcept {
+PacketReplicator& PacketReplicator::operator=(PacketReplicator&& other) noexcept {
     if (this != &other) {
         stop();
         
@@ -144,8 +162,8 @@ PacketMultiplexer& PacketMultiplexer::operator=(PacketMultiplexer&& other) noexc
     return *this;
 }
 
-void PacketMultiplexer::initialize(bool useZeroCopy) {
-    std::cout << "Initializing PacketMultiplexer with zero-copy: " << (useZeroCopy ? "enabled" : "disabled") << std::endl;
+void PacketReplicator::initialize(bool useZeroCopy) {
+    std::cout << "Initializing PacketReplicator with zero-copy: " << (useZeroCopy ? "enabled" : "disabled") << std::endl;
     
     // Set resource limits for AF_XDP
     AFXDPSocket::setResourceLimits();
@@ -209,10 +227,10 @@ void PacketMultiplexer::initialize(bool useZeroCopy) {
         throw std::runtime_error("Failed to create output socket: " + std::string(strerror(errno)));
     }
     
-    std::cout << "PacketMultiplexer initialized successfully with " << num_queues_ << " queues" << std::endl;
+    std::cout << "PacketReplicator initialized successfully with " << num_queues_ << " queues" << std::endl;
 }
 
-void PacketMultiplexer::configureXdpProgram() {
+void PacketReplicator::configureXdpProgram() {
     // Find the config map in the loaded XDP program
     // This is a simplified approach - in production you'd want better error handling
     
@@ -259,7 +277,7 @@ void PacketMultiplexer::configureXdpProgram() {
     }
 }
 
-void PacketMultiplexer::addDestination(const std::string& ipAddress, uint16_t port) {
+void PacketReplicator::addDestination(const std::string& ipAddress, uint16_t port) {
     std::lock_guard<std::mutex> lock(destinations_mutex_);
     
     Destination dest(ipAddress, port);
@@ -271,7 +289,7 @@ void PacketMultiplexer::addDestination(const std::string& ipAddress, uint16_t po
     triggerArpResolution(ipAddress);
 }
 
-void PacketMultiplexer::removeDestination(const std::string& ipAddress, uint16_t port) {
+void PacketReplicator::removeDestination(const std::string& ipAddress, uint16_t port) {
     std::lock_guard<std::mutex> lock(destinations_mutex_);
     
     Destination dest(ipAddress, port);
@@ -280,14 +298,14 @@ void PacketMultiplexer::removeDestination(const std::string& ipAddress, uint16_t
     std::cout << "Removed destination: " << ipAddress << ":" << port << std::endl;
 }
 
-std::vector<PacketMultiplexer::Destination> PacketMultiplexer::getDestinations() const {
+std::vector<PacketReplicator::Destination> PacketReplicator::getDestinations() const {
     std::lock_guard<std::mutex> lock(destinations_mutex_);
     return std::vector<Destination>(destinations_.begin(), destinations_.end());
 }
 
-void PacketMultiplexer::start() {
+void PacketReplicator::start() {
     if (!running_.exchange(true)) {
-        std::cout << "Starting PacketMultiplexer..." << std::endl;
+        std::cout << "Starting PacketReplicator..." << std::endl;
         
         // Start packet processing threads for each queue
         packet_processor_threads_.resize(num_queues_);
@@ -299,15 +317,15 @@ void PacketMultiplexer::start() {
         }
         
         // Start control protocol thread
-        control_thread_ = std::make_unique<std::thread>(&PacketMultiplexer::handleControlProtocol, this);
+        control_thread_ = std::make_unique<std::thread>(&PacketReplicator::handleControlProtocol, this);
         
-        std::cout << "PacketMultiplexer started with " << num_queues_ << " processing threads" << std::endl;
+        std::cout << "PacketReplicator started with " << num_queues_ << " processing threads" << std::endl;
     }
 }
 
-void PacketMultiplexer::stop() {
+void PacketReplicator::stop() {
     if (running_.exchange(false)) {
-        std::cout << "Stopping PacketMultiplexer..." << std::endl;
+        std::cout << "Stopping PacketReplicator..." << std::endl;
         
         // Wait for all packet processor threads to finish
         for (auto& thread : packet_processor_threads_) {
@@ -326,15 +344,15 @@ void PacketMultiplexer::stop() {
         // Unload XDP program
         AFXDPSocket::unloadXdpProgram(listen_interface_, true);
         
-        std::cout << "PacketMultiplexer stopped" << std::endl;
+        std::cout << "PacketReplicator stopped" << std::endl;
     }
 }
 
-bool PacketMultiplexer::isRunning() const {
+bool PacketReplicator::isRunning() const {
     return running_.load();
 }
 
-PacketMultiplexer::Statistics PacketMultiplexer::getStatistics() const {
+PacketReplicator::Statistics PacketReplicator::getStatistics() const {
     std::lock_guard<std::mutex> lock(destinations_mutex_);
     return {
         packets_received_.load(),
@@ -345,9 +363,9 @@ PacketMultiplexer::Statistics PacketMultiplexer::getStatistics() const {
     };
 }
 
-void PacketMultiplexer::printStatistics() const {
+void PacketReplicator::printStatistics() const {
     auto stats = getStatistics();
-    std::cout << "=== PacketMultiplexer Statistics ===" << std::endl;
+    std::cout << "=== PacketReplicator Statistics ===" << std::endl;
     std::cout << "Packets received: " << stats.packets_received << std::endl;
     std::cout << "Packets sent: " << stats.packets_sent << std::endl;
     std::cout << "Bytes received: " << stats.bytes_received << std::endl;
@@ -358,7 +376,7 @@ void PacketMultiplexer::printStatistics() const {
 
 // Removed processPackets() method - using processPacketsForQueue() instead
 
-void PacketMultiplexer::processPacketsForQueue(int queueId) {
+void PacketReplicator::processPacketsForQueue(int queueId) {
     std::cout << "Packet processing thread started for queue " << queueId << std::endl;
     
     std::vector<int> offsets(64);  // Batch size of 64 packets
@@ -370,7 +388,7 @@ void PacketMultiplexer::processPacketsForQueue(int queueId) {
             int received = xdp_sockets_[queueId]->receive(offsets, lengths);
             
             if (received > 0) {
-                std::cout << "Queue " << queueId << ": Received " << received << " packets from XDP" << std::endl;
+                // std::cout << "Queue " << queueId << ": Received " << received << " packets from XDP" << std::endl;
                 
                 // Process each packet
                 for (int i = 0; i < received; i++) {
@@ -382,12 +400,12 @@ void PacketMultiplexer::processPacketsForQueue(int queueId) {
                     packets_received_++;
                     bytes_received_ += packet_len;
                     
-                    // Multiplex the packet to all destinations
-                    int sent_count = multiplexPacket(packet_data, packet_len, queueId);
+                    // Replicate the packet to all destinations
+                    int sent_count = replicatePacket(packet_data, packet_len, queueId);
                     
                     if (sent_count > 0) {
                         packets_sent_per_queue_[queueId] += sent_count;
-                        std::cout << "Queue " << queueId << ": Multiplexed packet to " << sent_count << " destinations" << std::endl;
+                        // std::cout << "Queue " << queueId << ": Replicated packet to " << sent_count << " destinations" << std::endl;
                     }
                 }
                 
@@ -407,7 +425,7 @@ void PacketMultiplexer::processPacketsForQueue(int queueId) {
     std::cout << "Packet processing thread stopped for queue " << queueId << std::endl;
 }
 
-void PacketMultiplexer::handleControlProtocol() {
+void PacketReplicator::handleControlProtocol() {
     std::cout << "Control protocol thread started on port " << CONTROL_PORT << std::endl;
     
     std::vector<uint8_t> buffer(1024);
@@ -451,7 +469,7 @@ void PacketMultiplexer::handleControlProtocol() {
     std::cout << "Control protocol thread stopped" << std::endl;
 }
 
-int PacketMultiplexer::multiplexPacket(const uint8_t* packetData, size_t packetLen, int queueId) {
+int PacketReplicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId) {
     // Extract UDP payload from the packet
     const uint8_t* payload_data = nullptr;
     size_t payload_len = 0;
@@ -484,7 +502,7 @@ int PacketMultiplexer::multiplexPacket(const uint8_t* packetData, size_t packetL
     return sent_count;
 }
 
-bool PacketMultiplexer::extractUdpPayload(const uint8_t* packetData, size_t packetLen,
+bool PacketReplicator::extractUdpPayload(const uint8_t* packetData, size_t packetLen,
                                          const uint8_t*& payloadData, size_t& payloadLen) {
     // Minimum packet size check
     if (packetLen < sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr)) {
@@ -530,7 +548,7 @@ bool PacketMultiplexer::extractUdpPayload(const uint8_t* packetData, size_t pack
     return true;
 }
 
-bool PacketMultiplexer::sendToDestination(const Destination& destination, const uint8_t* data, size_t length) {
+bool PacketReplicator::sendToDestination(const Destination& destination, const uint8_t* data, size_t length) {
     // Use existing RX sockets for TX (following ena-xdp approach)
     // Pick the first available socket (round-robin could be implemented later)
     if (!xdp_sockets_.empty() && xdp_sockets_[0]) {
@@ -546,7 +564,7 @@ bool PacketMultiplexer::sendToDestination(const Destination& destination, const 
     return sendToDestinationFallback(destination, data, length);
 }
 
-bool PacketMultiplexer::sendToDestinationZeroCopy(const Destination& destination, const uint8_t* data, size_t length) {
+bool PacketReplicator::sendToDestinationZeroCopy(const Destination& destination, const uint8_t* data, size_t length) {
     // Use the first RX socket for TX (ena-xdp approach - same socket for RX/TX)
     if (xdp_sockets_.empty() || !xdp_sockets_[0]) {
         throw std::runtime_error("No XDP sockets available");
@@ -578,7 +596,7 @@ bool PacketMultiplexer::sendToDestinationZeroCopy(const Destination& destination
     return sent > 0;
 }
 
-bool PacketMultiplexer::sendToDestinationFallback(const Destination& destination, const uint8_t* data, size_t length) {
+bool PacketReplicator::sendToDestinationFallback(const Destination& destination, const uint8_t* data, size_t length) {
     // Fallback to regular UDP socket when zero-copy fails
     ssize_t sent = sendto(output_socket_, data, length, 0, 
                          (const struct sockaddr*)&destination.addr, sizeof(destination.addr));
@@ -592,7 +610,7 @@ bool PacketMultiplexer::sendToDestinationFallback(const Destination& destination
     return sent == static_cast<ssize_t>(length);
 }
 
-bool PacketMultiplexer::sendToDestinationWithQueue(const Destination& destination, const uint8_t* data, size_t length, int queueId) {
+bool PacketReplicator::sendToDestinationWithQueue(const Destination& destination, const uint8_t* data, size_t length, int queueId) {
     // Use the specific queue's socket to avoid race conditions between threads
     if (queueId < 0 || queueId >= num_queues_ || !xdp_sockets_[queueId]) {
         return sendToDestinationFallback(destination, data, length);
@@ -606,12 +624,12 @@ bool PacketMultiplexer::sendToDestinationWithQueue(const Destination& destinatio
     }
 }
 
-bool PacketMultiplexer::sendSinglePacketDirect(const Destination& destination, const uint8_t* data, size_t length, int queueId) {
+bool PacketReplicator::sendSinglePacketDirect(const Destination& destination, const uint8_t* data, size_t length, int queueId) {
     // Direct single packet transmission following ena-xdp exactly (no batching)
     AFXDPSocket* xdp_socket = xdp_sockets_[queueId].get();
     
-    std::cout << "DEBUG TX: Starting TX for " << destination.ip_address << ":" << destination.port 
-              << ", data_len=" << length << ", queue=" << queueId << std::endl;
+    DEBUG_TX_PRINT("DEBUG TX: Starting TX for " << destination.ip_address << ":" << destination.port 
+              << ", data_len=" << length << ", queue=" << queueId);
     
     // Poll completions first (ena-xdp pattern)
     xdp_socket->pollTxCompletions();
@@ -620,56 +638,51 @@ bool PacketMultiplexer::sendSinglePacketDirect(const Destination& destination, c
     int tx_frame_number = xdp_socket->getNextTxFrame();
     uint64_t tx_frame_addr = tx_frame_number * 4096;  // frame_nb * FRAME_SIZE
     
-    std::cout << "DEBUG TX: tx_frame_number=" << tx_frame_number << ", tx_frame_addr=0x" 
-              << std::hex << tx_frame_addr << std::dec << std::endl;
+    DEBUG_TX_PRINT("DEBUG TX: tx_frame_number=" << tx_frame_number << ", tx_frame_addr=0x" 
+              << std::hex << tx_frame_addr << std::dec);
     
     // Get pointer to TX buffer and create packet
     uint8_t* tx_buffer = xdp_socket->getUmemBuffer() + tx_frame_addr;
     size_t packet_len = createUdpPacket(destination, data, length, tx_buffer, 4096);
     if (packet_len == 0) {
-        std::cout << "DEBUG TX: createUdpPacket failed!" << std::endl;
+        DEBUG_TX_PRINT("DEBUG TX: createUdpPacket failed!");
         return false;
     }
     
-    std::cout << "DEBUG TX: Created packet, len=" << packet_len << std::endl;
+    DEBUG_TX_PRINT("DEBUG TX: Created packet, len=" << packet_len);
     
-    // Print first 64 bytes of packet for debugging
-    std::cout << "DEBUG TX: Packet contents (first 64 bytes): ";
-    for (size_t i = 0; i < std::min(packet_len, size_t(64)); i++) {
-        printf("%02x ", tx_buffer[i]);
-        if ((i + 1) % 16 == 0) printf("\n                                     ");
-    }
-    std::cout << std::endl;
+    // Print first 64 bytes of packet for debugging - DISABLED for performance
+    DEBUG_TX_PRINT("DEBUG TX: Packet contents (first 64 bytes): [Hex dump disabled for performance]");
     
     // Direct TX ring operations (following ena-xdp socket_udp_iteration exactly)
     uint32_t tx_idx = 0;
     int ret = xdp_socket->reserveTxRing(1, &tx_idx);  // Reserve 1 descriptor
     if (ret != 1) {
-        std::cout << "DEBUG TX: Failed to reserve TX ring, ret=" << ret << std::endl;
+        DEBUG_TX_PRINT("DEBUG TX: Failed to reserve TX ring, ret=" << ret);
         if (ret == 0) {
             xdp_socket->requestDriverPoll();  // Try to wake up
         }
         return false;  // Can't reserve space
     }
     
-    std::cout << "DEBUG TX: Reserved TX ring, tx_idx=" << tx_idx << std::endl;
+    DEBUG_TX_PRINT("DEBUG TX: Reserved TX ring, tx_idx=" << tx_idx);
     
     // Fill TX descriptor (ena-xdp pattern)
     xdp_socket->setTxDescriptor(tx_idx, tx_frame_addr, packet_len);
     
-    std::cout << "DEBUG TX: Set TX descriptor, addr=0x" << std::hex << tx_frame_addr 
-              << std::dec << ", len=" << packet_len << std::endl;
+    DEBUG_TX_PRINT("DEBUG TX: Set TX descriptor, addr=0x" << std::hex << tx_frame_addr 
+              << std::dec << ", len=" << packet_len);
     
     // Submit and wake driver (ena-xdp pattern)
     xdp_socket->submitTxRing(1);
     xdp_socket->requestDriverPoll();
     
-    std::cout << "DEBUG TX: Submitted to TX ring and requested driver poll" << std::endl;
+    DEBUG_TX_PRINT("DEBUG TX: Submitted to TX ring and requested driver poll");
     
     return true;
 }
 
-size_t PacketMultiplexer::createUdpPacket(const Destination& destination, const uint8_t* payload, size_t payloadLen,
+size_t PacketReplicator::createUdpPacket(const Destination& destination, const uint8_t* payload, size_t payloadLen,
                                          uint8_t* buffer, size_t bufferSize) {
     // Calculate required packet size
     size_t eth_hdr_len = sizeof(struct ethhdr);
@@ -677,8 +690,8 @@ size_t PacketMultiplexer::createUdpPacket(const Destination& destination, const 
     size_t udp_hdr_len = sizeof(struct udphdr);
     size_t total_len = eth_hdr_len + ip_hdr_len + udp_hdr_len + payloadLen;
     
-    std::cout << "DEBUG createUdpPacket: Creating packet for " << destination.ip_address << ":" << destination.port 
-              << ", payload_len=" << payloadLen << ", total_len=" << total_len << std::endl;
+    DEBUG_PACKET_PRINT("DEBUG createUdpPacket: Creating packet for " << destination.ip_address << ":" << destination.port 
+              << ", payload_len=" << payloadLen << ", total_len=" << total_len);
     
     if (total_len > bufferSize) {
         std::cerr << "Packet too large for buffer: " << total_len << " > " << bufferSize << std::endl;
@@ -694,31 +707,23 @@ size_t PacketMultiplexer::createUdpPacket(const Destination& destination, const 
     uint8_t dst_mac[ETH_ALEN];
     if (getDestinationMac(destination.ip_address, dst_mac)) {
         memcpy(eth->h_dest, dst_mac, ETH_ALEN);
-        std::cout << "DEBUG: Using destination MAC: " << std::hex;
-        for (int i = 0; i < ETH_ALEN; i++) {
-            std::cout << (int)dst_mac[i] << ":";
-        }
-        std::cout << std::dec << std::endl;
+        DEBUG_PACKET_PRINT("DEBUG: Using destination MAC: " << std::hex << dst_mac[0] << ":" << dst_mac[1] << ":" << dst_mac[2] << ":" << dst_mac[3] << ":" << dst_mac[4] << ":" << dst_mac[5] << std::dec);
     } else {
         // Fallback to broadcast MAC if ARP resolution fails
         memset(eth->h_dest, 0xFF, ETH_ALEN);
-        std::cout << "DEBUG: Using broadcast MAC (ARP resolution failed)" << std::endl;
+        DEBUG_PACKET_PRINT("DEBUG: Using broadcast MAC (ARP resolution failed)");
     }
     
     // Try to get interface MAC address
     uint8_t src_mac[ETH_ALEN];
     if (getInterfaceMac(listen_interface_, src_mac)) {
         memcpy(eth->h_source, src_mac, ETH_ALEN);
-        std::cout << "DEBUG: Using interface MAC: " << std::hex;
-        for (int i = 0; i < ETH_ALEN; i++) {
-            std::cout << (int)src_mac[i] << ":";
-        }
-        std::cout << std::dec << std::endl;
+        DEBUG_PACKET_PRINT("DEBUG: Using interface MAC: " << std::hex << src_mac[0] << ":" << src_mac[1] << ":" << src_mac[2] << ":" << src_mac[3] << ":" << src_mac[4] << ":" << src_mac[5] << std::dec);
     } else {
         // Fallback to a default MAC
         uint8_t default_mac[ETH_ALEN] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
         memcpy(eth->h_source, default_mac, ETH_ALEN);
-        std::cout << "DEBUG: Using default MAC (interface MAC not found)" << std::endl;
+        DEBUG_PACKET_PRINT("DEBUG: Using default MAC (interface MAC not found)");
     }
     eth->h_proto = htons(ETH_P_IP);
     
@@ -738,11 +743,11 @@ size_t PacketMultiplexer::createUdpPacket(const Destination& destination, const 
     std::string interface_ip;
     if (getInterfaceIp(listen_interface_, interface_ip)) {
         inet_aton(interface_ip.c_str(), (struct in_addr*)&ip->saddr);
-        std::cout << "DEBUG: Using interface IP as source: " << interface_ip << std::endl;
+        DEBUG_PACKET_PRINT("DEBUG: Using interface IP as source: " << interface_ip);
     } else {
         // Fallback to listen IP
         inet_aton(listen_ip_.c_str(), (struct in_addr*)&ip->saddr);
-        std::cout << "DEBUG: Using listen IP as source: " << listen_ip_ << std::endl;
+        DEBUG_PACKET_PRINT("DEBUG: Using listen IP as source: " << listen_ip_);
     }
     ip->daddr = destination.addr.sin_addr.s_addr;
     
@@ -750,7 +755,7 @@ size_t PacketMultiplexer::createUdpPacket(const Destination& destination, const 
     struct in_addr src_addr, dst_addr;
     src_addr.s_addr = ip->saddr;
     dst_addr.s_addr = ip->daddr;
-    std::cout << "DEBUG: IP packet: " << inet_ntoa(src_addr) << " -> " << inet_ntoa(dst_addr) << std::endl;
+    DEBUG_PACKET_PRINT("DEBUG: IP packet: " << inet_ntoa(src_addr) << " -> " << inet_ntoa(dst_addr));
     
     // Calculate IP checksum (following ena-xdp approach)
     ip->check = 0;  // Reset checksum field
@@ -771,17 +776,17 @@ size_t PacketMultiplexer::createUdpPacket(const Destination& destination, const 
     udp->len = htons(udp_hdr_len + payloadLen);
     udp->check = 0;  // Optional for IPv4
     
-    std::cout << "DEBUG: UDP packet: port " << listen_port_ << " -> " << destination.port << std::endl;
+    DEBUG_PACKET_PRINT("DEBUG: UDP packet: port " << listen_port_ << " -> " << destination.port);
     
     // Copy payload
     memcpy(buffer + eth_hdr_len + ip_hdr_len + udp_hdr_len, payload, payloadLen);
     
-    std::cout << "DEBUG createUdpPacket: Packet created successfully, total length=" << total_len << std::endl;
+    DEBUG_PACKET_PRINT("DEBUG createUdpPacket: Packet created successfully, total length=" << total_len);
     
     return total_len;
 }
 
-void PacketMultiplexer::initializeOutputSocket() {
+void PacketReplicator::initializeOutputSocket() {
     // Create AF_XDP socket for zero-copy transmission (following ena-xdp approach)
     output_xdp_socket_ = std::make_unique<AFXDPSocket>(4096, AFXDPSocket::DEFAULT_UMEM_FRAMES, 0);
     output_xdp_socket_->setupUMem();
@@ -796,7 +801,7 @@ void PacketMultiplexer::initializeOutputSocket() {
     std::cout << "Created zero-copy AF_XDP output socket on " << listen_interface_ << std::endl;
 }
 
-void PacketMultiplexer::prePopulateTxFrames() {
+void PacketReplicator::prePopulateTxFrames() {
     if (!output_xdp_socket_) {
         return;
     }
@@ -813,7 +818,7 @@ void PacketMultiplexer::prePopulateTxFrames() {
     std::cout << "Pre-populated " << AFXDPSocket::DEFAULT_TX_FRAMES << " TX frames with packet templates" << std::endl;
 }
 
-size_t PacketMultiplexer::createBasePacketTemplate(uint8_t* buffer) {
+size_t PacketReplicator::createBasePacketTemplate(uint8_t* buffer) {
     // Calculate base packet size (headers only, no payload yet)
     size_t eth_hdr_len = sizeof(struct ethhdr);
     size_t ip_hdr_len = sizeof(struct iphdr);
@@ -853,7 +858,7 @@ size_t PacketMultiplexer::createBasePacketTemplate(uint8_t* buffer) {
     return base_len;
 }
 
-size_t PacketMultiplexer::updatePacketForDestination(uint8_t* buffer, const Destination& destination, 
+size_t PacketReplicator::updatePacketForDestination(uint8_t* buffer, const Destination& destination, 
                                                     const uint8_t* payload, size_t payloadLen) {
     size_t eth_hdr_len = sizeof(struct ethhdr);
     size_t ip_hdr_len = sizeof(struct iphdr);
@@ -892,11 +897,11 @@ size_t PacketMultiplexer::updatePacketForDestination(uint8_t* buffer, const Dest
     return total_len;
 }
 
-size_t PacketMultiplexer::calculatePacketSize(size_t payloadLen) const {
+size_t PacketReplicator::calculatePacketSize(size_t payloadLen) const {
     return sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr) + payloadLen;
 }
 
-std::vector<uint8_t> PacketMultiplexer::processControlMessage(const uint8_t* message, size_t messageLen, 
+std::vector<uint8_t> PacketReplicator::processControlMessage(const uint8_t* message, size_t messageLen, 
                                                              const struct sockaddr_in& clientAddr) {
     if (messageLen < 1) {
         return {}; // Invalid message
@@ -981,7 +986,7 @@ std::vector<uint8_t> PacketMultiplexer::processControlMessage(const uint8_t* mes
     return response;
 }
 
-uint32_t PacketMultiplexer::parseIpAddress(const std::string& ipStr) {
+uint32_t PacketReplicator::parseIpAddress(const std::string& ipStr) {
     struct in_addr addr;
     if (inet_aton(ipStr.c_str(), &addr) == 0) {
         throw std::invalid_argument("Invalid IP address: " + ipStr);
@@ -989,13 +994,13 @@ uint32_t PacketMultiplexer::parseIpAddress(const std::string& ipStr) {
     return addr.s_addr; // Already in network byte order
 }
 
-std::string PacketMultiplexer::formatIpAddress(uint32_t ipAddr) {
+std::string PacketReplicator::formatIpAddress(uint32_t ipAddr) {
     struct in_addr addr;
     addr.s_addr = ipAddr;
     return std::string(inet_ntoa(addr));
 }
 
-bool PacketMultiplexer::getInterfaceIp(const std::string& interface, std::string& ip_address) {
+bool PacketReplicator::getInterfaceIp(const std::string& interface, std::string& ip_address) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         return false;
@@ -1017,7 +1022,7 @@ bool PacketMultiplexer::getInterfaceIp(const std::string& interface, std::string
     return true;
 }
 
-bool PacketMultiplexer::getInterfaceMac(const std::string& interface, uint8_t* mac_address) {
+bool PacketReplicator::getInterfaceMac(const std::string& interface, uint8_t* mac_address) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         return false;
@@ -1038,7 +1043,7 @@ bool PacketMultiplexer::getInterfaceMac(const std::string& interface, uint8_t* m
     return true;
 }
 
-bool PacketMultiplexer::getDestinationMac(const std::string& ip_address, uint8_t* mac_address) {
+bool PacketReplicator::getDestinationMac(const std::string& ip_address, uint8_t* mac_address) {
     // Simple ARP table lookup - read /proc/net/arp
     std::ifstream arp_file("/proc/net/arp");
     if (!arp_file.is_open()) {
@@ -1073,7 +1078,7 @@ bool PacketMultiplexer::getDestinationMac(const std::string& ip_address, uint8_t
     return false;
 }
 
-void PacketMultiplexer::triggerArpResolution(const std::string& ip_address) {
+void PacketReplicator::triggerArpResolution(const std::string& ip_address) {
     std::cout << "Triggering ARP resolution for " << ip_address << std::endl;
     
     // Create a temporary socket to send a UDP packet to trigger ARP resolution

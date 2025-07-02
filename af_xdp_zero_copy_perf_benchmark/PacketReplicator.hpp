@@ -16,8 +16,8 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef PACKET_MULTIPLEXER_HPP
-#define PACKET_MULTIPLEXER_HPP
+#ifndef PACKET_REPLICATOR_HPP
+#define PACKET_REPLICATOR_HPP
 
 #include "AFXDPSocket.hpp"
 #include <string>
@@ -31,15 +31,15 @@
 #include <netinet/in.h>
 
 /**
- * High-performance packet multiplexer using AF_XDP zero copy
+ * High-performance packet replicator using AF_XDP zero copy
  * 
- * This multiplexer:
+ * This replicator:
  * 1. Listens for incoming UDP packets to a specific IP and port
  * 2. Uses AF_XDP zero copy to receive packets with minimal latency
- * 3. Multiplexes received packets to multiple destination EC2 instances
+ * 3. Replicates received packets to multiple destination EC2 instances
  * 4. Provides control protocol for managing destination instances
  */
-class PacketMultiplexer {
+class PacketReplicator {
 public:
     // Control protocol constants
     static constexpr int CONTROL_PORT = 12345;
@@ -86,27 +86,27 @@ private:
 
 public:
     /**
-     * Creates a new PacketMultiplexer
+     * Creates a new PacketReplicator
      * 
      * @param interface Network interface to bind to (e.g., "eth0")
      * @param listenIp  IP address to listen on
      * @param listenPort Port to listen on
      * @throws std::runtime_error If initialization fails
      */
-    PacketMultiplexer(const std::string& interface, const std::string& listenIp, uint16_t listenPort);
+    PacketReplicator(const std::string& interface, const std::string& listenIp, uint16_t listenPort);
 
     /**
      * Destructor
      */
-    ~PacketMultiplexer();
+    ~PacketReplicator();
 
     // Copy constructor and assignment operator are deleted
-    PacketMultiplexer(const PacketMultiplexer&) = delete;
-    PacketMultiplexer& operator=(const PacketMultiplexer&) = delete;
+    PacketReplicator(const PacketReplicator&) = delete;
+    PacketReplicator& operator=(const PacketReplicator&) = delete;
 
     // Move constructor and assignment operator
-    PacketMultiplexer(PacketMultiplexer&& other) noexcept;
-    PacketMultiplexer& operator=(PacketMultiplexer&& other) noexcept;
+    PacketReplicator(PacketReplicator&& other) noexcept;
+    PacketReplicator& operator=(PacketReplicator&& other) noexcept;
 
     /**
      * Initialize AF_XDP socket and XDP program
@@ -142,18 +142,18 @@ public:
     std::vector<Destination> getDestinations() const;
 
     /**
-     * Start the packet multiplexer
+     * Start the packet replicator
      * This will start packet processing and control protocol handling
      */
     void start();
 
     /**
-     * Stop the packet multiplexer
+     * Stop the packet replicator
      */
     void stop();
 
     /**
-     * Check if the multiplexer is running
+     * Check if the replicator is running
      * 
      * @return True if running, false otherwise
      */
@@ -196,14 +196,14 @@ private:
     void handleControlProtocol();
 
     /**
-     * Multiplex a single packet to all destinations
+     * Replicate a single packet to all destinations
      * 
      * @param packetData Pointer to packet data in UMEM
      * @param packetLen  Length of the packet
      * @param queueId    Queue ID for the socket to use
      * @return Number of destinations the packet was sent to
      */
-    int multiplexPacket(const uint8_t* packetData, size_t packetLen, int queueId);
+    int replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId);
 
     /**
      * Extract UDP payload from a packet
@@ -378,4 +378,4 @@ private:
     void triggerArpResolution(const std::string& ip_address);
 };
 
-#endif // PACKET_MULTIPLEXER_HPP
+#endif // PACKET_REPLICATOR_HPP

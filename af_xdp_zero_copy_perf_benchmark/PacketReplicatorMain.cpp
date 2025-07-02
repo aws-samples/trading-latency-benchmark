@@ -15,7 +15,7 @@
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#include "PacketMultiplexer.hpp"
+#include "PacketReplicator.hpp"
 #include <iostream>
 #include <string>
 #include <thread>
@@ -23,14 +23,14 @@
 #include <signal.h>
 #include <unistd.h>
 
-static std::unique_ptr<PacketMultiplexer> g_multiplexer;
+static std::unique_ptr<PacketReplicator> g_replicator;
 static volatile bool g_running = true;
 
 void signalHandler(int signum) {
     std::cout << "\nReceived signal " << signum << ", shutting down..." << std::endl;
     g_running = false;
-    if (g_multiplexer) {
-        g_multiplexer->stop();
+    if (g_replicator) {
+        g_replicator->stop();
     }
 }
 
@@ -45,10 +45,10 @@ void printUsage(const char* progName) {
     std::cout << "  sudo " << progName << " eth0 192.168.1.100 8080" << std::endl;
     std::cout << "  sudo " << progName << " enp0s3 10.0.0.10 9000 false" << std::endl;
     std::cout << std::endl;
-    std::cout << "The multiplexer will:" << std::endl;
+    std::cout << "The replicator will:" << std::endl;
     std::cout << "  1. Listen for UDP packets to the specified IP:PORT using AF_XDP" << std::endl;
     std::cout << "  2. Accept control commands on port 12345 to manage destinations" << std::endl;
-    std::cout << "  3. Multiplex received packets to all configured destinations" << std::endl;
+    std::cout << "  3. Replicate received packets to all configured destinations" << std::endl;
     std::cout << std::endl;
     std::cout << "Control Protocol (port 12345):" << std::endl;
     std::cout << "  Add destination:    [1][4-byte IP][2-byte port]" << std::endl;
@@ -59,8 +59,8 @@ void printUsage(const char* progName) {
 void printStatisticsLoop() {
     while (g_running) {
         std::this_thread::sleep_for(std::chrono::seconds(10));
-        if (g_multiplexer && g_running) {
-            g_multiplexer->printStatistics();
+        if (g_replicator && g_running) {
+            g_replicator->printStatistics();
         }
     }
 }
@@ -88,12 +88,12 @@ int main(int argc, char* argv[]) {
         use_zero_copy = (zero_copy_str == "true" || zero_copy_str == "1");
     }
 
-    std::cout << "=== AF_XDP Packet Multiplexer ===" << std::endl;
+    std::cout << "=== AF_XDP Packet Replicator ===" << std::endl;
     std::cout << "Interface: " << interface << std::endl;
     std::cout << "Listen IP: " << listen_ip << std::endl;
     std::cout << "Listen Port: " << listen_port << std::endl;
     std::cout << "Zero Copy: " << (use_zero_copy ? "Enabled" : "Disabled") << std::endl;
-    std::cout << "Control Port: " << PacketMultiplexer::CONTROL_PORT << std::endl;
+    std::cout << "Control Port: " << PacketReplicator::CONTROL_PORT << std::endl;
     std::cout << "=================================" << std::endl;
 
     // Setup signal handlers
@@ -101,21 +101,21 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signalHandler);
 
     try {
-        // Create and initialize the multiplexer
-        g_multiplexer = std::make_unique<PacketMultiplexer>(interface, listen_ip, listen_port);
+        // Create and initialize the replicator
+        g_replicator = std::make_unique<PacketReplicator>(interface, listen_ip, listen_port);
         
         std::cout << "Initializing AF_XDP socket..." << std::endl;
-        g_multiplexer->initialize(use_zero_copy);
+        g_replicator->initialize(use_zero_copy);
         
-        std::cout << "Starting packet multiplexer..." << std::endl;
-        g_multiplexer->start();
+        std::cout << "Starting packet replicator..." << std::endl;
+        g_replicator->start();
         
         // Start statistics reporting thread
         std::thread stats_thread(printStatisticsLoop);
         
-        std::cout << "Packet multiplexer is running!" << std::endl;
+        std::cout << "Packet replicator is running!" << std::endl;
         std::cout << "Listening for UDP packets to " << listen_ip << ":" << listen_port << std::endl;
-        std::cout << "Control protocol available on port " << PacketMultiplexer::CONTROL_PORT << std::endl;
+        std::cout << "Control protocol available on port " << PacketReplicator::CONTROL_PORT << std::endl;
         std::cout << "Press Ctrl+C to stop..." << std::endl;
         std::cout << std::endl;
         
@@ -129,16 +129,16 @@ int main(int argc, char* argv[]) {
         while (g_running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             
-            // Check if multiplexer is still running
-            if (!g_multiplexer->isRunning()) {
-                std::cerr << "Multiplexer stopped unexpectedly" << std::endl;
+            // Check if replicator is still running
+            if (!g_replicator->isRunning()) {
+                std::cerr << "Replicator stopped unexpectedly" << std::endl;
                 g_running = false;
                 break;
             }
         }
         
-        std::cout << "Stopping multiplexer..." << std::endl;
-        g_multiplexer->stop();
+        std::cout << "Stopping replicator..." << std::endl;
+        g_replicator->stop();
         
         // Wait for stats thread to finish
         if (stats_thread.joinable()) {
@@ -147,13 +147,13 @@ int main(int argc, char* argv[]) {
         
         // Print final statistics
         std::cout << "\nFinal Statistics:" << std::endl;
-        g_multiplexer->printStatistics();
+        g_replicator->printStatistics();
         
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }
 
-    std::cout << "Packet multiplexer stopped" << std::endl;
+    std::cout << "Packet replicator stopped" << std::endl;
     return 0;
 }
