@@ -110,6 +110,9 @@ ansible-playbook restart_mock_trading_server.yaml --key-file ~/.ssh/virginia.pem
 # Start the HFT client
 ansible-playbook restart_hft_client.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
 
+# Start the test run for desired duration
+ansible-playbook start_latency_test.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
+
 # Let the test run for desired duration, then stop it
 ansible-playbook stop_latency_test.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
 ```
