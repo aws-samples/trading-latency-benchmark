@@ -1,5 +1,5 @@
 use actix_web::middleware::Logger;
-use actix_web::{get, post, web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder};
+use actix_web::{get, web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web_actors::ws;
 use openssl::ssl::{SslAcceptor, SslMethod, SslFiletype};
 use config::Config;
@@ -48,7 +48,7 @@ fn default_host() -> String {
 /// # Arguments
 /// 
 /// * `path` - Path parameters containing user_id, currency, and amount
-#[post("/private/account/user/balances/{user_id}/{currency}/{amount}")]
+#[get("/private/account/user/balances/{user_id}/{currency}/{amount}")]
 async fn add_balances(path: web::Path<(i32, String, i32)>) -> impl Responder {
     let (user_id, currency, amount) = path.into_inner();
     info!(

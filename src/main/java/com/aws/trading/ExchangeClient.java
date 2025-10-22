@@ -21,9 +21,6 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.*;
 import io.netty.channel.socket.SocketChannel;
-import io.netty.channel.socket.nio.NioSocketChannel;
-import io.netty.channel.epoll.EpollSocketChannel;
-import io.netty.channel.epoll.Epoll;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
@@ -31,7 +28,6 @@ import io.netty.handler.ssl.OpenSsl;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslProvider;
-import io.netty.incubator.channel.uring.IOUringSocketChannel;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -163,23 +159,16 @@ public class ExchangeClient {
 
     /**
      * Configures the Netty bootstrap with the specified event loop group.
+     * Uses NettyTransportFactory to automatically detect and select the best available
+     * transport for the current platform (io_uring, epoll, kqueue, or NIO).
      *
      * @param workerGroup The event loop group for worker operations
      * @return The configured Bootstrap
      */
     private static Bootstrap configureBootstrap(MultithreadEventLoopGroup workerGroup) {
-        Class<? extends Channel> channelClass;
-        
-        if (USE_IOURING) {
-            channelClass = IOUringSocketChannel.class;
-            LOGGER.info("Using IOUringSocketChannel for socket connections");
-        } else if (Epoll.isAvailable()) {
-            channelClass = EpollSocketChannel.class;
-            LOGGER.info("Using EpollSocketChannel for socket connections");
-        } else {
-            channelClass = NioSocketChannel.class;
-            LOGGER.info("Using NioSocketChannel for socket connections");
-        }
+        // Use the factory to get the best available channel class for this platform
+        Class<? extends Channel> channelClass = NettyTransportFactory.getSocketChannelClass(USE_IOURING);
+        LOGGER.info("Using {} transport for socket connections", NettyTransportFactory.getTransportName());
         
         return new Bootstrap()
                 .group(workerGroup)
@@ -204,7 +193,7 @@ public class ExchangeClient {
             String endpoint = buildBalanceEndpoint(uri, qt);
             
             final HttpRequest request = HttpRequest.newBuilder()
-                    .POST(HttpRequest.BodyPublishers.noBody())
+                    .GET()
                     .uri(URI.create(endpoint))
                     .build();
                     
