@@ -18,10 +18,7 @@
 package com.aws.trading;
 
 import io.netty.channel.MultithreadEventLoopGroup;
-import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.incubator.channel.uring.IOUringEventLoopGroup;
-import io.netty.channel.epoll.Epoll;
 import net.openhft.affinity.AffinityStrategies;
 import net.openhft.affinity.AffinityThreadFactory;
 import org.HdrHistogram.Histogram;
@@ -71,20 +68,11 @@ public class RoundTripLatencyTester {
         this.websocketURI = new URI(MessageFormat.format("{0}://{1}:{2,number,#}", USE_SSL ? "wss" : "ws", HOST, WEBSOCKET_PORT));
         this.httpURI = new URI(MessageFormat.format("{0}://{1}:{2,number,#}", USE_SSL ? "https" : "http", HOST, HTTP_PORT));
         
-        // Use IOUring if enabled, otherwise use Epoll if available, otherwise fallback to NIO
-        if (USE_IOURING) {
-            this.nettyIOGroup = new IOUringEventLoopGroup(NETTY_THREAD_COUNT, NETTY_IO_THREAD_FACTORY);
-            this.workerGroup = new IOUringEventLoopGroup(NETTY_THREAD_COUNT, NETTY_WORKER_THREAD_FACTORY);
-            LOGGER.info("Using IOUringEventLoopGroup for networking");
-        } else if (Epoll.isAvailable()) {
-            this.nettyIOGroup = new EpollEventLoopGroup(NETTY_THREAD_COUNT, NETTY_IO_THREAD_FACTORY);
-            this.workerGroup = new EpollEventLoopGroup(NETTY_THREAD_COUNT, NETTY_WORKER_THREAD_FACTORY);
-            LOGGER.info("Using EpollEventLoopGroup for networking");
-        } else {
-            this.nettyIOGroup = new NioEventLoopGroup(NETTY_THREAD_COUNT, NETTY_IO_THREAD_FACTORY);
-            this.workerGroup = new NioEventLoopGroup(NETTY_THREAD_COUNT, NETTY_WORKER_THREAD_FACTORY);
-            LOGGER.info("Using NioEventLoopGroup for networking");
-        }
+        // Use NettyTransportFactory to detect and create the best available EventLoopGroup
+        NettyTransportFactory.TransportType transport = NettyTransportFactory.detectTransport(USE_IOURING);
+        this.nettyIOGroup = createEventLoopGroup(transport, NETTY_THREAD_COUNT, NETTY_IO_THREAD_FACTORY);
+        this.workerGroup = createEventLoopGroup(transport, NETTY_THREAD_COUNT, NETTY_WORKER_THREAD_FACTORY);
+        LOGGER.info("Using {} EventLoopGroup for networking", transport.getName());
         
         var apiToken1 = API_TOKEN;
         for (int i = 0; i < exchangeClients.length; i++) {
@@ -176,6 +164,48 @@ public class RoundTripLatencyTester {
     public static PrintStream getLogFile(String path) throws IOException {
         return new PrintStream(new FileOutputStream(path, true), false);
     }
+    /**
+     * Creates an EventLoopGroup based on the detected transport type using reflection.
+     * This avoids compile-time dependencies on platform-specific EventLoopGroup classes.
+     *
+     * @param transport The transport type to use
+     * @param threadCount The number of threads for the EventLoopGroup
+     * @param threadFactory The thread factory to use
+     * @return The created EventLoopGroup
+     */
+    private static MultithreadEventLoopGroup createEventLoopGroup(
+            NettyTransportFactory.TransportType transport,
+            int threadCount,
+            ThreadFactory threadFactory) {
+        try {
+            String className;
+            switch (transport) {
+                case IOURING:
+                    className = "io.netty.channel.uring.IOUringEventLoopGroup";
+                    break;
+                case EPOLL:
+                    className = "io.netty.channel.epoll.EpollEventLoopGroup";
+                    break;
+                case KQUEUE:
+                    className = "io.netty.channel.kqueue.KQueueEventLoopGroup";
+                    break;
+                case NIO:
+                default:
+                    return new NioEventLoopGroup(threadCount, threadFactory);
+            }
+            
+            // Load the class and create an instance using reflection
+            Class<?> eventLoopGroupClass = Class.forName(className);
+            return (MultithreadEventLoopGroup) eventLoopGroupClass
+                    .getConstructor(int.class, ThreadFactory.class)
+                    .newInstance(threadCount, threadFactory);
+                    
+        } catch (Exception e) {
+            LOGGER.warn("Failed to create EventLoopGroup for {}, falling back to NioEventLoopGroup", transport, e);
+            return new NioEventLoopGroup(threadCount, threadFactory);
+        }
+    }
+    
     public static void main(String[] args) throws InterruptedException, IOException, URISyntaxException, UnrecoverableKeyException, CertificateException, NoSuchAlgorithmException, KeyStoreException, KeyManagementException {
         RoundTripLatencyTester latencyTester = new RoundTripLatencyTester();
         latencyTester.start();
