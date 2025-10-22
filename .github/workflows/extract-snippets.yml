@@ -11,6 +11,9 @@ on:
   # run on demand
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   extract-snippets:
     if: github.repository_owner == 'aws' || github.repository_owner == 'awsdocs' || github.repository_owner == 'aws-samples' || github.repository_owner == 'jerry-aws'
