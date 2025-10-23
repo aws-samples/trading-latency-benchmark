@@ -9,14 +9,12 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build and Create Release
+  build-java:
+    name: Build Java Client
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
       
       - name: Set up JDK 11
         uses: actions/setup-java@v5
@@ -25,97 +23,250 @@ jobs:
           java-version: '11'
           cache: 'maven'
       
-      - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-      
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '18'
-      
-      - name: Get the version
+      - name: Get version
         id: get_version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
       
       - name: Build Java Client
         run: |
           mvn clean package
-          # Find the shaded JAR file (exclude -original, -sources, and -test-sources JARs)
           JAR_FILE=$(find target -maxdepth 1 -name "ExchangeFlow-*.jar" \
             -not -name "*-original.jar" \
             -not -name "*-sources.jar" \
             -not -name "*-test-sources.jar" | head -n 1)
           if [ -z "$JAR_FILE" ]; then
-            echo "Error: Could not find JAR file in target directory"
+            echo "Error: Could not find JAR file"
             ls -la target/
             exit 1
           fi
-          echo "Found JAR file: $JAR_FILE"
+          echo "Found JAR: $JAR_FILE"
           
-          # Verify the JAR has a main manifest
-          if jar tf "$JAR_FILE" | grep -q "META-INF/MANIFEST.MF"; then
-            echo "Verifying main manifest..."
-            jar xf "$JAR_FILE" META-INF/MANIFEST.MF
-            if grep -q "Main-Class" META-INF/MANIFEST.MF; then
-              echo "✓ JAR has Main-Class in manifest"
-            else
-              echo "✗ Error: JAR missing Main-Class in manifest"
-              cat META-INF/MANIFEST.MF
-              exit 1
-            fi
-            rm -rf META-INF
+          # Verify manifest
+          jar xf "$JAR_FILE" META-INF/MANIFEST.MF
+          if grep -q "Main-Class" META-INF/MANIFEST.MF; then
+            echo "✓ JAR has Main-Class"
+          else
+            echo "✗ Missing Main-Class"
+            exit 1
           fi
+          rm -rf META-INF
           
           cp "$JAR_FILE" ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
       
-      - name: Build Rust Server (Linux)
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-jar
+          path: ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
+
+  build-rust-linux:
+    name: Build Rust Server (Linux)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            cross: true
+          - target: aarch64-unknown-linux-gnu
+            cross: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+      
+      - name: Get version
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+      - name: Install cargo-zigbuild (for ARM64 cross-compilation)
+        if: matrix.cross == true
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+      
+      - name: Build
         working-directory: mock-trading-server
         run: |
-          cargo build --release
-          cp target/release/mock-trading-server ../mock-trading-server-${{ steps.get_version.outputs.VERSION }}-linux-x86_64
+          if [ "${{ matrix.cross }}" == "true" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
       
-      - name: Build Rust Server (macOS x86_64)
+      - name: Prepare binary
         run: |
-          cd mock-trading-server
-          rustup target add x86_64-apple-darwin
-          cargo build --release --target x86_64-apple-darwin
-          cp target/x86_64-apple-darwin/release/mock-trading-server ../mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-x86_64 || echo "macOS x86_64 build failed"
-        continue-on-error: true
+          ARCH=$(echo ${{ matrix.target }} | cut -d'-' -f1)
+          if [ "$ARCH" = "x86_64" ]; then
+            SUFFIX="linux-x86_64"
+          else
+            SUFFIX="linux-aarch64"
+          fi
+          cp mock-trading-server/target/${{ matrix.target }}/release/mock-trading-server \
+             mock-trading-server-${{ steps.get_version.outputs.VERSION }}-${SUFFIX}
+          strip mock-trading-server-${{ steps.get_version.outputs.VERSION }}-${SUFFIX} || true
       
-      - name: Build Rust Server (macOS ARM64)
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-${{ matrix.target }}
+          path: mock-trading-server-${{ steps.get_version.outputs.VERSION }}-*
+
+  build-rust-macos:
+    name: Build Rust Server (macOS)
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+      
+      - name: Get version
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+      - name: Build
+        working-directory: mock-trading-server
+        run: cargo build --release --target ${{ matrix.target }}
+      
+      - name: Prepare binary
         run: |
-          cd mock-trading-server
-          rustup target add aarch64-apple-darwin
-          cargo build --release --target aarch64-apple-darwin
-          cp target/aarch64-apple-darwin/release/mock-trading-server ../mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-arm64 || echo "macOS ARM64 build failed"
-        continue-on-error: true
+          ARCH=$(echo ${{ matrix.target }} | sed 's/-apple-darwin//')
+          if [ "$ARCH" = "x86_64" ]; then
+            SUFFIX="macos-x86_64"
+          else
+            SUFFIX="macos-arm64"
+          fi
+          cp mock-trading-server/target/${{ matrix.target }}/release/mock-trading-server \
+             mock-trading-server-${{ steps.get_version.outputs.VERSION }}-${SUFFIX}
       
-      - name: Build Rust Server (Windows)
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-${{ matrix.target }}
+          path: mock-trading-server-${{ steps.get_version.outputs.VERSION }}-*
+
+  build-rust-windows:
+    name: Build Rust Server (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      
+      - name: Get version
+        id: get_version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+      - name: Build
+        working-directory: mock-trading-server
+        run: cargo build --release
+      
+      - name: Prepare binary
+        shell: bash
         run: |
-          cd mock-trading-server
-          rustup target add x86_64-pc-windows-gnu
-          cargo build --release --target x86_64-pc-windows-gnu
-          cp target/x86_64-pc-windows-gnu/release/mock-trading-server.exe ../mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe || echo "Windows build failed"
-        continue-on-error: true
+          cp mock-trading-server/target/release/mock-trading-server.exe \
+             mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe
       
-      - name: Build C++ Client
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-windows
+          path: mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe
+
+  build-cpp:
+    name: Build C++ Client
+    runs-on: ubuntu-latest
+    container: public.ecr.aws/amazonlinux/amazonlinux:2023
+    steps:
+      - name: Install build tools
+        run: |
+          yum install -y gcc-c++ make git tar gzip boost-devel openssl-devel python3-pip zlib-devel
+          # Install newer CMake (AL2023 has 3.22, but we need 3.27+)
+          pip3 install cmake --upgrade
+          # Ensure cmake from pip is in PATH
+          export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
+          echo "/usr/local/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          cmake --version
+      
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      
+      - name: Get version
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+      - name: Build
         working-directory: cpp-client
         run: |
-          # Install Boost libraries required by C++ client
-          sudo apt-get update
-          sudo apt-get install -y libboost-all-dev
-          
-          # Build C++ client
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
           cmake --build build --config Release
-          tar -czf ../cpp-client-${{ steps.get_version.outputs.VERSION }}.tar.gz -C build .
       
-      - name: Generate Release Notes
-        id: release_notes
+      - name: Create tarball
         run: |
-          # Get commits since last tag
+          cd cpp-client/build
+          tar -czf ../../cpp-client-${{ steps.get_version.outputs.VERSION }}.tar.gz .
+      
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-client
+          path: cpp-client-${{ steps.get_version.outputs.VERSION }}.tar.gz
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-java, build-rust-linux, build-rust-macos, build-rust-windows, build-cpp]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      
+      - name: Get version
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+      
+      - name: List artifacts
+        run: |
+          echo "Downloaded artifacts:"
+          find release-artifacts -type f
+      
+      - name: Create configuration bundle
+        run: |
+          cd release-configs
+          zip -r ../config-samples-${{ steps.get_version.outputs.VERSION }}.zip .
+          cd ..
+      
+      - name: Organize release files
+        run: |
+          mkdir release-files
+          find release-artifacts -type f -exec cp {} release-files/ \;
+          cp config-samples-${{ steps.get_version.outputs.VERSION }}.zip release-files/
+          ls -lh release-files/
+      
+      - name: Generate release notes
+        run: |
           PREVIOUS_TAG=$(git describe --abbrev=0 --tags $(git rev-list --tags --skip=1 --max-count=1) 2>/dev/null || echo "")
           if [ -z "$PREVIOUS_TAG" ]; then
             COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges)
@@ -123,7 +274,6 @@ jobs:
             COMMITS=$(git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
           fi
           
-          # Create release notes
           cat > release_notes.md << EOF
           ## Release ${{ steps.get_version.outputs.VERSION }}
           
@@ -131,84 +281,43 @@ jobs:
           
           ${COMMITS}
           
-          ### Components
+          ### 📦 Components
           
-          This release includes pre-built binaries for multiple platforms:
+          - **Java Trading Client** - ✅ Cross-platform (all architectures)
+          - **Rust Mock Server** - ✅ Linux (x86_64 & ARM64), macOS (Intel & Apple Silicon), Windows
+          - **C++ Client** - ✅ Linux x86_64
+          - **Configuration Samples** - 📝 All config files with documentation
           
-          - **Java Trading Client** - ✅ Cross-platform (Windows, macOS, Linux)
-            - \`ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar\`
+          ### 🚀 Quick Start
           
-          - **Rust Mock Trading Server** - ✅ Multiple platforms
-            - \`mock-trading-server-${{ steps.get_version.outputs.VERSION }}-linux-x86_64\` (Linux)
-            - \`mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-x86_64\` (macOS Intel)
-            - \`mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-arm64\` (macOS Apple Silicon)
-            - \`mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe\` (Windows)
+          1. Download \`config-samples-${{ steps.get_version.outputs.VERSION }}.zip\`
+          2. Extract and rename config files as needed
+          3. Download binaries for your platform
+          4. Run!
           
-          - **C++ Client** - ⚠️ Linux x86_64 only
-            - \`cpp-client-${{ steps.get_version.outputs.VERSION }}.tar.gz\`
-          
-          - **CDK Infrastructure** - AWS deployment automation (build from source)
-          
-          ### Installation
-          
-          #### Java Client (All Platforms)
+          **Java Client:**
           \`\`\`bash
           java -jar ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
           \`\`\`
           
-          #### Rust Server
+          **Rust Server (choose your platform):**
+          - **Linux x86_64:** \`./mock-trading-server-${{ steps.get_version.outputs.VERSION }}-linux-x86_64\`
+          - **Linux ARM64 (Graviton):** \`./mock-trading-server-${{ steps.get_version.outputs.VERSION }}-linux-aarch64\`
+          - **macOS Intel:** \`./mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-x86_64\`
+          - **macOS Apple Silicon:** \`./mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-arm64\`
+          - **Windows:** \`mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe\`
           
-          **Linux:**
-          \`\`\`bash
-          chmod +x mock-trading-server-${{ steps.get_version.outputs.VERSION }}-linux-x86_64
-          ./mock-trading-server-${{ steps.get_version.outputs.VERSION }}-linux-x86_64
-          \`\`\`
+          ### 📋 Requirements
           
-          **macOS (Intel):**
-          \`\`\`bash
-          chmod +x mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-x86_64
-          ./mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-x86_64
-          \`\`\`
-          
-          **macOS (Apple Silicon):**
-          \`\`\`bash
-          chmod +x mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-arm64
-          ./mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-arm64
-          \`\`\`
-          
-          **Windows:**
-          \`\`\`bash
-          mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe
-          \`\`\`
-          
-          #### C++ Client (Linux only)
-          \`\`\`bash
-          tar -xzf cpp-client-${{ steps.get_version.outputs.VERSION }}.tar.gz
-          \`\`\`
-          
-          ### Requirements
-          
-          - **Java 11+** (for Java client)
-          - **No additional dependencies** for Rust server binaries
-          - **Boost libraries** for building C++ client from source
-          - **AWS CLI and CDK** (for infrastructure deployment)
-          - **Ansible 2.9+** (for provisioning)
-          
-          ### Notes
-          
-          - Cross-compilation for macOS and Windows is best-effort; binaries may not be available if builds fail
-          - For C++ client on macOS/Windows, build from source (see README)
+          - Java 11+ (for client)
+          - Configuration files (included in config-samples.zip)
+          - See README in config bundle for details
           EOF
       
-      - name: Create Release
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           body_path: release_notes.md
-          files: |
-            ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
-            mock-trading-server-${{ steps.get_version.outputs.VERSION }}-*
-            cpp-client-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          files: release-files/*
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -46,6 +46,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import static com.aws.trading.Config.COIN_PAIRS;
 import static com.aws.trading.Config.USE_SSL;
 import static com.aws.trading.RoundTripLatencyTester.printResults;
+import static com.aws.trading.Constants.Histogram;
+import static com.aws.trading.Constants.MessageType;
+import static com.aws.trading.Constants.WebSocket;
 
 public class ExchangeClientLatencyTestHandler extends ChannelInboundHandlerAdapter {
     private static final Logger LOGGER = LogManager.getLogger(ExchangeClientLatencyTestHandler.class);
@@ -68,12 +71,12 @@ public class ExchangeClientLatencyTestHandler extends ChannelInboundHandlerAdapt
         this.protocol = protocol;
         var header = HttpHeaders.EMPTY_HEADERS;
         this.handshaker = WebSocketClientHandshakerFactory.newHandshaker(
-                uri, WebSocketVersion.V13, null, false, header, 1280000);
+                uri, WebSocketVersion.V13, null, false, header, WebSocket.MAX_FRAME_SIZE);
         this.apiToken = apiToken;
         this.orderSentTimeMap = new ConcurrentHashMap<>(test_size);
         this.cancelSentTimeMap = new ConcurrentHashMap<>(test_size);
         this.test_size = test_size;
-        this.hdrRecorderForAggregation = new SingleWriterRecorder(Long.MAX_VALUE, 2);
+        this.hdrRecorderForAggregation = new SingleWriterRecorder(Histogram.MAX_VALUE, Histogram.SIGNIFICANT_DIGITS);
     }
 
     @Override
@@ -169,14 +172,14 @@ public class ExchangeClientLatencyTestHandler extends ChannelInboundHandlerAdapt
         buf.release();
 
         JSONObject parsedObject = JSON.parseObject(bytes, offset, bytes.length - offset, StandardCharsets.UTF_8);
-        Object type = parsedObject.getString("type");
+        Object type = parsedObject.getString(WebSocket.FIELD_TYPE);
 
-        if ("BOOKED".equals(type) || type.equals("DONE")) {
+        if (MessageType.BOOKED.equals(type) || MessageType.DONE.equals(type)) {
             //LOGGER.info("eventTime: {}, received ACK: {}",eventReceiveTime, parsedObject);
-            String clientId = parsedObject.getString("client_id");
-            if (type.equals("BOOKED")) {
+            String clientId = parsedObject.getString(WebSocket.FIELD_CLIENT_ID);
+            if (MessageType.BOOKED.equals(type)) {
                 if (calculateRoundTrip(eventReceiveTime, clientId, orderSentTimeMap)) return;
-                var pair = parsedObject.getString("instrument_code");
+                var pair = parsedObject.getString(WebSocket.FIELD_INSTRUMENT_CODE);
                 sendCancelOrder(ctx, clientId, pair);
             } else {
                 if (calculateRoundTrip(eventReceiveTime, clientId, cancelSentTimeMap)) return;
@@ -185,15 +188,15 @@ public class ExchangeClientLatencyTestHandler extends ChannelInboundHandlerAdapt
             if (orderResponseCount % test_size == 0) {
                 printResults(hdrRecorderForAggregation, test_size);
             }
-        } else if ("AUTHENTICATED".equals(type)) {
+        } else if (MessageType.AUTHENTICATED.equals(type)) {
             LOGGER.info("{}", parsedObject);
             ctx.channel().writeAndFlush(subscribeMessage());
-        } else if ("SUBSCRIPTIONS".equals(type)) {
+        } else if (MessageType.SUBSCRIPTIONS.equals(type)) {
             LOGGER.info("{}", parsedObject);
             this.testStartTime = System.nanoTime();
             sendOrder(ctx);
         } else {
-            LOGGER.error("Unhandled object {}", parsedObject);
+            LOGGER.error("Unhandled message type: {}, full object: {}", type, parsedObject);
         }
     }
 

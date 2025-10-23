@@ -29,7 +29,7 @@ jobs:
         run: mvn test
       
       - name: Upload JAR artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: java-client-jar
           path: target/*.jar
@@ -65,7 +65,7 @@ jobs:
         run: cargo test
       
       - name: Upload binary
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: rust-server-binary
           path: mock-trading-server/target/release/mock-trading-server
@@ -98,7 +98,7 @@ jobs:
         run: cmake --build build --config Release
       
       - name: Upload binary
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: cpp-client-binary
           path: cpp-client/build/*
@@ -135,7 +135,7 @@ jobs:
         run: npx cdk synth
       
       - name: Upload CDK template
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: cdk-template
           path: deployment/cdk/cdk.out

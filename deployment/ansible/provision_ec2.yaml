@@ -83,42 +83,12 @@
       dest: /usr/bin/mvn
       state: link
       
-  - name: Generate a new RSA private key with a key size of 4096
-    shell: openssl genrsa -out localhost.key 4096
-    args:
-      creates: localhost.key
-      
-  - name: Create a new Certificate Signing Request (CSR) using the previously generated private key
-    shell: |
-      # Create a temporary configuration file
-      echo "[req]
-      distinguished_name=dn
-      [dn]
-      [ext]
-      subjectAltName=DNS:localhost" > /tmp/openssl.conf
-      
-      # Run the OpenSSL command with the temporary configuration file
-      openssl req -new -key localhost.key -out localhost.csr \
-      -subj "/C=US/ST=Washington/L=Seattle/O=amazon/OU=amazon/CN=localhost/emailAddress=random@random.com" \
-      -extensions ext \
-      -config /tmp/openssl.conf \
-      -sha512 \
-      -newhdr \
-      -passin pass:123456 \
-      -keyform PEM \
-      -outform PEM
-      
-      # Remove the temporary configuration file
-      rm /tmp/openssl.conf
-    args:
-      creates: localhost.csr
-      
   - name: Generate Self Signed certificates
     shell: |
-      openssl x509 -req -days 365 \
-      -in localhost.csr -signkey localhost.key \
-      -out localhost.crt \
-      -sha512
+      openssl req -x509 -newkey rsa:4096 -sha256 -days 365 \
+      -nodes -keyout localhost.key -out localhost.crt \
+      -subj "/CN=localhost" \
+      -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
       
       openssl pkcs12 -export -out keystore.p12 \
       -inkey localhost.key \
