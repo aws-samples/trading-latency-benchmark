@@ -6,90 +6,157 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  java-client:
+    name: Build Java Client
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        language: ['csharp', 'go','python', 'java', 'typescript']
     steps:
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        if: ${{ matrix.language == 'go' }}
-        with:
-          go-version: '1.20'
-      - uses: actions/setup-node@v6
-        if: ${{matrix.language == 'typescript'}}
-        with:
-          node-version: 18
-      - uses: actions/setup-java@v5
-        if: ${{matrix.language == 'java'}}
-        with:
-          distribution: 'corretto'
-          java-version: '17'
-      - uses: actions/setup-python@v6
-        if: ${{matrix.language == 'python'}}
-        with:
-          python-version: '3.10'
-      - uses: actions/setup-dotnet@v5
-        if: ${{matrix.language == 'csharp'}}
-        with:
-          dotnet-version: 8
       - name: Checkout code
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - name: Get changed files
-        id: changed-files-specific
-        uses: tj-actions/changed-files@v47
+      
+      - name: Set up JDK 11
+        uses: actions/setup-java@v5
         with:
-          files: ${{matrix.language}}/**
-          files_ignore: "*.md"
-      - name: list changed files
-        if: steps.changed-files-specific.outputs.any_changed == 'true'
-        run: |
-          for file in ${{ steps.changed-files.outputs.all_changed_files }}; do
-            echo "$file was changed"
-          done
-      - name: Build changed files
-        if: steps.changed-files-specific.outputs.any_changed == 'true'
-        run: |
-          echo "::group::Build changes for ${{ matrix.language }}"
-          echo ""
-          buildlang="${{ matrix.language }}"
+          distribution: 'corretto'
+          java-version: '11'
+          cache: 'maven'
+      
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
+      
+      - name: Run tests
+        run: mvn test
+      
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: java-client-jar
+          path: target/*.jar
+          retention-days: 7
 
-          echo "# Build summary for ${buildlang}" >> $GITHUB_STEP_SUMMARY
-          buildpath=""
-          # For each file that is in the changed set
-          for file in ${{ steps.changed-files-specific.outputs.all_modified_files }}
-          do
-            echo "processing ${file}"
-            # Split the path into the language, example, and 
-            IFS="/" read path1 path2 extra <<<"$file"
-            # $path1 is the language name e.g. 'typescript'
-            # $path2 is the fist directory under the language
-            # $extra is everything else after path2
-            if [[ $path1 != $buildlang ]]; then
-              continue
-            fi 
-            if [[ "$buildpath" == "$path1/$path2" ]]; then
-              continue
-            fi
-            buildpath=$path1/$path2
-            echo "Build Path ${buildpath}"
-            
-            # make sure there's nothing funny left over.
-            git clean -dfx
+  rust-server:
+    name: Build Rust Mock Trading Server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mock-trading-server
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      
+      - name: Check formatting
+        run: cargo fmt --check
+        continue-on-error: true
+      
+      - name: Run Clippy
+        run: cargo clippy -- -D warnings
+        continue-on-error: true
+      
+      - name: Build
+        run: cargo build --release
+      
+      - name: Run tests
+        run: cargo test
+      
+      - name: Upload binary
+        uses: actions/upload-artifact@v5
+        with:
+          name: rust-server-binary
+          path: mock-trading-server/target/release/mock-trading-server
+          retention-days: 7
 
-            # we should pass both $path2 and $extra to the build script
-            # for example:
-            # scripts/build-typescript.sh ecs example-name/index.ts for typescripts/ecs/example/index.ts 
-            # scripts/build-typescript.sh example index.ts for typescripts/example/index.ts 
-            scripts/build-${buildlang}.sh $path2 $extra
-            
-            if [[ $? == 0 ]]; then
-              echo "- :o: $buildpath" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "- :x: $buildpath" >> $GITHUB_STEP_SUMMARY
-            fi 
-          done
-          echo "::endgroup::"
+  cpp-client:
+    name: Build C++ Client
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cpp-client
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libssl-dev libboost-all-dev
+      
+      - name: Create build directory
+        run: mkdir -p build
+      
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      
+      - name: Build
+        run: cmake --build build --config Release
+      
+      - name: Upload binary
+        uses: actions/upload-artifact@v5
+        with:
+          name: cpp-client-binary
+          path: cpp-client/build/*
+          retention-days: 7
+
+  cdk-infrastructure:
+    name: Build CDK Infrastructure
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deployment/cdk
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: deployment/cdk/package-lock.json
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Build TypeScript
+        run: npm run build
+      
+      - name: Run tests
+        run: npm test
+        continue-on-error: true
+      
+      - name: Synthesize CDK
+        run: npx cdk synth
+      
+      - name: Upload CDK template
+        uses: actions/upload-artifact@v5
+        with:
+          name: cdk-template
+          path: deployment/cdk/cdk.out
+          retention-days: 7
+
+  af-xdp-benchmark:
+    name: Build AF_XDP Benchmark
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: af_xdp_zero_copy_perf_benchmark
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libbpf-dev libxdp-dev
+        continue-on-error: true
+      
+      - name: Build AF_XDP components
+        run: make
+        continue-on-error: true
