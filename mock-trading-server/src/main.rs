@@ -1,10 +1,13 @@
 use actix_web::middleware::Logger;
 use actix_web::{get, web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web_actors::ws;
-use openssl::ssl::{SslAcceptor, SslMethod, SslFiletype};
+use rustls::{ServerConfig, pki_types::{CertificateDer, PrivateKeyDer}};
+use rustls_pemfile::{certs, private_key};
 use config::Config;
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::fs::File;
+use std::io::BufReader;
 
 #[macro_use]
 extern crate log;
@@ -143,58 +146,68 @@ async fn main() -> Result<(), std::io::Error> {
     let bind_address = format!("{}:{}", settings.host, settings.port);
     
     if settings.use_ssl {
-        info!("Starting server on {} using SSL", bind_address);
+        info!("Starting server on {} using TLS (rustls)", bind_address);
         
-        // Configure SSL
-        let mut builder = match SslAcceptor::mozilla_modern(SslMethod::tls()) {
-            Ok(b) => b,
-            Err(e) => {
-                error!("Failed to create SSL acceptor: {}", e);
-                return Err(std::io::Error::new(
+        // Load certificate chain
+        let cert_file = File::open(&settings.cert_chain).map_err(|e| {
+            error!("Failed to open certificate file: {}", e);
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Certificate file error: {}", e)
+            )
+        })?;
+        let mut cert_reader = BufReader::new(cert_file);
+        let cert_chain: Vec<CertificateDer> = certs(&mut cert_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                error!("Failed to parse certificates: {}", e);
+                std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    format!("SSL error: {}", e)
-                ));
-            }
-        };
+                    format!("Certificate parsing error: {}", e)
+                )
+            })?;
         
-        // Set private key
-        if let Err(e) = builder.set_private_key_file(&settings.private_key, SslFiletype::PEM) {
-            error!("Failed to set private key: {}", e);
-            return Err(std::io::Error::new(
+        // Load private key
+        let key_file = File::open(&settings.private_key).map_err(|e| {
+            error!("Failed to open private key file: {}", e);
+            std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("SSL private key error: {}", e)
-            ));
-        }
+                format!("Private key file error: {}", e)
+            )
+        })?;
+        let mut key_reader = BufReader::new(key_file);
+        let private_key = private_key(&mut key_reader)
+            .map_err(|e| {
+                error!("Failed to parse private key: {}", e);
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Private key parsing error: {}", e)
+                )
+            })?
+            .ok_or_else(|| {
+                error!("No private key found in file");
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "No private key found"
+                )
+            })?;
         
-        // Set certificate chain
-        if let Err(e) = builder.set_certificate_chain_file(&settings.cert_chain) {
-            error!("Failed to set certificate chain: {}", e);
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("SSL certificate error: {}", e)
-            ));
-        }
+        // Configure TLS with rustls
+        let tls_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, private_key)
+            .map_err(|e| {
+                error!("Failed to configure TLS: {}", e);
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("TLS configuration error: {}", e)
+                )
+            })?;
         
-        // Set minimum TLS version to 1.2
-        if let Err(e) = builder.set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_2)) {
-            error!("Failed to set minimum TLS version: {}", e);
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("SSL protocol version error: {}", e)
-            ));
-        }
+        info!("TLS configuration successful, cipher list setting ignored (rustls uses secure defaults)");
         
-        // Set cipher list
-        if let Err(e) = builder.set_cipher_list(&settings.cipher_list) {
-            error!("Failed to set cipher list: {}", e);
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("SSL cipher list error: {}", e)
-            ));
-        }
-        
-        // Start server with SSL
-        server.bind_openssl(&bind_address, builder)?.run().await
+        // Start server with TLS
+        server.bind_rustls_0_23(&bind_address, tls_config)?.run().await
     } else {
         info!("Starting server on {} without SSL", bind_address);
         
