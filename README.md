@@ -1,5 +1,11 @@
 # AWS EC2 Network Latency Benchmark for Trading Applications
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Build Status](https://github.com/aws-samples/trading-latency-benchmark/workflows/Build%20Pull%20Request/badge.svg)](https://github.com/aws-samples/trading-latency-benchmark/actions)
+[![AWS](https://img.shields.io/badge/AWS-%23FF9900.svg?style=flat&logo=amazon-aws&logoColor=white)](https://aws.amazon.com/)
+[![Java](https://img.shields.io/badge/Java-11+-blue.svg)](https://openjdk.java.net/)
+[![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
+
 This repository contains a comprehensive network latency benchmarking solution designed specifically for trading applications running on AWS EC2. The benchmark suite measures round-trip latency between trading clients and servers, providing valuable insights for latency-sensitive financial applications.
 
 ## Project Overview

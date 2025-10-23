@@ -24,8 +24,6 @@
             <groupId>org.hdrhistogram</groupId>
             <artifactId>HdrHistogram</artifactId>
             <version>2.1.12</version>
-            <!--            MAKE THIS TEST SCOPE ONLY-->
-            <!--            <scope>test</scope>-->
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
@@ -80,30 +78,13 @@
             <groupId>io.netty</groupId>
             <artifactId>netty-transport-native-io_uring</artifactId>
             <version>4.2.7.Final</version>
-            <classifier>linux-x86_64</classifier>
             <optional>true</optional>
         </dependency>
-        <dependency>
-            <groupId>io.netty</groupId>
-            <artifactId>netty-transport-native-io_uring</artifactId>
-            <version>4.2.7.Final</version>
-            <classifier>linux-aarch_64</classifier>
-            <optional>true</optional>
-        </dependency>
-        
         <!-- Epoll support (Linux only) -->
         <dependency>
             <groupId>io.netty</groupId>
             <artifactId>netty-transport-native-epoll</artifactId>
             <version>4.2.7.Final</version>
-            <classifier>linux-x86_64</classifier>
-            <optional>true</optional>
-        </dependency>
-        <dependency>
-            <groupId>io.netty</groupId>
-            <artifactId>netty-transport-native-epoll</artifactId>
-            <version>4.2.7.Final</version>
-            <classifier>linux-aarch_64</classifier>
             <optional>true</optional>
         </dependency>
         
@@ -112,23 +93,15 @@
             <groupId>io.netty</groupId>
             <artifactId>netty-transport-native-kqueue</artifactId>
             <version>4.2.7.Final</version>
-            <classifier>osx-x86_64</classifier>
-            <optional>true</optional>
-        </dependency>
-        <dependency>
-            <groupId>io.netty</groupId>
-            <artifactId>netty-transport-native-kqueue</artifactId>
-            <version>4.2.7.Final</version>
-            <classifier>osx-aarch_64</classifier>
             <optional>true</optional>
         </dependency>
         
-        <!-- BoringSSL native support (cross-platform with os-maven-plugin) -->
+        <!-- BoringSSL native support (uber jar with all platforms) -->
         <dependency>
             <groupId>io.netty</groupId>
             <artifactId>netty-tcnative-boringssl-static</artifactId>
             <version>2.0.70.Final</version>
-            <classifier>${os.detected.classifier}</classifier>
+            <!-- No classifier = uber jar includes Linux, macOS (x86/ARM), Windows -->
             <optional>true</optional>
         </dependency>
 

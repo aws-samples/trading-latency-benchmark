@@ -1,7 +1,7 @@
 use actix_web::middleware::Logger;
 use actix_web::{get, web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web_actors::ws;
-use rustls::{ServerConfig, pki_types::{CertificateDer, PrivateKeyDer}};
+use rustls::{ServerConfig, pki_types::CertificateDer};
 use rustls_pemfile::{certs, private_key};
 use config::Config;
 use serde::{Deserialize, Serialize};
