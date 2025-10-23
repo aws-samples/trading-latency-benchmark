@@ -1,0 +1,214 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build and Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      
+      - name: Set up JDK 11
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'corretto'
+          java-version: '11'
+          cache: 'maven'
+      
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '18'
+      
+      - name: Get the version
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+      - name: Build Java Client
+        run: |
+          mvn clean package
+          # Find the shaded JAR file (exclude -original, -sources, and -test-sources JARs)
+          JAR_FILE=$(find target -maxdepth 1 -name "ExchangeFlow-*.jar" \
+            -not -name "*-original.jar" \
+            -not -name "*-sources.jar" \
+            -not -name "*-test-sources.jar" | head -n 1)
+          if [ -z "$JAR_FILE" ]; then
+            echo "Error: Could not find JAR file in target directory"
+            ls -la target/
+            exit 1
+          fi
+          echo "Found JAR file: $JAR_FILE"
+          
+          # Verify the JAR has a main manifest
+          if jar tf "$JAR_FILE" | grep -q "META-INF/MANIFEST.MF"; then
+            echo "Verifying main manifest..."
+            jar xf "$JAR_FILE" META-INF/MANIFEST.MF
+            if grep -q "Main-Class" META-INF/MANIFEST.MF; then
+              echo "✓ JAR has Main-Class in manifest"
+            else
+              echo "✗ Error: JAR missing Main-Class in manifest"
+              cat META-INF/MANIFEST.MF
+              exit 1
+            fi
+            rm -rf META-INF
+          fi
+          
+          cp "$JAR_FILE" ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
+      
+      - name: Build Rust Server (Linux)
+        working-directory: mock-trading-server
+        run: |
+          cargo build --release
+          cp target/release/mock-trading-server ../mock-trading-server-${{ steps.get_version.outputs.VERSION }}-linux-x86_64
+      
+      - name: Build Rust Server (macOS x86_64)
+        run: |
+          cd mock-trading-server
+          rustup target add x86_64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          cp target/x86_64-apple-darwin/release/mock-trading-server ../mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-x86_64 || echo "macOS x86_64 build failed"
+        continue-on-error: true
+      
+      - name: Build Rust Server (macOS ARM64)
+        run: |
+          cd mock-trading-server
+          rustup target add aarch64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          cp target/aarch64-apple-darwin/release/mock-trading-server ../mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-arm64 || echo "macOS ARM64 build failed"
+        continue-on-error: true
+      
+      - name: Build Rust Server (Windows)
+        run: |
+          cd mock-trading-server
+          rustup target add x86_64-pc-windows-gnu
+          cargo build --release --target x86_64-pc-windows-gnu
+          cp target/x86_64-pc-windows-gnu/release/mock-trading-server.exe ../mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe || echo "Windows build failed"
+        continue-on-error: true
+      
+      - name: Build C++ Client
+        working-directory: cpp-client
+        run: |
+          # Install Boost libraries required by C++ client
+          sudo apt-get update
+          sudo apt-get install -y libboost-all-dev
+          
+          # Build C++ client
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
+          tar -czf ../cpp-client-${{ steps.get_version.outputs.VERSION }}.tar.gz -C build .
+      
+      - name: Generate Release Notes
+        id: release_notes
+        run: |
+          # Get commits since last tag
+          PREVIOUS_TAG=$(git describe --abbrev=0 --tags $(git rev-list --tags --skip=1 --max-count=1) 2>/dev/null || echo "")
+          if [ -z "$PREVIOUS_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          else
+            COMMITS=$(git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          fi
+          
+          # Create release notes
+          cat > release_notes.md << EOF
+          ## Release ${{ steps.get_version.outputs.VERSION }}
+          
+          ### What's Changed
+          
+          ${COMMITS}
+          
+          ### Components
+          
+          This release includes pre-built binaries for multiple platforms:
+          
+          - **Java Trading Client** - ✅ Cross-platform (Windows, macOS, Linux)
+            - \`ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar\`
+          
+          - **Rust Mock Trading Server** - ✅ Multiple platforms
+            - \`mock-trading-server-${{ steps.get_version.outputs.VERSION }}-linux-x86_64\` (Linux)
+            - \`mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-x86_64\` (macOS Intel)
+            - \`mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-arm64\` (macOS Apple Silicon)
+            - \`mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe\` (Windows)
+          
+          - **C++ Client** - ⚠️ Linux x86_64 only
+            - \`cpp-client-${{ steps.get_version.outputs.VERSION }}.tar.gz\`
+          
+          - **CDK Infrastructure** - AWS deployment automation (build from source)
+          
+          ### Installation
+          
+          #### Java Client (All Platforms)
+          \`\`\`bash
+          java -jar ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
+          \`\`\`
+          
+          #### Rust Server
+          
+          **Linux:**
+          \`\`\`bash
+          chmod +x mock-trading-server-${{ steps.get_version.outputs.VERSION }}-linux-x86_64
+          ./mock-trading-server-${{ steps.get_version.outputs.VERSION }}-linux-x86_64
+          \`\`\`
+          
+          **macOS (Intel):**
+          \`\`\`bash
+          chmod +x mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-x86_64
+          ./mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-x86_64
+          \`\`\`
+          
+          **macOS (Apple Silicon):**
+          \`\`\`bash
+          chmod +x mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-arm64
+          ./mock-trading-server-${{ steps.get_version.outputs.VERSION }}-macos-arm64
+          \`\`\`
+          
+          **Windows:**
+          \`\`\`bash
+          mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe
+          \`\`\`
+          
+          #### C++ Client (Linux only)
+          \`\`\`bash
+          tar -xzf cpp-client-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          \`\`\`
+          
+          ### Requirements
+          
+          - **Java 11+** (for Java client)
+          - **No additional dependencies** for Rust server binaries
+          - **Boost libraries** for building C++ client from source
+          - **AWS CLI and CDK** (for infrastructure deployment)
+          - **Ansible 2.9+** (for provisioning)
+          
+          ### Notes
+          
+          - Cross-compilation for macOS and Windows is best-effort; binaries may not be available if builds fail
+          - For C++ client on macOS/Windows, build from source (see README)
+          EOF
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: |
+            ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
+            mock-trading-server-${{ steps.get_version.outputs.VERSION }}-*
+            cpp-client-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
