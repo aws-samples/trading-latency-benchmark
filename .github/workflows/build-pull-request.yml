@@ -71,8 +71,8 @@ jobs:
           path: mock-trading-server/target/release/mock-trading-server
           retention-days: 7
 
-  cpp-client:
-    name: Build C++ Client
+  cpp-client-linux:
+    name: Build C++ Client (Linux)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -100,8 +100,50 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: cpp-client-binary
+          name: cpp-client-linux-binary
           path: cpp-client/build/*
+          retention-days: 7
+
+  cpp-client-windows:
+    name: Build C++ Client (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: cpp-client
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      
+      - name: Setup vcpkg
+        run: |
+          git clone https://github.com/Microsoft/vcpkg.git ../vcpkg
+          cd ../vcpkg
+          .\bootstrap-vcpkg.bat
+          .\vcpkg integrate install
+      
+      - name: Install dependencies (static)
+        run: |
+          cd ../vcpkg
+          .\vcpkg install openssl:x64-windows-static zlib:x64-windows-static
+      
+      - name: Configure CMake
+        shell: bash
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake \
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static
+      
+      - name: Build (static linking)
+        run: cmake --build build --config Release
+      
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-client-windows-binary
+          path: cpp-client/build/Release/hft_client.exe
           retention-days: 7
 
   cdk-infrastructure:

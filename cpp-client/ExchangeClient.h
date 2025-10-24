@@ -52,7 +52,7 @@ private:
     std::thread m_thread;
     // Other private members and methods, if needed
 
-    std::shared_ptr<boost::asio::ssl::context> tls_init_handler();
+    std::shared_ptr<asio::ssl::context> tls_init_handler();
 };
 
 

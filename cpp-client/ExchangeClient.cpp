@@ -108,11 +108,11 @@ void ExchangeClient::disconnect() {
     }
 }
 
-std::shared_ptr<boost::asio::ssl::context> ExchangeClient::tls_init_handler() {
-    std::shared_ptr<boost::asio::ssl::context> ctx = std::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tlsv12_client);
+std::shared_ptr<asio::ssl::context> ExchangeClient::tls_init_handler() {
+    std::shared_ptr<asio::ssl::context> ctx = std::make_shared<asio::ssl::context>(asio::ssl::context::tlsv12_client);
     try {
-        boost::system::error_code ec;
-        ctx->set_options(boost::asio::ssl::context::default_workarounds, ec);
+        asio::error_code ec;
+        ctx->set_options(asio::ssl::context::default_workarounds, ec);
         if (ec) {
             std::cout << "Error setting SSL options: " << ec.message() << std::endl;
         }
