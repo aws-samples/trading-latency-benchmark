@@ -40,7 +40,7 @@ ExchangeClientLatencyTestHandler::ExchangeClientLatencyTestHandler(int apiToken,
     this->histogram = new hdr_histogram();
     hdr_init(
             1,  // Minimum value
-            INT64_C(100000),  // Maximum value
+            INT64_C(3600000000),  // Maximum value (1 hour in microseconds)
             3,  // Number of significant figures
             &histogram);  // Pointer to initialise
 }
@@ -97,11 +97,6 @@ bool ExchangeClientLatencyTestHandler::calculateRoundTrip(chrono::steady_clock::
     }
     auto roundTripTime = eventReceiveTime - it->second;
     if (roundTripTime.count() > 0) {
-        if (orderResponseCount % Config::TEST_SIZE == 0) {
-            hdrPrint();
-           // logger("RTT:" + std::to_string(roundTripTimeInMicroseconds) + "μs");
-        }
-
         long long roundTripTimeInMicroseconds = chrono::duration_cast<chrono::microseconds>(roundTripTime).count();
         //logger("RTT:" + std::to_string(roundTripTimeInMicroseconds));
         hdr_record_value(
@@ -133,6 +128,9 @@ void ExchangeClientLatencyTestHandler::hdrPrint(){
     ss << "        \"W\":\"" << valueW << "µs\"" << std::endl;
     ss << "}";
     std::cout << ss.str() << std::endl;
+    
+    // Reset histogram for next interval (like Java's hdr.reset())
+    hdr_reset(histogram);
 }
 websocketpp::connection_hdl ExchangeClientLatencyTestHandler::get_hdl() const{
     return this->hdl;
