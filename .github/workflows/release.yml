@@ -186,21 +186,24 @@ jobs:
           name: rust-windows
           path: mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe
 
-  build-cpp:
-    name: Build C++ Client
+  build-cpp-linux:
+    name: Build C++ Client (Linux)
     runs-on: ubuntu-latest
-    container: public.ecr.aws/amazonlinux/amazonlinux:2023
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            platform: linux/amd64
+            container: public.ecr.aws/amazonlinux/amazonlinux:2023
+          - arch: aarch64
+            platform: linux/arm64
+            container: public.ecr.aws/amazonlinux/amazonlinux:2023
     steps:
-      - name: Install build tools
-        run: |
-          yum install -y gcc-c++ make git tar gzip boost-devel openssl-devel python3-pip zlib-devel
-          # Install newer CMake (AL2023 has 3.22, but we need 3.27+)
-          pip3 install cmake --upgrade
-          # Ensure cmake from pip is in PATH
-          export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
-          echo "/usr/local/bin" >> $GITHUB_PATH
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-          cmake --version
+      - name: Set up QEMU
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
       
       - name: Checkout code
         uses: actions/checkout@v5
@@ -211,26 +214,124 @@ jobs:
         id: get_version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
       
+      - name: Build in container
+        run: |
+          docker run --rm --platform ${{ matrix.platform }} \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            ${{ matrix.container }} \
+            bash -c '
+              yum install -y gcc-c++ make git tar gzip openssl-devel python3-pip zlib-devel
+              pip3 install cmake --upgrade
+              export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
+              cd cpp-client
+              cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+              cmake --build build --config Release
+              cd build
+              tar -czf ../../cpp-client-${{ steps.get_version.outputs.VERSION }}-linux-${{ matrix.arch }}.tar.gz hft_client
+            '
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-linux-${{ matrix.arch }}
+          path: cpp-client-${{ steps.get_version.outputs.VERSION }}-linux-${{ matrix.arch }}.tar.gz
+
+  build-cpp-macos:
+    name: Build C++ Client (macOS)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-13
+            arch: x86_64
+          - os: macos-14
+            arch: arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      
+      - name: Install dependencies
+        run: |
+          brew install cmake openssl@3
+      
+      - name: Get version
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
       - name: Build
         working-directory: cpp-client
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOPENSSL_ROOT_DIR=$OPENSSL_ROOT_DIR
           cmake --build build --config Release
       
       - name: Create tarball
         run: |
           cd cpp-client/build
-          tar -czf ../../cpp-client-${{ steps.get_version.outputs.VERSION }}.tar.gz .
+          tar -czf ../../cpp-client-${{ steps.get_version.outputs.VERSION }}-macos-${{ matrix.arch }}.tar.gz hft_client
       
-      - name: Upload tarball
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cpp-client
-          path: cpp-client-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          name: cpp-macos-${{ matrix.arch }}
+          path: cpp-client-${{ steps.get_version.outputs.VERSION }}-macos-${{ matrix.arch }}.tar.gz
+
+  build-cpp-windows:
+    name: Build C++ Client (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      
+      - name: Setup vcpkg
+        run: |
+          git clone https://github.com/Microsoft/vcpkg.git
+          cd vcpkg
+          .\bootstrap-vcpkg.bat
+          .\vcpkg integrate install
+      
+      - name: Install dependencies (static)
+        run: |
+          cd vcpkg
+          .\vcpkg install openssl:x64-windows-static zlib:x64-windows-static
+      
+      - name: Get version
+        id: get_version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+      - name: Build (static linking)
+        shell: bash
+        working-directory: cpp-client
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake \
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static
+          cmake --build build --config Release
+      
+      - name: Create archive
+        shell: bash
+        run: |
+          cd cpp-client/build/Release
+          7z a ../../../cpp-client-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.zip hft_client.exe
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-windows-x86_64
+          path: cpp-client-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.zip
 
   create-release:
     name: Create GitHub Release
-    needs: [build-java, build-rust-linux, build-rust-macos, build-rust-windows, build-cpp]
+    needs: [build-java, build-rust-linux, build-rust-macos, build-rust-windows, build-cpp-linux, build-cpp-macos, build-cpp-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -284,8 +385,8 @@ jobs:
           ### 📦 Components
           
           - **Java Trading Client** - ✅ Cross-platform (all architectures)
-          - **Rust Mock Server** - ✅ Linux (x86_64 & ARM64), macOS (Intel & Apple Silicon), Windows
-          - **C++ Client** - ✅ Linux x86_64
+          - **Rust Mock Server** - ✅ Linux (x86_64 & ARM64/Graviton), macOS (Intel & Apple Silicon), Windows
+          - **C++ Client** - ✅ Multi-platform: Linux (x86_64 & ARM64/Graviton), macOS (Intel & Apple Silicon), Windows
           - **Configuration Samples** - 📝 All config files with documentation
           
           ### 🚀 Quick Start
@@ -299,6 +400,33 @@ jobs:
           \`\`\`bash
           java -jar ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
           \`\`\`
+          
+          **C++ Client (choose your platform):**
+          - **Linux x86_64:** 
+            \`\`\`bash
+            tar -xzf cpp-client-${{ steps.get_version.outputs.VERSION }}-linux-x86_64.tar.gz
+            ./hft_client
+            \`\`\`
+          - **Linux ARM64 (Graviton2/3/4):** 
+            \`\`\`bash
+            tar -xzf cpp-client-${{ steps.get_version.outputs.VERSION }}-linux-aarch64.tar.gz
+            ./hft_client
+            \`\`\`
+          - **macOS Intel:** 
+            \`\`\`bash
+            tar -xzf cpp-client-${{ steps.get_version.outputs.VERSION }}-macos-x86_64.tar.gz
+            ./hft_client
+            \`\`\`
+          - **macOS Apple Silicon:** 
+            \`\`\`bash
+            tar -xzf cpp-client-${{ steps.get_version.outputs.VERSION }}-macos-arm64.tar.gz
+            ./hft_client
+            \`\`\`
+          - **Windows:** 
+            \`\`\`powershell
+            Expand-Archive cpp-client-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.zip
+            .\\hft_client.exe
+            \`\`\`
           
           **Rust Server (choose your platform):**
           - **Linux x86_64:** \`./mock-trading-server-${{ steps.get_version.outputs.VERSION }}-linux-x86_64\`
