@@ -297,31 +297,39 @@ jobs:
           .\bootstrap-vcpkg.bat
           .\vcpkg integrate install
       
-      - name: Install dependencies (static)
+      - name: Install dependencies
         run: |
           cd vcpkg
-          .\vcpkg install openssl:x64-windows-static zlib:x64-windows-static
+          .\vcpkg install openssl:x64-windows zlib:x64-windows
       
       - name: Get version
         id: get_version
         shell: bash
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
       
-      - name: Build (static linking)
+      - name: Build
         shell: bash
         working-directory: cpp-client
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake \
-            -DVCPKG_TARGET_TRIPLET=x64-windows-static
+            -DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake
           cmake --build build --config Release
+      
+      - name: Copy DLLs
+        shell: bash
+        run: |
+          cp vcpkg/installed/x64-windows/bin/libssl-3-x64.dll cpp-client/build/Release/
+          cp vcpkg/installed/x64-windows/bin/libcrypto-3-x64.dll cpp-client/build/Release/
+          cp "C:/Windows/System32/msvcp140.dll" cpp-client/build/Release/ || true
+          cp "C:/Windows/System32/vcruntime140.dll" cpp-client/build/Release/ || true
+          cp "C:/Windows/System32/vcruntime140_1.dll" cpp-client/build/Release/ || true
       
       - name: Create archive
         shell: bash
         run: |
           cd cpp-client/build/Release
-          7z a ../../../cpp-client-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.zip hft_client.exe
+          7z a ../../../cpp-client-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.zip *.exe *.dll
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
