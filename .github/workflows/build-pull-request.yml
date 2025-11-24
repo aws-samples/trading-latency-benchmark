@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
       
@@ -43,7 +43,7 @@ jobs:
         working-directory: mock-trading-server
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -79,7 +79,7 @@ jobs:
         working-directory: cpp-client
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
       
@@ -112,7 +112,7 @@ jobs:
         working-directory: cpp-client
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
       
@@ -162,7 +162,7 @@ jobs:
         working-directory: deployment/cdk
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -199,7 +199,7 @@ jobs:
         working-directory: af_xdp_zero_copy_perf_benchmark
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       
       - name: Install dependencies
         run: |
