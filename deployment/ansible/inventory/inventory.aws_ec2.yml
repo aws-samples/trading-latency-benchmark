@@ -8,6 +8,7 @@ include_filters:
   - tag:Name:
     - 'Trading-Client'
     - 'Trading-Server'
+    - 'Trading-Benchmark-AMI-Builder-Instance'
 hostnames:
   - name: tag:Name
     separator: ''
