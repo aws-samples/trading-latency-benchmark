@@ -7,8 +7,6 @@
   
   vars:
     backup_dir: "/root/system_tuning_backup_{{ ansible_date_time.date }}"
-    isolated_cores: "2-7"  # Isolated cores for trading applications
-    housekeeping_cores: "0-1"  # Cores for system tasks and IRQs
     busy_poll_value: 50 # Adjust between 25-100
     busy_read_value: 50 # Adjust between 25-100
   
@@ -18,6 +16,44 @@
         path: "{{ backup_dir }}"
         state: directory
         mode: '0700'
+
+    # ==========================================
+    # DYNAMIC CPU CORE ALLOCATION
+    # ==========================================
+    - name: Detect number of vCPUs
+      ansible.builtin.set_fact:
+        total_vcpus: "{{ ansible_processor_vcpus }}"
+
+    - name: Calculate housekeeping and isolated cores based on instance size
+      ansible.builtin.set_fact:
+        # Scale housekeeping cores based on instance size
+        # 2-4 vCPUs: 1 core (0) - minimum viable
+        # 8 vCPUs: 2 cores (0-1)
+        # 16-32 vCPUs: 4 cores (0-3)
+        # 48-96 vCPUs: 8 cores (0-7)
+        # 128-192+ vCPUs: 16 cores (0-15)
+        housekeeping_core_count: >-
+          {% if total_vcpus|int <= 4 %}1
+          {% elif total_vcpus|int <= 8 %}2
+          {% elif total_vcpus|int <= 32 %}4
+          {% elif total_vcpus|int <= 96 %}8
+          {% else %}16
+          {% endif %}
+
+    - name: Set housekeeping and isolated core ranges
+      ansible.builtin.set_fact:
+        housekeeping_cores: >-
+          {% if housekeeping_core_count|int == 1 %}0
+          {% else %}0-{{ housekeeping_core_count|int - 1 }}
+          {% endif %}
+        isolated_cores: "{{ housekeeping_core_count }}-{{ total_vcpus|int - 1 }}"
+
+    - name: Display CPU allocation
+      ansible.builtin.debug:
+        msg:
+          - "Total vCPUs: {{ total_vcpus }}"
+          - "Housekeeping cores: {{ housekeeping_cores }} ({{ housekeeping_core_count }} cores for system tasks)"
+          - "Isolated cores: {{ isolated_cores }} ({{ total_vcpus|int - housekeeping_core_count|int }} cores for trading applications)"
 
     # ==========================================
     # PACKAGE INSTALLATION
