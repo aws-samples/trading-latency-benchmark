@@ -4,6 +4,7 @@ import * as cdk from 'aws-cdk-lib';
 import { TradingBenchmarkMultiAzStack } from '../lib/multi-az-stack';
 import { TradingBenchmarkSingleInstanceStack } from "../lib/single-instance-stack";
 import { TradingBenchmarkClusterPlacementGroupStack } from "../lib/cluster-placement-group-stack";
+import { TradingBenchmarkAmiBuilderStack } from "../lib/ami-builder-stack";
 
 const app = new cdk.App();
 
@@ -14,6 +15,8 @@ const serverInstanceType = app.node.tryGetContext('serverInstanceType');
 const instanceType1 = app.node.tryGetContext('instanceType1');
 const instanceType2 = app.node.tryGetContext('instanceType2');
 const instanceType = app.node.tryGetContext('instanceType');
+const baseAmi = app.node.tryGetContext('baseAmi');
+const keyPairName = app.node.tryGetContext('keyPairName');
 
 // Environment configuration
 const env = {
@@ -22,6 +25,16 @@ const env = {
 
 // Deploy the appropriate stack based on the deployment type
 switch (deploymentType.toLowerCase()) {
+  case 'ami-builder':
+    console.log('Deploying Trading Benchmark AMI Builder Stack');
+    new TradingBenchmarkAmiBuilderStack(app, 'TradingBenchmarkAmiBuilderStack', {
+      env,
+      instanceType,
+      baseAmi,
+      keyPairName
+    });
+    break;
+
   case 'cluster':
   case 'placement-group':
   case 'cpg':
@@ -32,7 +45,7 @@ switch (deploymentType.toLowerCase()) {
       serverInstanceType
     });
     break;
-  
+
   case 'multi-az':
     console.log('Deploying Trading Benchmark Multi-AZ Stack');
     new TradingBenchmarkMultiAzStack(app, 'TradingBenchmarkMultiAzStack', {
@@ -40,7 +53,7 @@ switch (deploymentType.toLowerCase()) {
       instanceType
     });
     break;
-  
+
   case 'single':
   default:
     console.log('Deploying Trading Benchmark Single Instance Stack');
