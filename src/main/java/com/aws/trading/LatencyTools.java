@@ -56,6 +56,9 @@ public final class LatencyTools {
         if (value > 1000) {
             value /= 1000;
             timeUnit = "ms";
+            // For milliseconds, always show 3 decimal places to preserve microsecond precision
+            // e.g., 137.200ms vs 137.000ms shows the 200µs difference
+            return String.format("%.3f%s", value, timeUnit);
         }
 
         if (value > 1000) {
