@@ -1,0 +1,20 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+plugin: amazon.aws.aws_ec2
+regions:
+  - ap-northeast-1
+include_filters:
+  - tag:Architecture:
+    - 'latency-hunting'
+hostnames:
+  - name: tag:Name
+    separator: ''
+compose:
+  # Use the public IP address to connect to the host
+  ansible_host: public_ip_address
+keyed_groups:
+  - key: tag:Architecture
+    separator: ''
+  - key: tag:Role
+    separator: ''

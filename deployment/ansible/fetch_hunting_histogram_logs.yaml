@@ -1,0 +1,123 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: Generate and fetch latency reports from EC2 hunting instances
+  hosts: aws_ec2
+  gather_facts: yes
+  tasks:
+    - name: Get EC2 instance type from metadata (IMDSv2 compatible)
+      shell: |
+        # Get token for IMDSv2
+        TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null)
+        # Get instance type using the token
+        curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null
+      register: instance_type_result
+      become: no
+      changed_when: false
+      
+    - name: Set instance type fact
+      set_fact:
+        instance_type: "{{ instance_type_result.stdout }}"
+        
+    - name: Display instance information
+      debug:
+        msg: "Processing {{ ansible_hostname }} - Instance Type: {{ instance_type }}"
+    
+    - name: Check if histogram file exists
+      stat:
+        path: /home/ec2-user/benchmark/histogram.hlog
+      register: histogram_file
+      become: no
+      
+    - name: Generate CSV report from histogram remotely
+      shell: |
+        cd /home/ec2-user/benchmark
+        if [ -f histogram.hlog ]; then
+          # Generate CSV report with instance type in filename
+          java -jar ExchangeFlow-v1.0.0.jar latency-report ./histogram.hlog report_{{ instance_type }}_{{ ansible_hostname }}.csv
+          echo "CSV report generated: report_{{ instance_type }}_{{ ansible_hostname }}.csv"
+        else
+          echo "Error: histogram.hlog not found"
+          exit 1
+        fi
+      become: no
+      register: report_generation
+      when: histogram_file.stat.exists
+      
+    - name: Display report generation result
+      debug:
+        msg: "{{ report_generation.stdout_lines }}"
+      when: histogram_file.stat.exists
+      
+    - name: Fetch CSV report to local
+      fetch:
+        src: /home/ec2-user/benchmark/report_{{ instance_type }}_{{ ansible_hostname }}.csv
+        dest: "../../deployment/latency-hunting/results/{{ instance_type }}_{{ ansible_hostname }}_report.csv"
+        flat: yes
+        validate_checksum: false
+      become: no
+      when: histogram_file.stat.exists
+      
+    - name: Fetch benchmark output for reference
+      fetch:
+        src: /home/ec2-user/benchmark/benchmark_output.txt
+        dest: "../../deployment/latency-hunting/results/{{ ansible_hostname }}_benchmark_output.txt"
+        flat: yes
+        validate_checksum: false
+      become: no
+      ignore_errors: yes
+
+- name: Aggregate CSV reports locally
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Create aggregated results directory
+      file:
+        path: "{{ playbook_dir }}/../../deployment/latency-hunting/results"
+        state: directory
+      delegate_to: localhost
+      run_once: true
+      
+    - name: Combine CSV reports into single file with instance types
+      shell: |
+        cd {{ playbook_dir }}/../../deployment/latency-hunting/results
+        
+        # Check if any CSV report files exist
+        if ! ls *_report.csv 1> /dev/null 2>&1; then
+          echo "No CSV report files found to aggregate"
+          exit 1
+        fi
+        
+        # Create aggregated CSV with header and instance type column
+        echo "Processing CSV reports..."
+        
+        # Get the header from the first CSV file and add InstanceType column
+        first_file=$(ls *_report.csv | head -n 1)
+        head -n 1 "$first_file" | awk '{print "InstanceType," $0}' > aggregated_latency_report.csv
+        
+        # Process each CSV file - extract instance type from filename
+        for csv_file in *_report.csv; do
+          # Extract instance type from filename pattern: instancetype_hostname_report.csv
+          instance_type=$(echo "$csv_file" | sed 's/_ip-.*_report\.csv$//' | sed 's/^.*\///')
+          echo "Adding data from: $instance_type (file: $csv_file)"
+          
+          # Skip header and add instance type to each row
+          tail -n +2 "$csv_file" | awk -v type="$instance_type" '{print type "," $0}' >> aggregated_latency_report.csv
+        done
+        
+        echo ""
+        echo "=========================================="
+        echo "Aggregated Report: aggregated_latency_report.csv"
+        echo "=========================================="
+        cat aggregated_latency_report.csv
+        echo ""
+        echo "Report saved to: $(pwd)/aggregated_latency_report.csv"
+      delegate_to: localhost
+      run_once: true
+      register: aggregation_result
+      
+    - name: Display aggregation result
+      debug:
+        msg: "{{ aggregation_result.stdout_lines }}"
+      run_once: true

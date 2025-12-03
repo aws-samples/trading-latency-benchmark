@@ -8,7 +8,8 @@
     "build": "tsc",
     "watch": "tsc -w",
     "test": "jest",
-    "cdk": "cdk"
+    "cdk": "cdk",
+    "clean": "find bin lib test -type f \\( -name '*.js' -o -name '*.d.ts' \\) -not -path '*/node_modules/*' -delete"
   },
   "devDependencies": {
     "@types/jest": "^29.5.5",

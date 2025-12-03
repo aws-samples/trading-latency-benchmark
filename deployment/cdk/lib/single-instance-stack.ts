@@ -5,6 +5,9 @@ import { Tags, RemovalPolicy } from 'aws-cdk-lib';
 export interface TradingBenchmarkSingleInstanceStackProps extends cdk.StackProps {
     instanceType1?: string;
     instanceType2?: string;
+    vpcCidr?: string;
+    keyPairName?: string;
+    availabilityZone?: string;
 }
 
 export class TradingBenchmarkSingleInstanceStack extends cdk.Stack {
@@ -14,10 +17,22 @@ export class TradingBenchmarkSingleInstanceStack extends cdk.Stack {
         // Default instance types if not provided
         const instanceType1 = props?.instanceType1 || 'c7i.4xlarge';
         const instanceType2 = props?.instanceType2 || 'c6in.4xlarge';
+        const vpcCidr = props?.vpcCidr || '10.50.0.0/16';  // Different default from hunting stack
+        
+        // Get keypair name from props or context
+        const keyPairName = props?.keyPairName || 
+                           this.node.tryGetContext('keyPairName') || 
+                           'frankfurt';  // Fallback to 'frankfurt' for backwards compatibility
+        
+        // Get specific availability zone or use first available
+        const availabilityZone = props?.availabilityZone || 
+                                this.node.tryGetContext('availabilityZone');
+        const azList = availabilityZone ? [availabilityZone] : [this.availabilityZones[0]];
 
         const benchmarkVpc = new Vpc(this, 'TradingBenchmarkVPC', {
+            ipAddresses: cdk.aws_ec2.IpAddresses.cidr(vpcCidr),
             natGateways: 1,
-            availabilityZones: ['us-east-1a'],
+            availabilityZones: azList,
             subnetConfiguration: [
                 {
                     cidrMask: 24,
@@ -95,7 +110,7 @@ export class TradingBenchmarkSingleInstanceStack extends cdk.Stack {
         const ami = MachineImage.latestAmazonLinux2023();
 
         // Import existing key pair
-        const keyPair = KeyPair.fromKeyPairName(this, 'ImportedKeyPair', 'virginia');
+        const keyPair = KeyPair.fromKeyPairName(this, 'ImportedKeyPair', keyPairName);
 
         // Parse instance types
         let instanceType1Obj: InstanceType;
@@ -121,9 +136,6 @@ export class TradingBenchmarkSingleInstanceStack extends cdk.Stack {
             instanceType: instanceType1Obj,
             machineImage: ami,
             securityGroup,
-            vpcSubnets: {
-                availabilityZones: ['us-east-1a']
-            },
             keyPair,
             blockDevices: [{
                 deviceName: "/dev/xvda",
@@ -140,9 +152,6 @@ export class TradingBenchmarkSingleInstanceStack extends cdk.Stack {
             instanceType: instanceType2Obj,
             machineImage: ami,
             securityGroup,
-            vpcSubnets: {
-                availabilityZones: ['us-east-1a']
-            },
             keyPair,
             blockDevices: [{
                 deviceName: "/dev/xvda",

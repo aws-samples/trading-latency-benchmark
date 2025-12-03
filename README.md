@@ -88,11 +88,12 @@ See [deployment/AMI_BUILDER_README.md](deployment/AMI_BUILDER_README.md) for det
 Deploy the required AWS infrastructure using CDK. You have several deployment options:
 
 #### Default Single Instance Deployment
+Create SSH keypair manually and name it as for example frankfurt then
 
 ```bash
 cd deployment/cdk
 npm install
-cdk deploy
+cdk deploy --context region=eu-central-1 --context availabilityZone=eu-central-1a --context keyPairName=frankfurt --context instanceType1=c7i.4xlarge --context instanceType2=c6in.4xlarge
 ```
 
 #### Client-Server Architecture with Cluster Placement Group
@@ -138,7 +139,6 @@ cd deployment
 ./build-tuned-ami.sh --instance-type c7i.4xlarge --key-file ~/.ssh/virginia.pem
 ```
 
-These commands will create EC2 instances in your AWS account according to the selected architecture.
 
 ### 2. Run the Benchmark Tests
 
