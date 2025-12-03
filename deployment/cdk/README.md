@@ -30,10 +30,16 @@ npm install
 cdk deploy
 ```
 
-You can specify instance types:
+You can specify instance types, keypair, and availability zone:
 
 ```bash
-cdk deploy --context instanceType1=c7i.4xlarge --context instanceType2=c6in.4xlarge
+cdk deploy --context instanceType1=c7i.4xlarge --context instanceType2=c6in.4xlarge --context keyPairName=my-keypair --context availabilityZone=us-east-1a
+```
+
+To deploy to Frankfurt (eu-central-1a):
+
+```bash
+cdk deploy --context region=eu-central-1 --context availabilityZone=eu-central-1a --context keyPairName=frankfurt
 ```
 
 ### Cluster Placement Group Deployment
@@ -74,6 +80,10 @@ cdk deploy --context deploymentType=multi-az --context instanceType=r4.xlarge
 | `clientInstanceType` | EC2 instance type for client in cluster mode | `c7i.4xlarge` | `c7i.4xlarge`, `c6i.8xlarge` |
 | `serverInstanceType` | EC2 instance type for server in cluster mode | `c6in.4xlarge` | `c6in.4xlarge`, `r6i.4xlarge` |
 | `instanceType` | EC2 instance type for all instances in multi-az mode | `r4.xlarge` | `r4.xlarge`, `c5.4xlarge` |
+| `keyPairName` | EC2 key pair name for SSH access (single instance stack) | `frankfurt` | `my-keypair`, `virginia` |
+| `availabilityZone` | Specific availability zone for deployment (single instance stack) | First AZ in region | `eu-central-1a`, `us-east-1a` |
+| `vpcCidr` | CIDR block for VPC | `10.50.0.0/16` | `10.50.0.0/16`, `10.100.0.0/16` |
+| `region` | AWS region for deployment | `us-east-1` | `eu-central-1`, `us-west-2` |
 
 ## Useful Commands
 

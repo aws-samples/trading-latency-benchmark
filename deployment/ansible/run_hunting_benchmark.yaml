@@ -1,0 +1,109 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: Run latency benchmark on EC2 hunting instances
+  hosts: aws_ec2
+  gather_facts: yes
+  vars:
+    target_host: "10.50.0.169"
+    warmup_count: 1
+    test_size: 100
+  tasks:
+  - name: Wait for benchmark setup to complete
+    wait_for:
+      path: /home/ec2-user/benchmark/setup_complete
+      timeout: 600
+    become: no
+    
+  - name: Update config.properties with target host
+    lineinfile:
+      path: /home/ec2-user/benchmark/config.properties
+      regexp: '^HOST='
+      line: 'HOST={{ target_host }}'
+    become: no
+    
+  - name: Update WARMUP_COUNT in config.properties
+    lineinfile:
+      path: /home/ec2-user/benchmark/config.properties
+      regexp: '^WARMUP_COUNT='
+      line: 'WARMUP_COUNT={{ warmup_count }}'
+    become: no
+    
+  - name: Update TEST_SIZE in config.properties
+    lineinfile:
+      path: /home/ec2-user/benchmark/config.properties
+      regexp: '^TEST_SIZE='
+      line: 'TEST_SIZE={{ test_size }}'
+    become: no
+    
+  - name: Create histogram_logs directory
+    file:
+      path: /home/ec2-user/benchmark/histogram_logs
+      state: directory
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    become: no
+    
+  - name: Display configuration
+    shell: |
+      echo "=== Benchmark Configuration ==="
+      echo "Target Host: {{ target_host }}"
+      echo "Warmup Count: {{ warmup_count }}"
+      echo "Test Size: {{ test_size }}"
+      echo "Instance: {{ ansible_hostname }}"
+      echo ""
+    become: no
+    
+  - name: Run trading latency benchmark for 3 minutes
+    shell: |
+      cd /home/ec2-user/benchmark
+      # Run the benchmark in the background and capture its PID
+      java -jar ExchangeFlow-v1.0.0.jar latency-test > benchmark_output.txt 2>&1 &
+      BENCHMARK_PID=$!
+      echo "Started benchmark with PID: $BENCHMARK_PID"
+      
+      # Wait for 3 minutes (180 seconds)
+      sleep 180
+      
+      # Stop the benchmark
+      kill $BENCHMARK_PID 2>/dev/null || true
+      sleep 2
+      
+      # Force kill if still running
+      kill -9 $BENCHMARK_PID 2>/dev/null || true
+      
+      echo "Benchmark completed at $(date)"
+    become: no
+    async: 250
+    poll: 0
+    register: benchmark_run
+    
+  - name: Wait for benchmark to complete
+    async_status:
+      jid: "{{ benchmark_run.ansible_job_id }}"
+    register: job_result
+    until: job_result.finished
+    retries: 30
+    delay: 10
+    become: no
+    
+  - name: Generate latency report from histogram
+    shell: |
+      cd /home/ec2-user/benchmark
+      if [ -f histogram.hlog ]; then
+        echo "=== Generating Latency Report ==="
+        java -jar ExchangeFlow-v1.0.0.jar latency-report ./histogram.hlog
+      else
+        echo "Error: histogram.hlog file not found"
+        echo "Available files in directory:"
+        ls -la
+        exit 1
+      fi
+    become: no
+    register: results
+    
+  - name: Show latency results
+    debug:
+      msg: "{{ results.stdout_lines }}"
