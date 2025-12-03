@@ -6,7 +6,7 @@
   hosts: aws_ec2
   gather_facts: yes
   vars:
-    target_host: "10.50.0.169"
+    target_host: "10.50.0.241"
     warmup_count: 1
     test_size: 100
   tasks:

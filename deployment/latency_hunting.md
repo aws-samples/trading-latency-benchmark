@@ -70,18 +70,52 @@ The deployment includes **50+ diverse instance types** across current and previo
 
 ### Step 1: Deploy Hunting Instances
 
+#### BYOVPC Mode (Recommended)**
+
+This mode **never creates or manages VPC infrastructure** - perfect when you want to use your existing VPC without CDK touching it.
+
 ```bash
 cd deployment
 
-# Deploy in Tokyo region with default CIDR
+# Deploy into existing VPC/subnet
+./deploy-latency-hunting.sh \
+  --use-existing-vpc \
+  --region ap-northeast-1 \
+  --vpc-id $VPC_ID \
+  --subnet-id $SUBNET_ID \
+  --key-pair $SSH_KEYPAIR
+
+# With existing security group
+./deploy-latency-hunting.sh \
+  --use-existing-vpc \
+  --region ap-northeast-1 \
+  --vpc-id $VPC_ID \
+  --subnet-id $SUBNET_ID \
+  --security-group-id $SECURITY_GROUP_ID \
+  --key-pair $SSH_KEYPAIR
+```
+
+**What BYOVPC Mode Does:**
+- **Never creates/destroys VPC** - uses your existing VPC, subnet ..etc.
+- Only creates: Instances, Placement Groups, Lambda (optional: Security Group)
+- Respects your network configuration completely
+- Clean stack deletion - only removes instances/placement groups
+
+#### CDK-Managed VPC Mode**
+
+Use this if you want CDK to manage the VPC (creates new VPC):
+
+```bash
+cd deployment
+
+# CDK creates new VPC
 ./deploy-latency-hunting.sh --region ap-northeast-1 --key-pair your-keypair
 
-# Deploy with custom CIDR to avoid overlap with target VPC
-./deploy-latency-hunting.sh --region ap-northeast-1 --vpc-cidr 10.200.0.0/16
-
-# Deploy with custom key pair and CIDR
-./deploy-latency-hunting.sh --region ap-northeast-1 --key-pair my-keypair --vpc-cidr 10.150.0.0/16
+# CDK creates VPC with custom CIDR
+./deploy-latency-hunting.sh --region ap-northeast-1 --vpc-cidr 10.200.0.0/16 --key-pair your-keypair
 ```
+
+⚠️ **Warning**: Switching between modes (CDK-managed → BYOVPC) requires stack deletion and recreation.
 
 
 **Expected Results**: 

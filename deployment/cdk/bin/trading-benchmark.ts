@@ -6,6 +6,7 @@ import { TradingBenchmarkSingleInstanceStack } from "../lib/single-instance-stac
 import { TradingBenchmarkClusterPlacementGroupStack } from "../lib/cluster-placement-group-stack";
 import { TradingBenchmarkAmiBuilderStack } from "../lib/ami-builder-stack";
 import { LatencyHuntingStack } from "../lib/latency-hunting-stack";
+import { LatencyHuntingBYOVPCStack } from "../lib/latency-hunting-byovpc-stack";
 
 const app = new cdk.App();
 
@@ -20,10 +21,16 @@ const baseAmi = app.node.tryGetContext('baseAmi');
 const keyPairName = app.node.tryGetContext('keyPairName');
 const region = app.node.tryGetContext('region') || 'us-east-1';
 const vpcCidr = app.node.tryGetContext('vpcCidr');
+const vpcId = app.node.tryGetContext('vpcId');
+const subnetId = app.node.tryGetContext('subnetId');
+const securityGroupId = app.node.tryGetContext('securityGroupId');
+const useExistingVpc = app.node.tryGetContext('useExistingVpc');
 const availabilityZone = app.node.tryGetContext('availabilityZone');
 
 // Environment configuration
+// Note: For VPC lookup to work, we need explicit account and region
 const env = {
+  account: process.env.CDK_DEFAULT_ACCOUNT,
   region: region
 };
 
@@ -60,12 +67,36 @@ switch (deploymentType.toLowerCase()) {
 
   case 'latency-hunting':
   case 'hunting':
-    console.log('Deploying EC2 Hunting Stack for network placement optimization');
-    new LatencyHuntingStack(app, 'LatencyHuntingStack', {
-      env,
-      keyPairName: keyPairName || 'virginia',
-      vpcCidr
-    });
+    if (useExistingVpc === 'true' || useExistingVpc === true) {
+      // Use BYOVPC stack - requires vpcId and subnetId
+      console.log('Deploying EC2 Hunting BYOVPC Stack (using existing VPC)');
+      if (!vpcId) {
+        throw new Error('vpcId is required when using existing VPC. Provide --vpc-id parameter.');
+      }
+      if (!subnetId) {
+        throw new Error('subnetId is required when using existing VPC. Provide --subnet-id parameter.');
+      }
+      if (!keyPairName) {
+        throw new Error('keyPairName is required. Provide --key-pair parameter.');
+      }
+      
+      new LatencyHuntingBYOVPCStack(app, 'LatencyHuntingBYOVPCStack', {
+        env,
+        vpcId: vpcId,
+        subnetId: subnetId,
+        keyPairName: keyPairName,
+        securityGroupId: securityGroupId
+      });
+    } else {
+      // Use original stack that can create or import VPC
+      console.log('Deploying EC2 Hunting Stack for network placement optimization');
+      new LatencyHuntingStack(app, 'LatencyHuntingStack', {
+        env,
+        keyPairName: keyPairName || 'virginia',
+        vpcCidr,
+        vpcId
+      });
+    }
     break;
 
   case 'single':

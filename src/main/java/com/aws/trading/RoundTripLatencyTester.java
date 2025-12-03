@@ -128,7 +128,11 @@ public class RoundTripLatencyTester {
         HISTOGRAM.add(hdr.getIntervalHistogram());
         if (messageCount % REPORT_SIZE == 0) {
             var executionTimeStr = LatencyTools.formatNanos(executionTime);
-            var messagePerSecond = messageCount / TimeUnit.SECONDS.convert(executionTime, TimeUnit.NANOSECONDS);
+            var executionTimeInSeconds = TimeUnit.SECONDS.convert(executionTime, TimeUnit.NANOSECONDS);
+            // Prevent division by zero during very fast execution or warmup
+            var messagePerSecond = executionTimeInSeconds > 0 
+                ? messageCount / executionTimeInSeconds 
+                : 0;
             var logMsg = "\nTest Execution Time: {}s \n Number of messages: {} \n Message Per Second: {} \n Percentiles: {} \n";
 
             try (PrintStream histogramLogFile = getLogFile()) {
