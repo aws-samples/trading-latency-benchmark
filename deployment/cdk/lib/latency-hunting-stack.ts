@@ -23,6 +23,7 @@ export interface LatencyHuntingStackProps extends cdk.StackProps {
   keyPairName?: string;
   maxInstancesPerType?: number;
   vpcCidr?: string;
+  vpcId?: string;  // Use existing VPC instead of creating new one
 }
 
 export class LatencyHuntingStack extends cdk.Stack {
@@ -32,6 +33,7 @@ export class LatencyHuntingStack extends cdk.Stack {
     const keyPairName = props?.keyPairName || 'virginia';
     const maxInstancesPerType = props?.maxInstancesPerType || 1;
     const vpcCidr = props?.vpcCidr || '10.100.0.0/16';  // Default non-standard CIDR
+    const vpcId = props?.vpcId;
 
     // Define diverse, low-cost instance types to maximize network spine coverage
     // Includes current and previous generation instances across Intel, AMD, and ARM architectures
@@ -162,49 +164,60 @@ export class LatencyHuntingStack extends cdk.Stack {
       
     ];
 
-    // Create VPC with configurable CIDR to avoid overlaps
-    const vpc = new Vpc(this, 'LatencyHuntingVpc', {
-      ipAddresses: cdk.aws_ec2.IpAddresses.cidr(vpcCidr),
-      natGateways: 1,
-      availabilityZones: [this.availabilityZones[0]], // Use first AZ
-      subnetConfiguration: [
-        {
-          cidrMask: 24,
-          name: 'Public',
-          subnetType: SubnetType.PUBLIC,
-          mapPublicIpOnLaunch: true
-        }
-      ],
-      gatewayEndpoints: {}
-    });
-
-    vpc.applyRemovalPolicy(RemovalPolicy.DESTROY);
+    // Use existing VPC or create new one
+    let vpc: cdk.aws_ec2.IVpc;
     
-    // Apply removal policy to all subnets
-    for (const subnet of vpc.publicSubnets) {
+    if (vpcId) {
+      // Import existing VPC
+      console.log(`Using existing VPC: ${vpcId}`);
+      vpc = Vpc.fromLookup(this, 'ExistingVpc', {
+        vpcId: vpcId
+      });
+    } else {
+      // Create new VPC with configurable CIDR to avoid overlaps
+      console.log('Creating new VPC for latency hunting');
+      const newVpc = new Vpc(this, 'LatencyHuntingVpc', {
+        ipAddresses: cdk.aws_ec2.IpAddresses.cidr(vpcCidr),
+        natGateways: 1,
+        availabilityZones: [this.availabilityZones[0]], // Use first AZ
+        subnetConfiguration: [
+          {
+            cidrMask: 24,
+            name: 'Public',
+            subnetType: SubnetType.PUBLIC,
+            mapPublicIpOnLaunch: true
+          }
+        ],
+        gatewayEndpoints: {}
+      });
+
+      newVpc.applyRemovalPolicy(RemovalPolicy.DESTROY);
+      
+      // Apply removal policy to all subnets
+      for (const subnet of newVpc.publicSubnets) {
       if (subnet.node.defaultChild instanceof cdk.CfnResource) {
         (subnet.node.defaultChild as cdk.CfnResource).applyRemovalPolicy(RemovalPolicy.DESTROY);
       }
     }
 
-    // Apply removal policy to NAT gateways
-    for (const natGateway of vpc.node.findAll().filter(child => 
+      // Apply removal policy to NAT gateways
+      for (const natGateway of newVpc.node.findAll().filter(child => 
       child.node.defaultChild instanceof cdk.aws_ec2.CfnNatGateway)) {
       if (natGateway.node.defaultChild instanceof cdk.CfnResource) {
         (natGateway.node.defaultChild as cdk.CfnResource).applyRemovalPolicy(RemovalPolicy.DESTROY);
       }
     }
 
-    // Apply removal policy to route tables
-    for (const routeTable of vpc.node.findAll().filter(child => 
+      // Apply removal policy to route tables
+      for (const routeTable of newVpc.node.findAll().filter(child => 
       child.node.defaultChild instanceof cdk.aws_ec2.CfnRouteTable)) {
       if (routeTable.node.defaultChild instanceof cdk.CfnResource) {
         (routeTable.node.defaultChild as cdk.CfnResource).applyRemovalPolicy(RemovalPolicy.DESTROY);
       }
     }
 
-    // Find and apply removal policy to GuardDuty data endpoint specifically
-    const guardDutyEndpoints = vpc.node.findAll().filter(child => 
+      // Find and apply removal policy to GuardDuty data endpoint specifically
+      const guardDutyEndpoints = newVpc.node.findAll().filter(child => 
       child.node.defaultChild instanceof cdk.aws_ec2.CfnVPCEndpoint && 
       (child.node.defaultChild as any).serviceName?.includes('guardduty-data')
     );
@@ -216,12 +229,15 @@ export class LatencyHuntingStack extends cdk.Stack {
       }
     }
 
-    // Apply removal policy to all VPC endpoints
-    for (const endpoint of vpc.node.findAll().filter(child => 
+      // Apply removal policy to all VPC endpoints
+      for (const endpoint of newVpc.node.findAll().filter(child => 
       child.node.defaultChild instanceof cdk.aws_ec2.CfnVPCEndpoint)) {
       if (endpoint.node.defaultChild instanceof cdk.CfnResource) {
         (endpoint.node.defaultChild as cdk.CfnResource).applyRemovalPolicy(RemovalPolicy.DESTROY);
       }
+      }
+      
+      vpc = newVpc;
     }
 
     // Create security group
@@ -274,28 +290,108 @@ def handler(event, context):
     request_type = event['RequestType']
     
     if request_type == 'Delete':
-        # Handle cleanup
-        instance_id = event.get('PhysicalResourceId')
-        if instance_id and instance_id.startswith('i-'):
-            try:
-                # Terminate the instance
-                ec2.terminate_instances(InstanceIds=[instance_id])
-                print(f"Terminating instance: {instance_id}")
+        physical_resource_id = event.get('PhysicalResourceId')
+        logical_resource_id = event.get('LogicalResourceId', '')
+        stack_id = event.get('StackId', '')
+        
+        instances_to_terminate = []
+        
+        # Always search by CloudFormationLogicalId tag - this is the reliable method
+        print(f"Searching for instances with CloudFormationLogicalId: {logical_resource_id}")
+        
+        try:
+            # Search for instances with matching CloudFormationLogicalId tag
+            filters = [
+                {'Name': 'tag:CloudFormationLogicalId', 'Values': [logical_resource_id]},
+                {'Name': 'tag:ManagedBy', 'Values': ['CDK-LatencyHunting']},
+                {'Name': 'instance-state-name', 'Values': ['pending', 'running', 'stopping', 'stopped']}
+            ]
+            
+            # Also filter by stack ID if available for extra safety
+            if stack_id:
+                filters.append({'Name': 'tag:CloudFormationStackId', 'Values': [stack_id]})
+            
+            response = ec2.describe_instances(Filters=filters)
+            
+            for reservation in response['Reservations']:
+                for instance in reservation['Instances']:
+                    instance_id = instance['InstanceId']
+                    instances_to_terminate.append(instance_id)
+                    print(f"Found instance by CloudFormationLogicalId tag: {instance_id}")
+            
+            if not instances_to_terminate:
+                print(f"No instances found for LogicalResourceId: {logical_resource_id}")
+                # Also check if PhysicalResourceId is a valid instance ID as fallback
+                if physical_resource_id and physical_resource_id.startswith('i-'):
+                    print(f"Checking PhysicalResourceId as fallback: {physical_resource_id}")
+                    try:
+                        check_response = ec2.describe_instances(InstanceIds=[physical_resource_id])
+                        if check_response['Reservations']:
+                            instances_to_terminate.append(physical_resource_id)
+                            print(f"Found instance from PhysicalResourceId: {physical_resource_id}")
+                    except ClientError as e:
+                        if e.response['Error']['Code'] != 'InvalidInstanceID.NotFound':
+                            print(f"Error checking PhysicalResourceId: {str(e)}")
                 
-                # Wait for instance to be terminated before completing
-                # This ensures placement group can be deleted
-                waiter = ec2.get_waiter('instance_terminated')
-                waiter.wait(
-                    InstanceIds=[instance_id],
-                    WaiterConfig={
-                        'Delay': 30,
-                        'MaxAttempts': 10  # Wait up to 5 minutes (matches Lambda timeout)
-                    }
-                )
-                print(f"Instance {instance_id} terminated successfully")
+        except Exception as e:
+            print(f"Error searching for instances: {str(e)}")
+        
+        # Terminate all found instances
+        for instance_id in instances_to_terminate:
+            try:
+                ec2.terminate_instances(InstanceIds=[instance_id])
+                print(f"Initiated termination for instance: {instance_id}")
+                
+                # Wait for instance to be terminated or at least shutting down
+                max_wait_time = 120  # 2 minutes should be enough for most instances
+                start_time = time.time()
+                
+                while time.time() - start_time < max_wait_time:
+                    try:
+                        response = ec2.describe_instances(InstanceIds=[instance_id])
+                        if response['Reservations']:
+                            state = response['Reservations'][0]['Instances'][0]['State']['Name']
+                            print(f"Instance {instance_id} state: {state}")
+                            
+                            if state == 'terminated':
+                                print(f"Instance {instance_id} successfully terminated")
+                                break
+                            elif state == 'shutting-down':
+                                # Instance is in shutting-down state, give it a bit more time
+                                # but if we're running out of time, accept this state
+                                if time.time() - start_time > 90:
+                                    print(f"Instance {instance_id} is shutting-down, proceeding")
+                                    break
+                        else:
+                            # No reservation found, instance is gone
+                            print(f"Instance {instance_id} reservation not found (terminated)")
+                            break
+                    except ClientError as e:
+                        if e.response['Error']['Code'] == 'InvalidInstanceID.NotFound':
+                            print(f"Instance {instance_id} not found (terminated)")
+                            break
+                        raise
+                    
+                    time.sleep(5)  # Wait 5 seconds between checks
+                
+                if time.time() - start_time >= max_wait_time:
+                    print(f"Warning: Timeout waiting for instance {instance_id} termination, but termination initiated")
+                
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                if error_code == 'InvalidInstanceID.NotFound':
+                    # Instance already terminated or doesn't exist
+                    print(f"Instance {instance_id} not found (already terminated)")
+                else:
+                    print(f"Error terminating instance {instance_id}: {str(e)}")
+                    # Don't fail - allow stack deletion to proceed
             except Exception as e:
-                print(f"Error terminating instance: {str(e)}")
-                # Even if termination fails, return success to allow stack deletion
+                print(f"Unexpected error terminating instance {instance_id}: {str(e)}")
+                # Don't fail - allow stack deletion to proceed
+        
+        if not instances_to_terminate:
+            print(f"No instances to terminate for {logical_resource_id}")
+            
         cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
         return
     
@@ -459,6 +555,9 @@ echo "EC2 Hunting setup completed successfully at $(date)"
                     {'Key': 'Role', 'Value': 'hunting-probe'},
                     {'Key': 'InstanceType', 'Value': instance_type},
                     {'Key': 'Architecture', 'Value': 'latency-hunting'},
+                    {'Key': 'ManagedBy', 'Value': 'CDK-LatencyHunting'},
+                    {'Key': 'CloudFormationLogicalId', 'Value': event.get('LogicalResourceId', 'unknown')},
+                    {'Key': 'CloudFormationStackId', 'Value': event.get('StackId', 'unknown')}
                 ]
             }]
         }
@@ -594,13 +693,19 @@ echo "EC2 Hunting setup completed successfully at $(date)"
       });
       placementGroup.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
+      // Get first public subnet (works for both created and imported VPCs)
+      const publicSubnets = vpc.publicSubnets;
+      if (publicSubnets.length === 0) {
+        throw new Error('No public subnets found in VPC');
+      }
+      
       // Create instance using custom resource for resilience
       // Note: AMI is selected by Lambda based on instance architecture
       const instanceResource = new CustomResource(this, `Instance-${instanceType}`, {
         serviceToken: provider.serviceToken,
         properties: {
           InstanceType: instanceType,
-          SubnetId: vpc.publicSubnets[0].subnetId,
+          SubnetId: publicSubnets[0].subnetId,
           SecurityGroupId: securityGroup.securityGroupId,
           KeyName: keyPairName,
           PlacementGroup: placementGroup.ref,
@@ -624,6 +729,11 @@ echo "EC2 Hunting setup completed successfully at $(date)"
     new cdk.CfnOutput(this, 'TotalInstanceTypes', {
       value: instanceTypes.length.toString(),
       description: 'Total number of instance types attempted'
+    });
+
+    new cdk.CfnOutput(this, 'VpcId', {
+      value: vpc.vpcId,
+      description: 'VPC ID used for hunting instances'
     });
 
     new cdk.CfnOutput(this, 'Region', {

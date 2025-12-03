@@ -16,6 +16,10 @@ NC='\033[0m' # No Color
 REGION="ap-northeast-1"  # Tokyo region
 KEY_PAIR_NAME="virginia"
 VPC_CIDR="10.100.0.0/16"  # Default non-overlapping CIDR
+VPC_ID=""  # Optional: use existing VPC
+SUBNET_ID=""  # Required for BYOVPC mode
+SECURITY_GROUP_ID=""  # Optional for BYOVPC mode
+USE_EXISTING_VPC="false"  # Set to true to use BYOVPC stack
 STACK_NAME="LatencyHuntingStack"
 
 # Function to print colored output
@@ -41,18 +45,31 @@ Deploy Latency Hunting stack to find optimal placement for low latency
 OPTIONS:
     -r, --region REGION          AWS region (default: ap-northeast-1 / Tokyo)
     -k, --key-pair KEY_NAME      EC2 key pair name (default: virginia)
-    -c, --vpc-cidr CIDR          VPC CIDR block (default: 10.100.0.0/16)
+    -c, --vpc-cidr CIDR          VPC CIDR block for new VPC (default: 10.100.0.0/16)
+    -v, --vpc-id VPC_ID          VPC ID for BYOVPC mode (requires --subnet-id)
+    -s, --subnet-id SUBNET_ID    Subnet ID for BYOVPC mode (required with --vpc-id)
+    -g, --security-group-id SG_ID Security group ID (optional, creates one if not provided)
+    --use-existing-vpc           Use BYOVPC stack (never creates/manages VPC)
     -h, --help                   Show this help message
 
 EXAMPLES:
-    # Deploy in Tokyo region with default settings
-    $0 --region ap-northeast-1
+    # Deploy with CDK-managed VPC (creates new VPC)
+    $0 --region ap-northeast-1 --key-pair my-keypair
 
-    # Deploy with custom CIDR to avoid overlap
-    $0 --region ap-northeast-1 --vpc-cidr 10.200.0.0/16
+    # Use existing VPC (RECOMMENDED - never manages VPC)
+    $0 --use-existing-vpc \
+      --region ap-northeast-1 \
+      --vpc-id vpc-02393b8e30c6e3e5d \
+      --subnet-id subnet-xxxxx \
+      --key-pair tokyo_keypair
 
-    # Deploy with custom key pair and CIDR
-    $0 --key-pair my-keypair --vpc-cidr 10.150.0.0/16
+    # With existing security group
+    $0 --use-existing-vpc \
+      --region ap-northeast-1 \
+      --vpc-id vpc-02393b8e30c6e3e5d \
+      --subnet-id subnet-xxxxx \
+      --security-group-id sg-xxxxx \
+      --key-pair my-keypair
 
 EOF
     exit 1
@@ -73,6 +90,22 @@ while [[ $# -gt 0 ]]; do
             VPC_CIDR="$2"
             shift 2
             ;;
+        -v|--vpc-id)
+            VPC_ID="$2"
+            shift 2
+            ;;
+        -s|--subnet-id)
+            SUBNET_ID="$2"
+            shift 2
+            ;;
+        -g|--security-group-id)
+            SECURITY_GROUP_ID="$2"
+            shift 2
+            ;;
+        --use-existing-vpc)
+            USE_EXISTING_VPC="true"
+            shift
+            ;;
         -h|--help)
             usage
             ;;
@@ -85,9 +118,39 @@ done
 
 print_info "Starting Latency Hunting Deployment"
 print_info "================================"
-print_info "Region: $REGION"
-print_info "Key Pair: $KEY_PAIR_NAME"
-print_info "VPC CIDR: $VPC_CIDR"
+
+if [ "$USE_EXISTING_VPC" = "true" ]; then
+    print_info "Mode: BYOVPC (Bring Your Own VPC)"
+    print_info "Region: $REGION"
+    print_info "Key Pair: $KEY_PAIR_NAME"
+    print_info "VPC ID: $VPC_ID"
+    print_info "Subnet ID: $SUBNET_ID"
+    if [ -n "$SECURITY_GROUP_ID" ]; then
+        print_info "Security Group: $SECURITY_GROUP_ID"
+    else
+        print_info "Security Group: Will create minimal one"
+    fi
+    STACK_NAME="LatencyHuntingBYOVPCStack"
+    
+    # Validate required parameters
+    if [ -z "$VPC_ID" ]; then
+        print_error "VPC ID is required when using --use-existing-vpc"
+        exit 1
+    fi
+    if [ -z "$SUBNET_ID" ]; then
+        print_error "Subnet ID is required when using --use-existing-vpc"
+        exit 1
+    fi
+else
+    print_info "Mode: Standard (CDK-managed VPC)"
+    print_info "Region: $REGION"
+    print_info "Key Pair: $KEY_PAIR_NAME"
+    if [ -n "$VPC_ID" ]; then
+        print_info "Using existing VPC: $VPC_ID"
+    else
+        print_info "Creating new VPC with CIDR: $VPC_CIDR"
+    fi
+fi
 print_info ""
 
 # Check if CDK is installed
@@ -126,7 +189,23 @@ fi
 CDK_CONTEXT="--context deploymentType=latency-hunting"
 CDK_CONTEXT="$CDK_CONTEXT --context region=$REGION"
 CDK_CONTEXT="$CDK_CONTEXT --context keyPairName=$KEY_PAIR_NAME"
-CDK_CONTEXT="$CDK_CONTEXT --context vpcCidr=$VPC_CIDR"
+
+# Add mode-specific parameters
+if [ "$USE_EXISTING_VPC" = "true" ]; then
+    CDK_CONTEXT="$CDK_CONTEXT --context useExistingVpc=true"
+    CDK_CONTEXT="$CDK_CONTEXT --context vpcId=$VPC_ID"
+    CDK_CONTEXT="$CDK_CONTEXT --context subnetId=$SUBNET_ID"
+    if [ -n "$SECURITY_GROUP_ID" ]; then
+        CDK_CONTEXT="$CDK_CONTEXT --context securityGroupId=$SECURITY_GROUP_ID"
+    fi
+else
+    # Standard mode - use original VPC logic
+    if [ -n "$VPC_ID" ]; then
+        CDK_CONTEXT="$CDK_CONTEXT --context vpcId=$VPC_ID"
+    else
+        CDK_CONTEXT="$CDK_CONTEXT --context vpcCidr=$VPC_CIDR"
+    fi
+fi
 
 # Deploy the stack
 print_info "Deploying Latency Hunting Stack..."
