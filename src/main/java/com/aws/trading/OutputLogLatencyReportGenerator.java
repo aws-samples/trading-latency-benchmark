@@ -64,7 +64,7 @@ public class OutputLogLatencyReportGenerator {
                                             Matcher matcher = LOG_PATTERN.matcher(line);
                                             if (matcher.matches()) {
                                                 var destination = matcher.group(1);
-                                                final SingleWriterRecorder histogram = histograms.computeIfAbsent(source + "<->" + destination, k -> new SingleWriterRecorder(Long.MAX_VALUE, 2));
+                                                final SingleWriterRecorder histogram = histograms.computeIfAbsent(source + "<->" + destination, k -> new SingleWriterRecorder(Long.MAX_VALUE, Config.HISTOGRAM_SIGNIFICANT_FIGURES));
                                                 double latency = Double.parseDouble(matcher.group(2));
                                                 String unit = matcher.group(4);
                                                 long latencyInNanoseconds;
