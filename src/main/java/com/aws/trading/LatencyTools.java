@@ -24,7 +24,7 @@ import java.util.LinkedHashMap;
 
 public final class LatencyTools {
 
-    public static final double[] PERCENTILES = new double[]{50, 90, 95, 99, 99.9, 99.99};
+    public static final double[] PERCENTILES = new double[]{10, 50, 90, 95, 99, 99.9};
 
     public static String createLatencyReportJson(Histogram histogram) {
         return toJSON(createLatencyReport(histogram));
@@ -51,27 +51,7 @@ public final class LatencyTools {
     }
 
     public static String formatNanos(long ns) {
-        float value = ns / 1000f;
-        String timeUnit = "µs";
-        if (value > 1000) {
-            value /= 1000;
-            timeUnit = "ms";
-            // For milliseconds, always show 3 decimal places to preserve microsecond precision
-            // e.g., 137.200ms vs 137.000ms shows the 200µs difference
-            return String.format("%.3f%s", value, timeUnit);
-        }
-
-        if (value > 1000) {
-            value /= 1000;
-            timeUnit = "s";
-        }
-
-        if (value < 3) {
-            return Math.round(value * 100) / 100f + timeUnit;
-        } else if (value < 30) {
-            return Math.round(value * 10) / 10f + timeUnit;
-        } else {
-            return Math.round(value) + timeUnit;
-        }
+        // Return raw nanoseconds to preserve full precision
+        return ns + "ns";
     }
 }
