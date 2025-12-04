@@ -56,7 +56,7 @@ public class RoundTripLatencyTester {
     private static final ThreadFactory NETTY_IO_THREAD_FACTORY = new AffinityThreadFactory("netty-io", AffinityStrategies.DIFFERENT_CORE);
     private static final ThreadFactory NETTY_WORKER_THREAD_FACTORY = new AffinityThreadFactory("netty-worker", AffinityStrategies.DIFFERENT_CORE);
     private final MultithreadEventLoopGroup nettyIOGroup;
-    public static final Histogram HISTOGRAM = new Histogram(Long.MAX_VALUE, 2);
+    public static final Histogram HISTOGRAM = new Histogram(Long.MAX_VALUE, 4);
     public static final LongAdder MESSAGE_COUNTER = new LongAdder();
     private static long testStartTime;
     private static volatile long histogramStartTime;

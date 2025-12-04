@@ -34,7 +34,7 @@ public class EndpointPingClient {
     }
 
     private abstract static class PingTask extends TimerTask {
-        final Histogram HISTOGRAM = new Histogram(Long.MAX_VALUE, 2);
+        final Histogram HISTOGRAM = new Histogram(Long.MAX_VALUE, 4);
         protected final String host;
         private final PrintStream histogramLogFile;
         private long count = 0;
