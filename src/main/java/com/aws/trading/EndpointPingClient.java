@@ -34,11 +34,11 @@ public class EndpointPingClient {
     }
 
     private abstract static class PingTask extends TimerTask {
-        final Histogram HISTOGRAM = new Histogram(Long.MAX_VALUE, 4);
+        final Histogram HISTOGRAM = new Histogram(Long.MAX_VALUE, Config.HISTOGRAM_SIGNIFICANT_FIGURES);
         protected final String host;
         private final PrintStream histogramLogFile;
         private long count = 0;
-        private final SingleWriterRecorder hdrRecorder = new SingleWriterRecorder(Long.MAX_VALUE, 2);
+        private final SingleWriterRecorder hdrRecorder = new SingleWriterRecorder(Long.MAX_VALUE, Config.HISTOGRAM_SIGNIFICANT_FIGURES);
 
         public PingTask(String host) throws IOException {
             this.host = host;

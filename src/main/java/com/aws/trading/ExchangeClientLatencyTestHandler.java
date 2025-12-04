@@ -76,7 +76,7 @@ public class ExchangeClientLatencyTestHandler extends ChannelInboundHandlerAdapt
         this.orderSentTimeMap = new ConcurrentHashMap<>(test_size);
         this.cancelSentTimeMap = new ConcurrentHashMap<>(test_size);
         this.test_size = test_size;
-        this.hdrRecorderForAggregation = new SingleWriterRecorder(Histogram.MAX_VALUE, Histogram.SIGNIFICANT_DIGITS);
+        this.hdrRecorderForAggregation = new SingleWriterRecorder(Histogram.MAX_VALUE, Config.HISTOGRAM_SIGNIFICANT_FIGURES);
     }
 
     @Override

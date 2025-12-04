@@ -110,6 +110,16 @@ public class Config {
      */
     public static final long PING_INTERVAL;
 
+    /**
+     * The number of significant figures to use for histogram precision.
+     * Higher values provide finer granularity but use more memory.
+     * - 2 sig figs: ~1% resolution (e.g., ~2.25ms buckets @ 225ms)
+     * - 3 sig figs: ~0.1% resolution (e.g., ~225μs buckets @ 225ms)
+     * - 4 sig figs: ~0.01% resolution (e.g., ~22.5μs buckets @ 225ms)
+     * - 5 sig figs: ~0.001% resolution (e.g., ~2.25μs buckets @ 225ms)
+     */
+    public static final int HISTOGRAM_SIGNIFICANT_FIGURES;
+
     // Static initializer to load configuration when the class is loaded
     static {
         loadConfiguration();
@@ -129,6 +139,7 @@ public class Config {
         KEY_STORE_PASSWORD = getProperty("KEY_STORE_PASSWORD", "123456");
         CIPHERS = getProperty("CIPHERS", "AES256-GCM-SHA384");
         PING_INTERVAL = getLongProperty("PING_INTERVAL", "1000"); // 1 second in milliseconds
+        HISTOGRAM_SIGNIFICANT_FIGURES = getIntegerProperty("HISTOGRAM_SIGNIFICANT_FIGURES", "5");
 
         validateConfiguration();
     }

@@ -37,13 +37,11 @@
       line: 'TEST_SIZE={{ test_size }}'
     become: no
     
-  - name: Create histogram_logs directory
-    file:
-      path: /home/ec2-user/benchmark/histogram_logs
-      state: directory
-      owner: ec2-user
-      group: ec2-user
-      mode: 0755
+  - name: Update HISTOGRAM_SIGNIFICANT_FIGURES in config.properties
+    lineinfile:
+      path: /home/ec2-user/benchmark/config.properties
+      regexp: '^HISTOGRAM_SIGNIFICANT_FIGURES='
+      line: 'HISTOGRAM_SIGNIFICANT_FIGURES={{ histogram_significant_figures | default(5) }}'
     become: no
     
   - name: Display configuration
@@ -54,6 +52,16 @@
       echo "Test Size: {{ test_size }}"
       echo "Instance: {{ ansible_hostname }}"
       echo ""
+    become: no
+    
+  - name: Clean up existing histogram files
+    shell: |
+      cd /home/ec2-user/benchmark
+      if [ -f histogram.hlog ]; then
+        echo "Removing existing histogram.hlog"
+        rm -f histogram.hlog
+      fi
+      echo "Clean test environment ready"
     become: no
     
   - name: Run trading latency benchmark for 3 minutes
