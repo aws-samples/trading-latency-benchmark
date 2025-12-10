@@ -1,5 +1,5 @@
 ---
-# ultra_low_latency_trading.yml - Amazon Linux 2023 compatible
+# ultra_low_latency_trading.yml - Amazon Linux 2023 compatible (x86 & Graviton)
 - name: Configure Ultra-Low Latency Trading System
   hosts: aws_ec2
   become: yes
@@ -11,6 +11,46 @@
     busy_read_value: 50 # Adjust between 25-100
   
   tasks:
+    # ==========================================
+    # ARCHITECTURE DETECTION
+    # ==========================================
+    - name: Detect CPU architecture
+      ansible.builtin.set_fact:
+        cpu_arch: "{{ ansible_architecture }}"
+        is_graviton: "{{ ansible_architecture == 'aarch64' }}"
+        is_x86: "{{ ansible_architecture in ['x86_64', 'amd64'] }}"
+
+    - name: Detect CPU vendor (Intel vs AMD)
+      ansible.builtin.shell: |
+        grep -m1 "vendor_id" /proc/cpuinfo | awk '{print $3}'
+      register: cpu_vendor_output
+      changed_when: false
+      when: is_x86
+
+    - name: Set CPU vendor flags
+      ansible.builtin.set_fact:
+        cpu_vendor: "{{ cpu_vendor_output.stdout if is_x86 else 'ARM' }}"
+        is_intel: "{{ is_x86 and (cpu_vendor_output.stdout == 'GenuineIntel') }}"
+        is_amd: "{{ is_x86 and (cpu_vendor_output.stdout == 'AuthenticAMD') }}"
+      when: is_x86
+
+    - name: Set CPU vendor flags for Graviton
+      ansible.builtin.set_fact:
+        cpu_vendor: "ARM"
+        is_intel: false
+        is_amd: false
+      when: is_graviton
+
+    - name: Display architecture information
+      ansible.builtin.debug:
+        msg:
+          - "Detected Architecture: {{ cpu_arch }}"
+          - "CPU Vendor: {{ cpu_vendor }}"
+          - "Is Intel: {{ is_intel }}"
+          - "Is AMD: {{ is_amd }}"
+          - "Is Graviton (ARM64): {{ is_graviton }}"
+          - "CPU Model: {{ ansible_processor[2] | default(ansible_processor[0]) }}"
+
     - name: Create backup directory
       file:
         path: "{{ backup_dir }}"
@@ -20,40 +60,65 @@
     # ==========================================
     # DYNAMIC CPU CORE ALLOCATION
     # ==========================================
-    - name: Detect number of vCPUs
+    - name: Detect number of vCPUs (before hyperthreading disabled)
       ansible.builtin.set_fact:
         total_vcpus: "{{ ansible_processor_vcpus }}"
 
+    - name: Detect threads per core (to check if SMT/HT exists)
+      ansible.builtin.shell: |
+        lscpu | grep "Thread(s) per core" | awk '{print $4}'
+      register: threads_per_core_output
+      changed_when: false
+
+    - name: Set SMT/HT presence flag
+      ansible.builtin.set_fact:
+        has_smt: "{{ threads_per_core_output.stdout | int == 2 }}"
+        threads_per_core: "{{ threads_per_core_output.stdout | int }}"
+
+    - name: Calculate effective cores (accounting for SMT/HT presence)
+      ansible.builtin.set_fact:
+        # On x86 WITH SMT/HT (threads_per_core=2), effective cores = vCPUs / 2
+        # On x86 WITHOUT SMT/HT (threads_per_core=1, like C7a), effective cores = vCPUs
+        # On Graviton (ARM), no hyperthreading, so effective cores = vCPUs
+        effective_cores: >-
+          {% if is_x86 and has_smt %}{{ (total_vcpus|int / 2) | int }}
+          {% else %}{{ total_vcpus|int }}
+          {% endif %}
+
     - name: Calculate housekeeping and isolated cores based on instance size
       ansible.builtin.set_fact:
-        # Scale housekeeping cores based on instance size
-        # 2-4 vCPUs: 1 core (0) - minimum viable
-        # 8 vCPUs: 2 cores (0-1)
-        # 16-32 vCPUs: 4 cores (0-3)
-        # 48-96 vCPUs: 8 cores (0-7)
-        # 128-192+ vCPUs: 16 cores (0-15)
-        housekeeping_core_count: >-
-          {% if total_vcpus|int <= 4 %}1
-          {% elif total_vcpus|int <= 8 %}2
-          {% elif total_vcpus|int <= 32 %}4
-          {% elif total_vcpus|int <= 96 %}8
-          {% else %}16
-          {% endif %}
+        # Scale housekeeping cores based on EFFECTIVE core count
+        # 2-4 cores: 1 core (0) - minimum viable
+        # 8 cores: 2 cores (0-1)
+        # 16-32 cores: 4 cores (0-3)
+        # 48-96 cores: 8 cores (0-7)
+        # 128-192+ cores: 16 cores (0-15)
+        housekeeping_core_count: "{% if effective_cores|int <= 4 %}1{% elif effective_cores|int <= 8 %}2{% elif effective_cores|int <= 32 %}4{% elif effective_cores|int <= 96 %}8{% else %}16{% endif %}"
 
     - name: Set housekeeping and isolated core ranges
       ansible.builtin.set_fact:
         housekeeping_cores: >-
           {% if housekeeping_core_count|int == 1 %}0
-          {% else %}0-{{ housekeeping_core_count|int - 1 }}
+          {% else %}0-{{ (housekeeping_core_count|int-1) }}
           {% endif %}
-        isolated_cores: "{{ housekeeping_core_count }}-{{ total_vcpus|int - 1 }}"
+        isolated_cores: "{{ housekeeping_core_count|int }}-{{ (effective_cores|int-1) }}"
+
+    - name: Calculate CPU affinity bitmask for housekeeping cores
+      ansible.builtin.set_fact:
+        # Calculate bitmask: 2^n - 1, where n = housekeeping_core_count
+        # 1 core = 1, 2 cores = 3, 4 cores = 15, 8 cores = 255, 16 cores = 65535
+        housekeeping_bitmask: "{{ (2 ** (housekeeping_core_count|int)) - 1 }}"
 
     - name: Display CPU allocation
       ansible.builtin.debug:
         msg:
           - "Total vCPUs: {{ total_vcpus }}"
+          - "Threads per core: {{ threads_per_core }}"
+          - "SMT/HT present: {{ 'Yes' if has_smt else 'No' }}"
+          - "Architecture: {{ 'x86_64' if is_x86 else 'ARM64 (Graviton)' }}"
+          - "Effective cores: {{ effective_cores }} ({{ 'after disabling SMT/HT' if (is_x86 and has_smt) else 'no SMT to disable' }})"
           - "Housekeeping cores: {{ housekeeping_cores }} ({{ housekeeping_core_count }} cores for system tasks)"
-          - "Isolated cores: {{ isolated_cores }} ({{ total_vcpus|int - housekeeping_core_count|int }} cores for trading applications)"
+          - "Isolated cores: {{ isolated_cores }} ({{ effective_cores|int - housekeeping_core_count|int }} cores for trading applications)"
 
     # ==========================================
     # PACKAGE INSTALLATION
@@ -78,22 +143,23 @@
         mode: '0755'
 
     # ==========================================
-    # CPU TUNING
+    # CPU TUNING - X86 SPECIFIC (HYPERTHREADING/SMT)
     # ==========================================
-    - name: Disable hyperthreading (immediately)
+    - name: Disable hyperthreading/SMT (immediately) - x86 with SMT only
       ansible.builtin.shell: |
         for cpunum in $(cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | cut -s -d, -f2- | tr ',' '\n' | sort -un); do
           echo 0 > /sys/devices/system/cpu/cpu$cpunum/online
         done
       changed_when: true
       ignore_errors: yes
+      when: is_x86 and has_smt
     
-    - name: Create hyperthreading disable service
+    - name: Create hyperthreading/SMT disable service - x86 with SMT only
       ansible.builtin.copy:
         dest: /etc/systemd/system/disable-hyperthreading.service
         content: |
           [Unit]
-          Description=Disable Hyperthreading
+          Description=Disable Hyperthreading/SMT
           After=syslog.target
 
           [Service]
@@ -104,13 +170,26 @@
           [Install]
           WantedBy=multi-user.target
         mode: '0644'
+      when: is_x86 and has_smt
     
-    - name: Enable hyperthreading disable service
+    - name: Enable hyperthreading/SMT disable service - x86 with SMT only
       ansible.builtin.systemd:
         name: disable-hyperthreading.service
         enabled: yes
         daemon_reload: yes
+      when: is_x86 and has_smt
 
+    - name: Verify hyperthreading disable service
+      ansible.builtin.debug:
+        msg:
+          - "✓ Hyperthreading/SMT disable service created and enabled"
+          - "  - Service: /etc/systemd/system/disable-hyperthreading.service"
+          - "  - Will disable SMT on boot"
+      when: is_x86 and has_smt
+
+    # ==========================================
+    # CPU TUNING - COMMON (PERFORMANCE GOVERNOR)
+    # ==========================================
     - name: Set CPU to performance governor (apply immediately)
       ansible.builtin.shell: |
         for CPU in /sys/devices/system/cpu/cpu*/cpufreq/; do
@@ -143,15 +222,26 @@
         enabled: yes
         daemon_reload: yes
 
-    - name: Set CPU to max frequency (Intel)
+    - name: Verify CPU performance governor configuration
+      ansible.builtin.debug:
+        msg:
+          - "✓ CPU performance governor configured"
+          - "  - Service: /etc/systemd/system/cpu-performance-governor.service"
+          - "  - Will set all CPUs to performance governor on boot"
+
+    # ==========================================
+    # CPU FREQUENCY TUNING - INTEL SPECIFIC
+    # ==========================================
+    - name: Set CPU to max frequency (Intel) - Intel only
       ansible.builtin.shell: |
         if [ -f /sys/devices/system/cpu/intel_pstate/min_perf_pct ]; then
           echo 100 > /sys/devices/system/cpu/intel_pstate/min_perf_pct
         fi
       changed_when: true
       ignore_errors: yes
+      when: is_intel
 
-    - name: Create Intel max frequency service
+    - name: Create Intel max frequency service - Intel only
       ansible.builtin.copy:
         dest: /etc/systemd/system/intel-max-freq.service
         content: |
@@ -168,15 +258,28 @@
           WantedBy=multi-user.target
         mode: '0644'
       ignore_errors: yes
+      when: is_intel
     
-    - name: Enable Intel max frequency service
+    - name: Enable Intel max frequency service - Intel only
       ansible.builtin.systemd:
         name: intel-max-freq.service
         enabled: yes
         daemon_reload: yes
       ignore_errors: yes
+      when: is_intel
 
-    - name: Set CPU to max frequency (AMD)
+    - name: Verify Intel frequency configuration
+      ansible.builtin.debug:
+        msg:
+          - "✓ Intel CPU max frequency configured"
+          - "  - Service: /etc/systemd/system/intel-max-freq.service"
+          - "  - Will set Intel P-state to 100% on boot"
+      when: is_intel
+
+    # ==========================================
+    # CPU FREQUENCY TUNING - AMD SPECIFIC
+    # ==========================================
+    - name: Set CPU to max frequency (AMD) - AMD only
       ansible.builtin.shell: |
         for CPU in /sys/devices/system/cpu/cpu*/cpufreq/; do
           if [ -f "${CPU}scaling_min_freq" ] && [ -f "${CPU}scaling_max_freq" ]; then
@@ -185,8 +288,9 @@
         done
       changed_when: true
       ignore_errors: yes
+      when: is_amd
 
-    - name: Create AMD max frequency service
+    - name: Create AMD max frequency service - AMD only
       ansible.builtin.copy:
         dest: /etc/systemd/system/amd-max-freq.service
         content: |
@@ -203,18 +307,31 @@
           WantedBy=multi-user.target
         mode: '0644'
       ignore_errors: yes
+      when: is_amd
     
-    - name: Enable AMD max frequency service
+    - name: Enable AMD max frequency service - AMD only
       ansible.builtin.systemd:
         name: amd-max-freq.service
         enabled: yes
         daemon_reload: yes
       ignore_errors: yes
+      when: is_amd
 
+    - name: Verify AMD frequency configuration
+      ansible.builtin.debug:
+        msg:
+          - "✓ AMD CPU max frequency configured"
+          - "  - Service: /etc/systemd/system/amd-max-freq.service"
+          - "  - Will set AMD CPUs to max frequency on boot"
+      when: is_amd
+
+    # ==========================================
+    # WORKQUEUE CPU AFFINITY - COMMON
+    # ==========================================
     # First apply the setting immediately for the current session
     - name: Move kernel workqueues to housekeeping CPUs (immediate)
       ansible.builtin.shell: |
-        find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo 3 > {}' ';'
+        find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo {{ housekeeping_bitmask }} > {}' ';'
       changed_when: true
       ignore_errors: yes
 
@@ -232,7 +349,7 @@
           
           [Service]
           Type=oneshot
-          ExecStart=/bin/bash -c "find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo 3 > {}' ';'"
+          ExecStart=/bin/bash -c "find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo {{ housekeeping_bitmask }} > {}' ';'"
           RemainAfterExit=yes
           
           [Install]
@@ -245,6 +362,15 @@
         name: workqueue-affinity.service
         enabled: yes
         daemon_reload: yes
+
+    - name: Verify workqueue CPU affinity configuration
+      ansible.builtin.debug:
+        msg:
+          - "✓ Workqueue CPU affinity configured"
+          - "  - Housekeeping cores: {{ housekeeping_cores }}"
+          - "  - Bitmask value: {{ housekeeping_bitmask }}"
+          - "  - Service: /etc/systemd/system/workqueue-affinity.service"
+          - "  - Applied immediately and will persist on reboot"
 
     - name: Create systemd service to set writeback NUMA on boot
       ansible.builtin.copy:
@@ -272,31 +398,105 @@
         daemon_reload: yes
         state: started
 
-    - name: Disable CPU throttling
+    - name: Verify writeback NUMA configuration
+      ansible.builtin.debug:
+        msg:
+          - "✓ Writeback NUMA configured"
+          - "  - Service: /etc/systemd/system/fix-writeback-numa.service"
+          - "  - Will set writeback threads to NUMA node 0"
+
+    # ==========================================
+    # CPU POWER MANAGEMENT - X86 SPECIFIC
+    # ==========================================
+    - name: Disable CPU throttling - x86 only
       ansible.builtin.copy:
         dest: /etc/modprobe.d/intel-pstate.conf
         content: |
           options processor ignore_ppc=1
         mode: '0644'
+      when: is_x86
 
-    - name: Disable AMD CPU energy feature
+    - name: Disable AMD CPU energy feature - x86 only
       ansible.builtin.copy:
         dest: /etc/modprobe.d/amd-energy.conf
         content: |
           blacklist amd_energy
         mode: '0644'
       ignore_errors: yes
+      when: is_x86
 
-    - name: Configure CPU isolation and kernel boot options in GRUB
+    # ==========================================
+    # GRUB CONFIGURATION - ARCHITECTURE SPECIFIC
+    # ==========================================
+    - name: Read current GRUB configuration
+      ansible.builtin.shell: grep '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub || echo "GRUB_CMDLINE_LINUX_DEFAULT not found"
+      register: current_grub
+      changed_when: false
+
+    - name: Display current GRUB configuration
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "CURRENT GRUB CONFIGURATION:"
+          - "{{ current_grub.stdout }}"
+          - "============================================"
+
+    - name: Configure CPU isolation and kernel boot options in GRUB (Intel)
       ansible.builtin.lineinfile:
         path: /etc/default/grub
         regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
         line: 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8 nvme_core.io_timeout=4294967295 rd.emergency=poweroff rd.shell=0 selinux=1 security=selinux quiet transparent_hugepage=never audit=0 nmi_watchdog=0 nohz=on clocksource=tsc nosoftlockup mce=ignore_ce cpuidle.off=1 skew_tick=1 acpi_irq_nobalance intel_pstate=disable intel_idle.max_cstate=0 processor.max_cstate=0 idle=poll isolcpus={{ isolated_cores }} nohz_full={{ isolated_cores }} rcu_nocbs={{ isolated_cores }} tsc=reliable"'
-      register: grub_updated
+      register: grub_updated_intel
+      when: is_intel
+
+    - name: Configure CPU isolation and kernel boot options in GRUB (AMD)
+      ansible.builtin.lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+        line: 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8 nvme_core.io_timeout=4294967295 rd.emergency=poweroff rd.shell=0 selinux=1 security=selinux quiet transparent_hugepage=never audit=0 nmi_watchdog=0 nohz=on clocksource=tsc nosoftlockup mce=ignore_ce cpuidle.off=1 skew_tick=1 acpi_irq_nobalance processor.max_cstate=0 idle=poll isolcpus={{ isolated_cores }} nohz_full={{ isolated_cores }} rcu_nocbs={{ isolated_cores }} tsc=reliable"'
+      register: grub_updated_amd
+      when: is_amd
+
+    - name: Configure CPU isolation and kernel boot options in GRUB (Graviton/ARM)
+      ansible.builtin.lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+        line: 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8 nvme_core.io_timeout=4294967295 rd.emergency=poweroff rd.shell=0 selinux=1 security=selinux quiet transparent_hugepage=never audit=0 nmi_watchdog=0 nohz=on nosoftlockup cpuidle.off=1 skew_tick=1 acpi_irq_nobalance idle=poll isolcpus={{ isolated_cores }} nohz_full={{ isolated_cores }} rcu_nocbs={{ isolated_cores }}"'
+      register: grub_updated_graviton
+      when: is_graviton
+
+    - name: Read updated GRUB configuration
+      ansible.builtin.shell: grep '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub
+      register: updated_grub
+      changed_when: false
+      when: (grub_updated_intel is defined and grub_updated_intel.changed) or (grub_updated_amd is defined and grub_updated_amd.changed) or (grub_updated_graviton is defined and grub_updated_graviton.changed)
+
+    - name: Display updated GRUB configuration
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "UPDATED GRUB CONFIGURATION:"
+          - "{{ updated_grub.stdout }}"
+          - "============================================"
+          - "CHANGES:"
+          - "  - CPU Vendor: {{ cpu_vendor }}"
+          - "  - isolated_cores variable: {{ isolated_cores }}"
+          - "  - This will be applied after GRUB update and reboot"
+      when: (grub_updated_intel is defined and grub_updated_intel.changed) or (grub_updated_amd is defined and grub_updated_amd.changed) or (grub_updated_graviton is defined and grub_updated_graviton.changed)
 
     - name: Update GRUB configuration
       ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
-      when: grub_updated.changed
+      when: (grub_updated_intel is defined and grub_updated_intel.changed) or (grub_updated_amd is defined and grub_updated_amd.changed) or (grub_updated_graviton is defined and grub_updated_graviton.changed)
+
+    - name: Verify GRUB update status
+      ansible.builtin.debug:
+        msg:
+          - "✓ GRUB configuration updated"
+          - "  - CPU Vendor: {{ cpu_vendor }}"
+          - "  - File: /boot/grub2/grub.cfg"
+          - "  - Intel-specific params removed for AMD/Graviton"
+          - "  - CRITICAL: System reboot required for kernel parameters to take effect"
+      when: (grub_updated_intel is defined and grub_updated_intel.changed) or (grub_updated_amd is defined and grub_updated_amd.changed) or (grub_updated_graviton is defined and grub_updated_graviton.changed)
 
     - name: Configure CPU partitioning variables
       ansible.builtin.copy:
@@ -422,6 +622,16 @@
           vm.dirty_writeback_centisecs = 10
         mode: '0644'
 
+    - name: Verify memory tuning configuration
+      ansible.builtin.debug:
+        msg:
+          - "✓ Memory tuning configured"
+          - "  - Hugepages: {{ huge_pages }}"
+          - "  - Shared memory max: {{ shmmax }}"
+          - "  - Shared memory all: {{ shmall }}"
+          - "  - Config file: /etc/sysctl.d/99-trading-memory.conf"
+          - "  - THP service: /etc/systemd/system/disable-thp.service"
+
     # ==========================================
     # NETWORK TUNING
     # ==========================================
@@ -489,7 +699,7 @@
         # Move all interrupts to housekeeping cores
         for IRQ_DIR in /proc/irq/[0-9]*; do
           if [ -d "$IRQ_DIR" ] && [ -f "$IRQ_DIR/smp_affinity_list" ]; then
-            echo "0-1" > "$IRQ_DIR/smp_affinity_list" 2>/dev/null || true
+            echo "{{ housekeeping_cores }}" > "$IRQ_DIR/smp_affinity_list" 2>/dev/null || true
           fi
         done
       changed_when: true
@@ -505,7 +715,7 @@
 
           [Service]
           Type=oneshot
-          ExecStart=/bin/bash -c "for IRQ_DIR in /proc/irq/[0-9]*; do if [ -d \"$IRQ_DIR\" ] && [ -f \"$IRQ_DIR/smp_affinity_list\" ]; then echo \"0-1\" > \"$IRQ_DIR/smp_affinity_list\" 2>/dev/null || true; fi; done"
+          ExecStart=/bin/bash -c "for IRQ_DIR in /proc/irq/[0-9]*; do if [ -d \"$IRQ_DIR\" ] && [ -f \"$IRQ_DIR/smp_affinity_list\" ]; then echo \"{{ housekeeping_cores }}\" > \"$IRQ_DIR/smp_affinity_list\" 2>/dev/null || true; fi; done"
           RemainAfterExit=yes
 
           [Install]
@@ -517,6 +727,15 @@
         name: set-interrupt-affinity.service
         enabled: yes
         daemon_reload: yes
+
+    - name: Verify network and interrupt configuration
+      ansible.builtin.debug:
+        msg:
+          - "✓ Network stack and interrupt affinity configured"
+          - "  - Network config: /etc/sysctl.d/99-trading-network.conf"
+          - "  - Interrupt affinity: {{ housekeeping_cores }}"
+          - "  - Interrupt service: /etc/systemd/system/set-interrupt-affinity.service"
+          - "  - Busy poll: {{ busy_poll_value }}, Busy read: {{ busy_read_value }}"
 
     - name: Get network interfaces
       ansible.builtin.shell: ip -o link show | grep -v "lo" | awk '{print $2}' | cut -d':' -f1
@@ -629,6 +848,15 @@
         name: configure-tps.service
         enabled: yes
         daemon_reload: yes
+
+    - name: Verify RSS and TPS configuration
+      ansible.builtin.debug:
+        msg:
+          - "✓ RSS and TPS configured"
+          - "  - RSS service: /etc/systemd/system/configure-rss.service"
+          - "  - TPS service: /etc/systemd/system/configure-tps.service"
+          - "  - udev rules: /etc/udev/rules.d/99-trading-network.rules"
+          - "  - Network interfaces configured: {{ network_interfaces.stdout_lines | join(', ') }}"
 
     # ==========================================
     # TIME SYNCHRONIZATION
@@ -788,6 +1016,15 @@
         enabled: yes
         daemon_reload: yes
 
+    - name: Verify I/O scheduler configuration
+      ansible.builtin.debug:
+        msg:
+          - "✓ I/O scheduler configured"
+          - "  - Scheduler: mq-deadline"
+          - "  - Service: /etc/systemd/system/configure-io-scheduler.service"
+          - "  - udev rules: /etc/udev/rules.d/99-trading-disk.rules"
+          - "  - Applied immediately and will persist on reboot"
+
     - name: Configure persistent I/O settings
       ansible.builtin.copy:
         dest: /etc/udev/rules.d/99-trading-disk.rules
@@ -900,6 +1137,15 @@
         enabled: yes
         daemon_reload: yes
 
+    - name: Verify service optimization configuration
+      ansible.builtin.debug:
+        msg:
+          - "✓ Services optimized"
+          - "  - irqbalance: disabled"
+          - "  - amazon-ssm-agent: disabled"
+          - "  - iptables: disabled"
+          - "  - Services will remain disabled on reboot"
+
     - name: Configure ultra-low-latency tuned profile
       ansible.builtin.copy:
         dest: /etc/tuned/ultra-low-latency/tuned.conf
@@ -951,15 +1197,15 @@
       changed_when: true
 
     # Create a persistent script that runs on early boot
-    - name: Create a unified boot script for optimizations
+    - name: Create a unified boot script for optimizations (x86 with SMT)
       ansible.builtin.copy:
         dest: /etc/rc.d/rc.local
         content: |
           #!/bin/bash
-          # Ultra-low latency trading system boot optimizations
+          # Ultra-low latency trading system boot optimizations (x86 with SMT)
           
           # Apply workqueue CPU affinity (highest priority)
-          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo 3 > {}' ';' || true
+          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo {{ housekeeping_bitmask }} > {}' ';' || true
           
           # Set writeback NUMA 
           if [ -f /sys/bus/workqueue/devices/writeback/numa ]; then
@@ -976,7 +1222,7 @@
             fi
           done
           
-          # Disable hyperthreading
+          # Disable hyperthreading/SMT
           for cpunum in $(cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | cut -s -d, -f2- | tr ',' '\n' | sort -un); do
             echo 0 > /sys/devices/system/cpu/cpu$cpunum/online
           done
@@ -989,6 +1235,80 @@
           
           exit 0
         mode: '0755'
+      when: is_x86 and has_smt
+
+    - name: Create a unified boot script for optimizations (x86 without SMT)
+      ansible.builtin.copy:
+        dest: /etc/rc.d/rc.local
+        content: |
+          #!/bin/bash
+          # Ultra-low latency trading system boot optimizations (x86 without SMT - e.g., C7a)
+          
+          # Apply workqueue CPU affinity (highest priority)
+          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo {{ housekeeping_bitmask }} > {}' ';' || true
+          
+          # Set writeback NUMA 
+          if [ -f /sys/bus/workqueue/devices/writeback/numa ]; then
+            echo 0 > /sys/bus/workqueue/devices/writeback/numa || true
+          fi
+          
+          # Apply sysctl settings early
+          /sbin/sysctl --system
+          
+          # Set CPU governor to performance
+          for CPU in /sys/devices/system/cpu/cpu*/cpufreq/; do
+            if [ -f "${CPU}scaling_governor" ]; then
+              echo performance > ${CPU}scaling_governor
+            fi
+          done
+          
+          # No SMT to disable on this instance type
+          
+          # Disable THP explicitly
+          if [ -d /sys/kernel/mm/transparent_hugepage ]; then
+            echo never > /sys/kernel/mm/transparent_hugepage/enabled
+            echo never > /sys/kernel/mm/transparent_hugepage/defrag
+          fi
+          
+          exit 0
+        mode: '0755'
+      when: is_x86 and not has_smt
+
+    - name: Create a unified boot script for optimizations (Graviton)
+      ansible.builtin.copy:
+        dest: /etc/rc.d/rc.local
+        content: |
+          #!/bin/bash
+          # Ultra-low latency trading system boot optimizations (Graviton/ARM)
+          
+          # Apply workqueue CPU affinity (highest priority)
+          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo {{ housekeeping_bitmask }} > {}' ';' || true
+          
+          # Set writeback NUMA 
+          if [ -f /sys/bus/workqueue/devices/writeback/numa ]; then
+            echo 0 > /sys/bus/workqueue/devices/writeback/numa || true
+          fi
+          
+          # Apply sysctl settings early
+          /sbin/sysctl --system
+          
+          # Set CPU governor to performance
+          for CPU in /sys/devices/system/cpu/cpu*/cpufreq/; do
+            if [ -f "${CPU}scaling_governor" ]; then
+              echo performance > ${CPU}scaling_governor
+            fi
+          done
+          
+          # Disable THP explicitly
+          if [ -d /sys/kernel/mm/transparent_hugepage ]; then
+            echo never > /sys/kernel/mm/transparent_hugepage/enabled
+            echo never > /sys/kernel/mm/transparent_hugepage/defrag
+          fi
+          
+          exit 0
+        mode: '0755'
+      when: is_graviton
+
     - name: Create rc-local service file to ensure rc.local runs early
       ansible.builtin.copy:
         dest: /etc/systemd/system/rc-local.service
@@ -1007,11 +1327,21 @@
           [Install]
           WantedBy=multi-user.target
         mode: '0644'
+
     - name: Enable rc-local service
       ansible.builtin.systemd:
         name: rc-local
         enabled: yes
         daemon_reload: yes
+
+    - name: Verify boot script configuration
+      ansible.builtin.debug:
+        msg:
+          - "✓ Boot optimization script configured"
+          - "  - Script: /etc/rc.d/rc.local"
+          - "  - Service: /etc/systemd/system/rc-local.service"
+          - "  - Workqueue bitmask: {{ housekeeping_bitmask }}"
+          - "  - Will apply optimizations on every boot"
 
     # ==========================================
     # GENERATE REPORT
@@ -1031,17 +1361,26 @@
           ====================================================
           Date: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
           Hostname: {{ ansible_hostname }}
+          Architecture: {{ cpu_arch }}
           Instance Type: {{ instance_type.stdout }}
           CPU: {{ ansible_processor[2] | default(ansible_processor[0]) }}
           Kernel: {{ ansible_kernel }}
           
           APPLIED OPTIMIZATIONS:
           1. CPU: 
-            - Disabled hyperthreading
+            - Architecture: {{ 'x86_64' if is_x86 else 'ARM64 (Graviton)' }}
+            - Threads per core: {{ threads_per_core }}
+            {% if is_x86 and has_smt %}
+            - Disabled hyperthreading/SMT (2 threads per core → 1)
+            {% elif is_x86 and not has_smt %}
+            - No SMT to disable (already 1 thread per core, e.g., C7a instances)
+            {% endif %}
             - Disabled C-states & P-states, set performance governor
             - Isolated cores ({{ isolated_cores }}) for trading applications
             - Moved all kernel workqueues to cores {{ housekeeping_cores }}
+            {% if is_x86 %}
             - Set TSC as clock source
+            {% endif %}
           
           2. Memory: 
             - Disabled THP, configured explicit hugepages ({{ huge_pages }})
@@ -1078,12 +1417,18 @@
               * rc.local boot script
           
           VALIDATION COMMANDS:
-          - Check hyperthreading: lscpu | grep Thread
+          {% if is_x86 %}
+          - Check threads per core: lscpu | grep "Thread(s) per core"
+          {% if has_smt %}
+          - Verify SMT disabled: should show "Thread(s) per core: 1" after reboot
+          {% endif %}
+          {% endif %}
           - Check hugepages: grep Huge /proc/meminfo
           - Check network offload: ethtool -k eth0
           - Check isolated CPUs: cat /sys/devices/system/cpu/isolated
           - Check scheduler: cat /sys/block/nvme0n1/queue/scheduler
           - Check latency: ping -c 100 -i 0.01 127.0.0.1 | grep min/avg/max
+          - Check architecture: uname -m
           ====================================================
         mode: '0644'
 
@@ -1091,6 +1436,7 @@
       ansible.builtin.debug:
         msg: |
           Ultra-low latency system tuning completed!
+          Architecture: {{ 'x86_64' if is_x86 else 'ARM64 (Graviton)' }}
           All configuration changes have been made persistent across reboots.
           
           Key improvements made:
@@ -1098,6 +1444,11 @@
           - Created udev rules for persistent hardware configurations
           - Added boot script for early optimizations
           - Enhanced NetworkManager integration for persistent network settings
+          {% if is_x86 %}
+          - Applied x86-specific optimizations (hyperthreading, Intel/AMD frequency scaling)
+          {% else %}
+          - Applied Graviton-specific optimizations (ARM-compatible settings)
+          {% endif %}
           
           A system reboot is REQUIRED to apply all changes.
           Review the report at /root/trading_system_tuning_report.txt
@@ -1107,6 +1458,7 @@
           - cat /sys/devices/system/cpu/isolated (check CPU isolation)
           - cat /sys/kernel/mm/transparent_hugepage/enabled (should be "never")
           - grep Huge /proc/meminfo (check hugepages)
+          - uname -m (confirm architecture)
           
           Run latency tests:
           - Run your trading app on isolated cores using taskset/numactl
@@ -1130,6 +1482,7 @@
           #!/bin/bash
           echo "=== SYSTEM TUNING VERIFICATION ==="
           echo "Date: $(date)"
+          echo "Architecture: $(uname -m)"
           
           echo -e "\n=== WORKQUEUE CPUMASK ==="
           find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo "$(basename $(dirname {})): $(cat {})"' \; || echo "Not available"
