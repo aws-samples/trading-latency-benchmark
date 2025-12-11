@@ -34,9 +34,8 @@ export class LatencyHuntingStack extends BaseLatencyHuntingStack {
     // Define diverse, low-cost instance types to maximize network spine coverage
     // Includes current and previous generation instances across Intel, AMD, and ARM architectures
     // Excludes: GPU/accelerated, very large memory (U/X/z1d), HPC, Mac, and metal instances
-    const instanceTypes = [
+    const instanceTypes: string[] = [
       // ===== CURRENT GENERATION - INTEL x86 =====
-      // 'c7i.4xlarge', 'c6in.4xlarge', 'c7a.4xlarge', 'c6g.4xlarge'
       // C family - Compute optimized Intel
       'c8i.xlarge',      // 8th gen Intel (latest)
       'c7i.xlarge',      // 7th gen Intel
