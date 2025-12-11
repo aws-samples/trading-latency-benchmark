@@ -6,109 +6,165 @@
   hosts: aws_ec2
   gather_facts: yes
   vars:
-    target_host: "10.50.0.241"
-    warmup_count: 1
-    test_size: 100
+    target_host: "10.100.0.140"
+    warmup_count: 10
+    test_size: 10000  # Number of test iterations before exiting gracefully
+    test_mode: "latency-test"  # Options: latency-test, ping-latency, payload-ping
+    payload_sizes: "0,600"  # Payload sizes for payload-ping mode (comma-separated bytes)
+    benchmark_dir: "/home/ec2-user"  # Working directory for benchmark (can be overridden)
+    jar_path: "/home/ec2-user/ExchangeFlow-1.0-SNAPSHOT.jar"  # Full path to JAR file (can be overridden)
   tasks:
-  - name: Wait for benchmark setup to complete
-    wait_for:
-      path: /home/ec2-user/benchmark/setup_complete
-      timeout: 600
+  - name: Check if setup_complete file exists
+    stat:
+      path: "{{ benchmark_dir }}/setup_complete"
+    register: setup_complete_check
     become: no
+    
+  - name: Wait for benchmark setup to complete (if setup file exists)
+    wait_for:
+      path: "{{ benchmark_dir }}/setup_complete"
+      timeout: 60
+    become: no
+    when: setup_complete_check.stat.exists
     
   - name: Update config.properties with target host
     lineinfile:
-      path: /home/ec2-user/benchmark/config.properties
+      path: "{{ benchmark_dir }}/config.properties"
       regexp: '^HOST='
       line: 'HOST={{ target_host }}'
     become: no
     
   - name: Update WARMUP_COUNT in config.properties
     lineinfile:
-      path: /home/ec2-user/benchmark/config.properties
+      path: "{{ benchmark_dir }}/config.properties"
       regexp: '^WARMUP_COUNT='
       line: 'WARMUP_COUNT={{ warmup_count }}'
     become: no
     
   - name: Update TEST_SIZE in config.properties
     lineinfile:
-      path: /home/ec2-user/benchmark/config.properties
+      path: "{{ benchmark_dir }}/config.properties"
       regexp: '^TEST_SIZE='
       line: 'TEST_SIZE={{ test_size }}'
     become: no
     
   - name: Update HISTOGRAM_SIGNIFICANT_FIGURES in config.properties
     lineinfile:
-      path: /home/ec2-user/benchmark/config.properties
+      path: "{{ benchmark_dir }}/config.properties"
       regexp: '^HISTOGRAM_SIGNIFICANT_FIGURES='
       line: 'HISTOGRAM_SIGNIFICANT_FIGURES={{ histogram_significant_figures | default(5) }}'
     become: no
     
+  - name: Update PAYLOAD_SIZES in config.properties for payload-ping mode
+    lineinfile:
+      path: "{{ benchmark_dir }}/config.properties"
+      regexp: '^PAYLOAD_SIZES='
+      line: 'PAYLOAD_SIZES={{ payload_sizes }}'
+    become: no
+    when: test_mode == 'payload-ping'
+    
   - name: Display configuration
     shell: |
       echo "=== Benchmark Configuration ==="
+      echo "Test Mode: {{ test_mode }}"
       echo "Target Host: {{ target_host }}"
       echo "Warmup Count: {{ warmup_count }}"
       echo "Test Size: {{ test_size }}"
+      {% if test_mode == 'payload-ping' %}
+      echo "Payload Sizes: {{ payload_sizes }} bytes"
+      {% endif %}
       echo "Instance: {{ ansible_hostname }}"
+      echo "Note: Benchmark will exit automatically after reaching TEST_SIZE"
       echo ""
     become: no
     
-  - name: Clean up existing histogram files
+  - name: Clean up existing histogram and CSV files
     shell: |
-      cd /home/ec2-user/benchmark
-      if [ -f histogram.hlog ]; then
-        echo "Removing existing histogram.hlog"
-        rm -f histogram.hlog
+      cd {{ benchmark_dir }}
+      # Find and remove all histogram.hlog files recursively
+      echo "Searching for histogram files to clean up..."
+      histogram_count=$(find . -name "histogram.hlog" -type f 2>/dev/null | wc -l)
+      if [ "$histogram_count" -gt 0 ]; then
+        echo "Found $histogram_count histogram file(s) to remove:"
+        find . -name "histogram.hlog" -type f 2>/dev/null
+        find . -name "histogram.hlog" -type f -delete 2>/dev/null
+        echo "Removed all histogram files"
+      else
+        echo "No histogram files found"
       fi
+      
+      # Clean up any old CSV reports
+      csv_count=$(find . -maxdepth 1 -name "report_*.csv" -type f 2>/dev/null | wc -l)
+      if [ "$csv_count" -gt 0 ]; then
+        echo "Removing $csv_count CSV report file(s)"
+        rm -f report_*.csv
+      else
+        echo "No CSV reports found"
+      fi
+      
       echo "Clean test environment ready"
     become: no
     
-  - name: Run trading latency benchmark for 3 minutes
+  - name: Run {{ test_mode }} benchmark until TEST_SIZE is reached
     shell: |
-      cd /home/ec2-user/benchmark
-      # Run the benchmark in the background and capture its PID
-      java -jar ExchangeFlow-v1.0.0.jar latency-test > benchmark_output.txt 2>&1 &
-      BENCHMARK_PID=$!
-      echo "Started benchmark with PID: $BENCHMARK_PID"
+      cd {{ benchmark_dir }}
+      echo "Starting {{ test_mode }} benchmark..."
+      echo "TEST_SIZE: {{ test_size }}"
+      echo "The benchmark will exit automatically after reaching TEST_SIZE"
       
-      # Wait for 3 minutes (180 seconds)
-      sleep 180
+      # Run the benchmark and wait for it to complete naturally
+      java -jar {{ jar_path }} {{ test_mode }} > benchmark_output.txt 2>&1
+      EXIT_CODE=$?
       
-      # Stop the benchmark
-      kill $BENCHMARK_PID 2>/dev/null || true
-      sleep 2
-      
-      # Force kill if still running
-      kill -9 $BENCHMARK_PID 2>/dev/null || true
-      
-      echo "Benchmark completed at $(date)"
-    become: no
-    async: 250
-    poll: 0
-    register: benchmark_run
+      echo "Benchmark completed at $(date) with exit code: $EXIT_CODE"
+      exit $EXIT_CODE
+    become: "{{ test_mode in ['ping-latency', 'payload-ping'] }}"
+    register: benchmark_result
     
-  - name: Wait for benchmark to complete
-    async_status:
-      jid: "{{ benchmark_run.ansible_job_id }}"
-    register: job_result
-    until: job_result.finished
-    retries: 30
-    delay: 10
-    become: no
-    
-  - name: Generate latency report from histogram
+  - name: Fix file permissions for files created by root
     shell: |
-      cd /home/ec2-user/benchmark
-      if [ -f histogram.hlog ]; then
-        echo "=== Generating Latency Report ==="
-        java -jar ExchangeFlow-v1.0.0.jar latency-report ./histogram.hlog
-      else
-        echo "Error: histogram.hlog file not found"
+      cd {{ benchmark_dir }}
+      # Change ownership of histogram files and output to ec2-user
+      chown -R ec2-user:ec2-user . 2>/dev/null || true
+      # Ensure files are readable
+      chmod -R u+rw,g+r,o+r . 2>/dev/null || true
+      echo "File permissions fixed"
+    become: yes
+    when: test_mode in ['ping-latency', 'payload-ping']
+    
+  - name: Generate latency reports from all histogram files
+    shell: |
+      cd {{ benchmark_dir }}
+      
+      echo "=== Searching for histogram files ==="
+      
+      # Find all histogram files (handles both simple and nested structures)
+      histogram_files=$(find . -maxdepth 3 -name "histogram.hlog" -type f 2>/dev/null)
+      
+      if [ -z "$histogram_files" ]; then
+        echo "Error: No histogram.hlog files found"
         echo "Available files in directory:"
         ls -la
+        echo ""
+        echo "Available subdirectories:"
+        ls -la */ 2>/dev/null || true
         exit 1
       fi
+      
+      echo "Found histogram files:"
+      echo "$histogram_files"
+      echo ""
+      
+      # Generate reports for each histogram file
+      while IFS= read -r hlog_file; do
+        if [ -n "$hlog_file" ]; then
+          echo "=== Generating Latency Report from $hlog_file ==="
+          java -jar {{ jar_path }} latency-report "$hlog_file" 2>&1 | head -20
+          echo ""
+        fi
+      done <<< "$histogram_files"
+      
+      echo "All reports generated"
     become: no
     register: results
     

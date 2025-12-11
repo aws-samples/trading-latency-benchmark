@@ -60,6 +60,7 @@ public class RoundTripLatencyTester {
     public static final LongAdder MESSAGE_COUNTER = new LongAdder();
     private static long testStartTime;
     private static volatile long histogramStartTime;
+    private static volatile boolean testCompleted = false;
     private final URI websocketURI;
     private final URI httpURI;
 
@@ -149,6 +150,10 @@ public class RoundTripLatencyTester {
 
             hdr.reset();
             HISTOGRAM.reset();
+            
+            // Mark test as completed and exit gracefully
+            LOGGER.info("Test completed. Reached TEST_SIZE: {}. Exiting gracefully.", TEST_SIZE);
+            testCompleted = true;
         }
     }
 
@@ -163,7 +168,12 @@ public class RoundTripLatencyTester {
     }
 
     public static PrintStream getLogFile() throws IOException {
-        return getLogFile("./histogram.hlog");
+        String folderPath = "./" + HOST.replace(".", "_");
+        File folder = new File(folderPath);
+        if (!folder.exists()) {
+            folder.mkdirs(); // Create the folder if it doesn't exist
+        }
+        return getLogFile(folderPath + "/histogram.hlog");
     }
     public static PrintStream getLogFile(String path) throws IOException {
         return new PrintStream(new FileOutputStream(path, true), false);
@@ -220,13 +230,15 @@ public class RoundTripLatencyTester {
                 e.printStackTrace();
             }
         }));
-        while (true) {
-            BufferedReader console = new BufferedReader(new InputStreamReader(System.in));
-            String msg = console.readLine();
-            if ("exit".equals(msg) || "e".equals(msg)) {
-                latencyTester.stop();
-                System.exit(0);
-            }
+        
+        // Wait for test to complete
+        while (!testCompleted) {
+            Thread.sleep(100); // Check every 100ms
         }
+        
+        // Test completed, clean up and exit
+        LOGGER.info("Main thread detected test completion, shutting down...");
+        latencyTester.stop();
+        System.exit(0);
     }
 }

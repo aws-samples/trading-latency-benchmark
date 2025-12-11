@@ -120,6 +120,17 @@ public class Config {
      */
     public static final int HISTOGRAM_SIGNIFICANT_FIGURES;
 
+    /**
+     * Comma-separated list of payload sizes (in bytes) to test for packet size impact analysis.
+     * Example: "0,64,256,512,1024,1400,2048"
+     * - 0 bytes: Baseline (TCP connect/close only)
+     * - 64 bytes: Standard ping size
+     * - 256-1024 bytes: Typical trading message sizes
+     * - 1400 bytes: Near MTU limit
+     * - 2048+ bytes: Tests fragmentation behavior
+     */
+    public static final List<Integer> PAYLOAD_SIZES;
+
     // Static initializer to load configuration when the class is loaded
     static {
         loadConfiguration();
@@ -140,6 +151,7 @@ public class Config {
         CIPHERS = getProperty("CIPHERS", "AES256-GCM-SHA384");
         PING_INTERVAL = getLongProperty("PING_INTERVAL", "1000"); // 1 second in milliseconds
         HISTOGRAM_SIGNIFICANT_FIGURES = getIntegerProperty("HISTOGRAM_SIGNIFICANT_FIGURES", "5");
+        PAYLOAD_SIZES = getIntegerListProperty("PAYLOAD_SIZES", "0,64,256,512,1024,1400,2048");
 
         validateConfiguration();
     }
@@ -307,5 +319,27 @@ public class Config {
      */
     private static boolean getBooleanProperty(String key, String defaultValue) {
         return Boolean.parseBoolean(getProperty(key, defaultValue));
+    }
+
+    /**
+     * Gets a property value as a list of integers, with a default value if not found.
+     *
+     * @param key The property key
+     * @param defaultValue The default value to use if the property is not found (comma-separated integers)
+     * @return The property value as a list of integers
+     */
+    private static List<Integer> getIntegerListProperty(String key, String defaultValue) {
+        return Arrays.stream(getProperty(key, defaultValue).split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .map(s -> {
+                    try {
+                        return Integer.parseInt(s);
+                    } catch (NumberFormatException e) {
+                        LOGGER.error("Invalid integer value in list for {}: {}", key, s, e);
+                        throw new IllegalArgumentException("Invalid integer value in list for " + key + ": " + s, e);
+                    }
+                })
+                .collect(Collectors.toList());
     }
 }

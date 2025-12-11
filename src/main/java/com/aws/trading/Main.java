@@ -88,6 +88,11 @@ public class Main {
                 EndpointPingClient.main(args);
                 break;
                 
+            case "payload-ping":
+                LOGGER.info("Starting payload size ping test");
+                PayloadSizePingClient.main(args);
+                break;
+                
             case "latency-report":
                 LOGGER.info("Generating latency report");
                 if (args.length < 2) {
@@ -121,12 +126,15 @@ public class Main {
         System.out.println("\nCommands:");
         System.out.println("  latency-test    Run round-trip latency test between client and server");
         System.out.println("  ping-latency    Run ping latency test to measure network round-trip time");
+        System.out.println("  payload-ping    Run ping test with varying payload sizes to measure impact on latency");
         System.out.println("  latency-report  Generate and print latency report from log file");
         System.out.println("  help            Print this help message");
         System.out.println("\nArguments for latency-report:");
         System.out.println("  <path>          Path to the latency report file (.hlog)");
         System.out.println("\nExamples:");
         System.out.println("  java -jar ExchangeFlow-1.0-SNAPSHOT.jar latency-test");
+        System.out.println("  java -jar ExchangeFlow-1.0-SNAPSHOT.jar ping-latency");
+        System.out.println("  java -jar ExchangeFlow-1.0-SNAPSHOT.jar payload-ping");
         System.out.println("  java -jar ExchangeFlow-1.0-SNAPSHOT.jar latency-report ./histogram_logs/latency.hlog");
     }
 }

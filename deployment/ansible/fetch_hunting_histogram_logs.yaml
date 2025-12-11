@@ -2,108 +2,234 @@
 #  SPDX-License-Identifier: MIT-0
 
 ---
-- name: Generate and fetch latency reports from EC2 hunting instances
-  hosts: aws_ec2
-  gather_facts: yes
-  tasks:
-    - name: Get EC2 instance type from metadata (IMDSv2 compatible)
-      shell: |
-        # Get token for IMDSv2
-        TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null)
-        # Get instance type using the token
-        curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null
-      register: instance_type_result
-      become: no
-      changed_when: false
-      
-    - name: Set instance type fact
-      set_fact:
-        instance_type: "{{ instance_type_result.stdout }}"
-        
-    - name: Display instance information
-      debug:
-        msg: "Processing {{ ansible_hostname }} - Instance Type: {{ instance_type }}"
-    
-    - name: Check if histogram file exists
-      stat:
-        path: /home/ec2-user/benchmark/histogram.hlog
-      register: histogram_file
-      become: no
-      
-    - name: Generate CSV report from histogram remotely
-      shell: |
-        cd /home/ec2-user/benchmark
-        if [ -f histogram.hlog ]; then
-          # Generate CSV report with instance type in filename
-          java -jar ExchangeFlow-v1.0.0.jar latency-report ./histogram.hlog report_{{ instance_type }}_{{ ansible_hostname }}.csv
-          echo "CSV report generated: report_{{ instance_type }}_{{ ansible_hostname }}.csv"
-        else
-          echo "Error: histogram.hlog not found"
-          exit 1
-        fi
-      become: no
-      register: report_generation
-      when: histogram_file.stat.exists
-      
-    - name: Display report generation result
-      debug:
-        msg: "{{ report_generation.stdout_lines }}"
-      when: histogram_file.stat.exists
-      
-    - name: Fetch CSV report to local
-      fetch:
-        src: /home/ec2-user/benchmark/report_{{ instance_type }}_{{ ansible_hostname }}.csv
-        dest: "../../deployment/latency-hunting/results/{{ instance_type }}_{{ ansible_hostname }}_report.csv"
-        flat: yes
-        validate_checksum: false
-      become: no
-      when: histogram_file.stat.exists
-      
-    - name: Fetch benchmark output for reference
-      fetch:
-        src: /home/ec2-user/benchmark/benchmark_output.txt
-        dest: "../../deployment/latency-hunting/results/{{ ansible_hostname }}_benchmark_output.txt"
-        flat: yes
-        validate_checksum: false
-      become: no
-      ignore_errors: yes
-
-- name: Aggregate CSV reports locally
+- name: Clean up old local results before fetching new ones
   hosts: localhost
   gather_facts: no
   tasks:
-    - name: Create aggregated results directory
+    - name: Clean up old local results
+      shell: |
+        cd {{ playbook_dir }}/../../deployment/latency-hunting/results
+        # Remove old CSV reports and aggregated report
+        rm -f report_*.csv aggregated_latency_report.csv
+        # Keep benchmark output files for reference
+        echo "Old local results cleaned up"
+      delegate_to: localhost
+      run_once: true
+      ignore_errors: yes
+      
+    - name: Ensure results directory exists
       file:
         path: "{{ playbook_dir }}/../../deployment/latency-hunting/results"
         state: directory
       delegate_to: localhost
       run_once: true
+
+- name: Generate and fetch latency reports from EC2 hunting instances
+  hosts: aws_ec2
+  gather_facts: yes
+  vars:
+    benchmark_dir: "/home/ec2-user"  # Working directory for benchmark (can be overridden)
+    jar_path: "/home/ec2-user/ExchangeFlow-1.0-SNAPSHOT.jar"  # Full path to JAR file (can be overridden)
+  tasks:
+    - name: Get EC2 instance metadata (IMDSv2 compatible)
+      shell: |
+        # Get token for IMDSv2
+        TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null)
+        # Get instance type
+        INSTANCE_TYPE=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null)
+        # Get private IP
+        INSTANCE_IP=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4 2>/dev/null)
+        echo "${INSTANCE_TYPE}|${INSTANCE_IP}"
+      register: instance_metadata_result
+      become: no
+      changed_when: false
       
-    - name: Combine CSV reports into single file with instance types
+    - name: Set instance metadata facts
+      set_fact:
+        instance_type: "{{ instance_metadata_result.stdout.split('|')[0] }}"
+        instance_ip: "{{ instance_metadata_result.stdout.split('|')[1] }}"
+        
+    - name: Display instance information
+      debug:
+        msg: "Processing {{ ansible_hostname }} - Instance Type: {{ instance_type }}"
+    
+    - name: Find all histogram files in directories
+      shell: |
+        cd {{ benchmark_dir }}
+        # Find all histogram.hlog files (handles nested structures)
+        find . -maxdepth 3 -name "histogram.hlog" -type f 2>/dev/null || echo ""
+      become: no
+      register: histogram_search
+      changed_when: false
+      
+    - name: Generate CSV reports from all histogram files
+      shell: |
+        cd {{ benchmark_dir }}
+        
+        echo "=== Generating CSV Reports ==="
+        
+        # Check if any histogram files were found
+        if [ -z "{{ histogram_search.stdout | trim }}" ]; then
+          echo "Error: No histogram.hlog files found"
+          exit 1
+        fi
+        
+        # Save histogram files to temp file and clear generated reports list
+        echo "{{ histogram_search.stdout }}" > /tmp/histogram_list.txt
+        > /tmp/generated_reports.txt
+        
+        # Process each histogram file
+        while IFS= read -r hlog_file; do
+          if [ -z "$hlog_file" ]; then
+            continue
+          fi
+          
+          echo "Processing: $hlog_file"
+          
+          # Extract directory path
+          dir_path=$(dirname "$hlog_file" | sed 's|^\./||')
+          
+          if [ "$dir_path" = "." ]; then
+            report_file="report_{{ instance_type }}_{{ ansible_hostname }}.csv"
+          else
+            safe_path=$(echo "$dir_path" | tr '/' '_')
+            report_file="report_{{ instance_type }}_{{ ansible_hostname }}_${safe_path}.csv"
+          fi
+          
+          # Generate CSV report - use absolute path for output file
+          java -jar {{ jar_path }} latency-report "$hlog_file" "{{ benchmark_dir }}/$report_file"
+          
+          # Verify the file was created
+          if [ -f "{{ benchmark_dir }}/$report_file" ]; then
+            # Save generated filename to list
+            echo "$report_file" >> /tmp/generated_reports.txt
+            echo "Generated: $report_file"
+          else
+            echo "ERROR: Failed to generate $report_file"
+          fi
+        done < /tmp/histogram_list.txt
+        
+        echo ""
+        echo "=== Generated Reports List ==="
+        cat /tmp/generated_reports.txt
+      become: no
+      register: report_generation
+      when: histogram_search.stdout | trim | length > 0
+      
+    - name: Display report generation result
+      debug:
+        msg: "{{ report_generation.stdout_lines }}"
+      when: histogram_search.stdout | trim | length > 0
+      
+    - name: Read generated report filenames from temp file
+      shell: cat /tmp/generated_reports.txt
+      become: no
+      register: csv_reports
+      when: histogram_search.stdout | trim | length > 0
+      
+    - name: Debug CSV reports to fetch
+      debug:
+        msg: "CSV reports to fetch: {{ csv_reports.stdout_lines }}"
+      when: histogram_search.stdout | trim | length > 0
+      
+    - name: Fetch all CSV reports to local
+      fetch:
+        src: "{{ benchmark_dir }}/{{ item }}"
+        dest: "../../deployment/latency-hunting/results/{{ item }}"
+        flat: yes
+        validate_checksum: false
+      become: no
+      loop: "{{ csv_reports.stdout_lines }}"
+      when: 
+        - histogram_search.stdout | trim | length > 0
+        - item | trim | length > 0
+      
+    - name: Fetch benchmark output for reference
+      fetch:
+        src: "{{ benchmark_dir }}/benchmark_output.txt"
+        dest: "../../deployment/latency-hunting/results/{{ ansible_hostname }}_benchmark_output.txt"
+        flat: yes
+        validate_checksum: false
+      become: no
+      ignore_errors: yes
+      
+    - name: Clean up CSV reports on remote hosts after fetching
+      shell: |
+        cd {{ benchmark_dir }}
+        # Remove CSV reports that were just fetched
+        rm -f report_*.csv
+        echo "CSV reports cleaned up after fetching"
+      become: no
+      when: histogram_search.stdout | trim | length > 0
+
+- name: Aggregate CSV reports locally
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Combine CSV reports into single file with instance metadata and target IPs
       shell: |
         cd {{ playbook_dir }}/../../deployment/latency-hunting/results
         
         # Check if any CSV report files exist
-        if ! ls *_report.csv 1> /dev/null 2>&1; then
+        if ! ls report_*.csv 1> /dev/null 2>&1; then
           echo "No CSV report files found to aggregate"
           exit 1
         fi
         
-        # Create aggregated CSV with header and instance type column
+        # Create aggregated CSV with header including InstanceType, InstanceIP, TargetIP, Port, PayloadSize columns
         echo "Processing CSV reports..."
         
-        # Get the header from the first CSV file and add InstanceType column
-        first_file=$(ls *_report.csv | head -n 1)
-        head -n 1 "$first_file" | awk '{print "InstanceType," $0}' > aggregated_latency_report.csv
+        # Get the header from the first CSV file and add metadata columns
+        first_file=$(ls report_*.csv | head -n 1)
+        head -n 1 "$first_file" | awk '{print "InstanceType,InstanceIP,TargetIP,Port,PayloadSize," $0}' > aggregated_latency_report.csv
         
-        # Process each CSV file - extract instance type from filename
-        for csv_file in *_report.csv; do
-          # Extract instance type from filename pattern: instancetype_hostname_report.csv
-          instance_type=$(echo "$csv_file" | sed 's/_ip-.*_report\.csv$//' | sed 's/^.*\///')
-          echo "Adding data from: $instance_type (file: $csv_file)"
+        # Process each CSV file - extract metadata from filename
+        for csv_file in report_*.csv; do
+          # Filename patterns:
+          # Payload-ping: report_instancetype_ip-10-100-0-114_10_100_0_140_80_64bytes.csv
+          # Ping-latency: report_instancetype_ip-10-100-0-114_10_50_0_241.csv
+          # Legacy: report_instancetype_ip-10-100-0-114.csv
           
-          # Skip header and add instance type to each row
-          tail -n +2 "$csv_file" | awk -v type="$instance_type" '{print type "," $0}' >> aggregated_latency_report.csv
+          # Extract instance type (everything before first _ip-)
+          instance_type=$(echo "$csv_file" | sed 's/^report_//' | sed 's/_ip-.*//')
+          
+          # Extract instance IP from hostname (ip-10-100-0-114 -> 10.100.0.114)
+          instance_ip=$(echo "$csv_file" | sed 's/^report_[^_]*_ip-//' | sed 's/_[0-9][0-9]*_.*//' | sed 's/\.csv$//' | tr '-' '.')
+          
+          # Extract remaining path after instance hostname for target info
+          # This captures both simple target IPs and complex payload paths
+          target_info=$(echo "$csv_file" | sed 's/^report_[^_]*_ip-[^_]*_//' | sed 's/\.csv$//' | tr '_' '.')
+          
+          # Parse target info into separate fields
+          if [ "$target_info" = "$csv_file" ] || [ -z "$target_info" ]; then
+            # No target info
+            target_ip="N/A"
+            port="N/A"
+            payload_size="N/A"
+          else
+            # Pattern: 10.100.0.140.80.1024bytes or 10.50.0.241 (no port/payload)
+            # Check if it ends with 'bytes' (has payload info)
+            if [[ "$target_info" == *bytes ]]; then
+              # Extract payload size (everything after last dot before 'bytes')
+              payload_size=$(echo "$target_info" | sed 's/.*\.\([^.]*bytes\)$/\1/')
+              # Remove payload size to get IP and port
+              ip_port=$(echo "$target_info" | sed 's/\.[^.]*bytes$//')
+              # Extract port (last segment)
+              port=$(echo "$ip_port" | sed 's/.*\.\([0-9]*\)$/\1/')
+              # Extract IP (everything before port)
+              target_ip=$(echo "$ip_port" | sed "s/\.$port$//")
+            else
+              # Simple IP without port/payload (e.g., 10.50.0.241)
+              target_ip="$target_info"
+              port="N/A"
+              payload_size="N/A"
+            fi
+          fi
+          
+          echo "Adding data from: $instance_type ($instance_ip) -> $target_ip:$port ($payload_size) [file: $csv_file]"
+          
+          # Skip header and add all metadata columns to each row
+          tail -n +2 "$csv_file" | awk -v type="$instance_type" -v inst_ip="$instance_ip" -v target_ip="$target_ip" -v port="$port" -v payload="$payload_size" '{print type "," inst_ip "," target_ip "," port "," payload "," $0}' >> aggregated_latency_report.csv
         done
         
         echo ""
