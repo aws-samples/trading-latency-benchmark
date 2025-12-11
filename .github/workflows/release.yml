@@ -243,9 +243,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-13
+          - os: macos-15
             arch: x86_64
-          - os: macos-14
+          - os: macos-15
             arch: arm64
     steps:
       - name: Checkout code
