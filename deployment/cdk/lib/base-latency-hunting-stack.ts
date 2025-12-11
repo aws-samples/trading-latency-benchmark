@@ -1,9 +1,9 @@
 import * as cdk from 'aws-cdk-lib';
-import { 
-  IVpc,
-  ISecurityGroup,
-  CfnPlacementGroup,
-  IKeyPair
+import {
+    IVpc,
+    ISecurityGroup,
+    CfnPlacementGroup,
+    IKeyPair
 } from 'aws-cdk-lib/aws-ec2';
 import { RemovalPolicy, CustomResource, Duration } from 'aws-cdk-lib';
 import { Provider } from 'aws-cdk-lib/custom-resources';
@@ -12,8 +12,8 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 
 export interface BaseLatencyHuntingStackProps extends cdk.StackProps {
-  maxInstancesPerType?: number;
-  managedByTag?: string;
+    maxInstancesPerType?: number;
+    managedByTag?: string;
 }
 
 /**
@@ -22,35 +22,35 @@ export interface BaseLatencyHuntingStackProps extends cdk.StackProps {
  * with proper state tracking, resilient Lambda-based provisioning, and cleanup.
  */
 export abstract class BaseLatencyHuntingStack extends cdk.Stack {
-  protected readonly stateTable: dynamodb.Table;
-  protected readonly instanceCreatorLambda: lambda.Function;
-  protected readonly provider: Provider;
+    protected readonly stateTable: dynamodb.Table;
+    protected readonly instanceCreatorLambda: lambda.Function;
+    protected readonly provider: Provider;
 
-  constructor(scope: cdk.App, id: string, props: BaseLatencyHuntingStackProps) {
-    super(scope, id, props);
+    constructor(scope: cdk.App, id: string, props: BaseLatencyHuntingStackProps) {
+        super(scope, id, props);
 
-    const maxInstancesPerType = props.maxInstancesPerType || 1;
-    const managedByTag = props.managedByTag || 'CDK-LatencyHunting';
+        const maxInstancesPerType = props.maxInstancesPerType || 1;
+        const managedByTag = props.managedByTag || 'CDK-LatencyHunting';
 
-    // Create DynamoDB table for instance state tracking
-    this.stateTable = new dynamodb.Table(this, 'InstanceStateTable', {
-      partitionKey: { name: 'InstanceType', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'Timestamp', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: RemovalPolicy.DESTROY,
-      pointInTimeRecovery: false,
-    });
+        // Create DynamoDB table for instance state tracking
+        this.stateTable = new dynamodb.Table(this, 'InstanceStateTable', {
+            partitionKey: { name: 'InstanceType', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'Timestamp', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: RemovalPolicy.DESTROY,
+            pointInTimeRecovery: false,
+        });
 
-    // Create Lambda function for resilient instance creation
-    this.instanceCreatorLambda = new lambda.Function(this, 'InstanceCreatorLambda', {
-      runtime: lambda.Runtime.PYTHON_3_11,
-      handler: 'index.handler',
-      timeout: Duration.minutes(5),
-      environment: {
-        STATE_TABLE_NAME: this.stateTable.tableName,
-        MANAGED_BY_TAG: managedByTag,
-      },
-      code: lambda.Code.fromInline(`
+        // Create Lambda function for resilient instance creation
+        this.instanceCreatorLambda = new lambda.Function(this, 'InstanceCreatorLambda', {
+            runtime: lambda.Runtime.PYTHON_3_11,
+            handler: 'index.handler',
+            timeout: Duration.minutes(5),
+            environment: {
+                STATE_TABLE_NAME: this.stateTable.tableName,
+                MANAGED_BY_TAG: managedByTag,
+            },
+            code: lambda.Code.fromInline(`
 import boto3
 import json
 import time
@@ -416,124 +416,135 @@ echo "EC2 Hunting setup completed at $(date)"
                 'Success': 'false'
             })
 `),
-    });
+        });
 
-    // Grant Lambda permissions for EC2
-    this.instanceCreatorLambda.addToRolePolicy(new iam.PolicyStatement({
-      actions: [
-        'ec2:RunInstances',
-        'ec2:TerminateInstances',
-        'ec2:DescribeInstances',
-        'ec2:DescribeInstanceTypes',
-        'ec2:DescribeImages',
-        'ec2:CreateTags'
-      ],
-      resources: ['*']
-    }));
+        // Grant Lambda permissions for EC2
+        this.instanceCreatorLambda.addToRolePolicy(new iam.PolicyStatement({
+            actions: [
+                'ec2:RunInstances',
+                'ec2:TerminateInstances',
+                'ec2:DescribeInstances',
+                'ec2:DescribeInstanceTypes',
+                'ec2:DescribeImages',
+                'ec2:CreateTags'
+            ],
+            resources: ['*']
+        }));
 
-    // Grant Lambda permissions for DynamoDB
-    this.stateTable.grantWriteData(this.instanceCreatorLambda);
+        // Grant Lambda permissions for DynamoDB
+        this.stateTable.grantWriteData(this.instanceCreatorLambda);
 
-    // Create custom resource provider
-    this.provider = new Provider(this, 'InstanceCreatorProvider', {
-      onEventHandler: this.instanceCreatorLambda,
-    });
-  }
+        // Create custom resource provider
+        this.provider = new Provider(this, 'InstanceCreatorProvider', {
+            onEventHandler: this.instanceCreatorLambda,
+        });
+    }
 
-  /**
-   * Create instances for the provided instance types
-   * @param instanceTypes Array of EC2 instance type strings
-   * @param vpc VPC to deploy instances in
-   * @param securityGroup Security group for instances
-   * @param keyPair Key pair for SSH access
-   * @param subnetId Subnet ID to deploy instances in
-   */
-  protected createInstances(
-    instanceTypes: string[],
-    vpc: IVpc,
-    securityGroup: ISecurityGroup,
-    keyPair: IKeyPair,
-    subnetId: string
-  ): void {
-    instanceTypes.forEach((instanceType) => {
-      const placementGroup = new CfnPlacementGroup(this, `PlacementGroup-${instanceType}`, {
-        strategy: 'cluster'
-      });
-      placementGroup.applyRemovalPolicy(RemovalPolicy.DESTROY);
+    /**
+     * Create instances for the provided instance types
+     * @param instanceTypes Array of EC2 instance type strings
+     * @param vpc VPC to deploy instances in
+     * @param securityGroup Security group for instances
+     * @param keyPair Key pair for SSH access
+     * @param subnetId Subnet ID to deploy instances in
+     */
+    protected createInstances(
+        instanceTypes: string[],
+        vpc: IVpc,
+        securityGroup: ISecurityGroup,
+        keyPair: IKeyPair,
+        subnetId: string
+    ): void {
+        instanceTypes.forEach((instanceType) => {
+            const placementGroup = new CfnPlacementGroup(this, `PlacementGroup-${instanceType}`, {
+                strategy: 'cluster'
+            });
+            placementGroup.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
-      const instanceResource = new CustomResource(this, `Instance-${instanceType}`, {
-        serviceToken: this.provider.serviceToken,
-        properties: {
-          InstanceType: instanceType,
-          SubnetId: subnetId,
-          SecurityGroupId: securityGroup.securityGroupId,
-          KeyName: keyPair.keyPairName,
-          PlacementGroup: placementGroup.ref
-        }
-      });
+            const instanceResource = new CustomResource(this, `Instance-${instanceType}`, {
+                serviceToken: this.provider.serviceToken,
+                properties: {
+                    InstanceType: instanceType,
+                    SubnetId: subnetId,
+                    SecurityGroupId: securityGroup.securityGroupId,
+                    KeyName: keyPair.keyPairName,
+                    PlacementGroup: placementGroup.ref
+                }
+            });
 
-      instanceResource.node.addDependency(placementGroup);
-    });
-  }
+            instanceResource.node.addDependency(placementGroup);
+        });
+    }
 
-  /**
-   * Add common stack outputs
-   * @param instanceTypes Array of instance types being deployed
-   * @param vpcId VPC ID
-   * @param subnetId Subnet ID
-   * @param securityGroupId Security group ID
-   */
-  protected addCommonOutputs(
-    instanceTypes: string[],
-    vpcId: string,
-    subnetId: string,
-    securityGroupId: string
-  ): void {
-    new cdk.CfnOutput(this, 'InstanceStateTableName', {
-      value: this.stateTable.tableName,
-      description: 'DynamoDB table name for instance state tracking'
-    });
+    /**
+     * Add common stack outputs
+     * @param instanceTypes Array of instance types being deployed
+     * @param vpcId VPC ID
+     * @param subnetId Subnet ID
+     * @param securityGroupId Security group ID
+     */
+    protected addCommonOutputs(
+        instanceTypes: string[],
+        vpcId: string,
+        subnetId: string,
+        securityGroupId: string
+    ): void {
+        new cdk.CfnOutput(this, 'InstanceStateTableName', {
+            value: this.stateTable.tableName,
+            description: 'DynamoDB table name for instance state tracking'
+        });
 
-    new cdk.CfnOutput(this, 'TotalInstanceTypes', {
-      value: instanceTypes.length.toString(),
-      description: 'Total number of instance types attempted'
-    });
+        new cdk.CfnOutput(this, 'TotalInstanceTypes', {
+            value: instanceTypes.length.toString(),
+            description: 'Total number of instance types attempted'
+        });
 
-    new cdk.CfnOutput(this, 'VpcId', {
-      value: vpcId,
-      description: 'VPC ID used for hunting instances'
-    });
+        new cdk.CfnOutput(this, 'VpcId', {
+            value: vpcId,
+            description: 'VPC ID used for hunting instances'
+        });
 
-    new cdk.CfnOutput(this, 'SubnetId', {
-      value: subnetId,
-      description: 'Subnet ID used for hunting instances'
-    });
+        new cdk.CfnOutput(this, 'SubnetId', {
+            value: subnetId,
+            description: 'Subnet ID used for hunting instances'
+        });
 
-    new cdk.CfnOutput(this, 'SecurityGroupId', {
-      value: securityGroupId,
-      description: 'Security group ID used'
-    });
+        new cdk.CfnOutput(this, 'SecurityGroupId', {
+            value: securityGroupId,
+            description: 'Security group ID used'
+        });
 
-    new cdk.CfnOutput(this, 'Region', {
-      value: this.region,
-      description: 'Deployment region'
-    });
-  }
+        new cdk.CfnOutput(this, 'Region', {
+            value: this.region,
+            description: 'Deployment region'
+        });
+    }
 
-  /**
-   * Get the default set of instance types for latency hunting
-   * @returns Array of instance type strings
-   */
-  protected getDefaultInstanceTypes(): string[] {
-    return [
-      // Current generation - Intel
-      'c8i.4xlarge', 'c7i.4xlarge', 'c6i.4xlarge', 'c5.4xlarge', 'c4.4xlarge', 'c3.4xlarge', 'c1.4xlarge',
-      
-      // Current generation - AMD
-      'c8a.4xlarge', 'c7a.4xlarge', 'c6a.4xlarge', 'c5a.4xlarge', 
-      
-      // Current generation - Graviton ARM
-      'c8g.4xlarge', 'c7g.4xlarge', 'c6g.4xlarge', 
-    ];
-  }
+    /**
+     * Get the default set of instance types for latency hunting
+     * @returns Array of instance type strings
+     */
+    protected getDefaultInstanceTypes(): string[] {
+        return [
+            // Current generation - Intel
+            // 'c8i.4xlarge',
+             'c7i.4xlarge',
+             'c6i.4xlarge',
+            // 'c5.4xlarge',
+            // 'c4.4xlarge',
+            // 'c3.4xlarge',
+            // 'c1.4xlarge',
+
+            // //   Current generation - AMD
+            // 'c8a.4xlarge',
+             'c7a.4xlarge',
+            // 'c6a.4xlarge',
+            // 'c5a.4xlarge',
+
+            // //   Current generation - Graviton ARM
+             'c8g.4xlarge',
+            // 'c7g.4xlarge',
+            // 'c6g.4xlarge',
+        ];
+    }
 }
