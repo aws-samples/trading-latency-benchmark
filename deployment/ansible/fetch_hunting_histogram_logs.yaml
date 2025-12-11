@@ -28,8 +28,8 @@
   hosts: aws_ec2
   gather_facts: yes
   vars:
-    benchmark_dir: "/home/ec2-user"  # Working directory for benchmark (can be overridden)
-    jar_path: "/home/ec2-user/ExchangeFlow-1.0-SNAPSHOT.jar"  # Full path to JAR file (can be overridden)
+    benchmark_dir: "/home/ec2-user/benchmark"  # Working directory for benchmark (can be overridden)
+    jar_path: "/home/ec2-user/benchmark/ExchangeFlow-v1.0.0.jar"  # Full path to JAR file (can be overridden)
   tasks:
     - name: Get EC2 instance metadata (IMDSv2 compatible)
       shell: |
