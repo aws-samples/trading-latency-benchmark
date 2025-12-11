@@ -69,6 +69,12 @@ public class EndpointPingClient {
                     LinkedHashMap<String, String> latencyReport = LatencyTools.createLatencyReport(HISTOGRAM);
                     saveHistogramToFile(HISTOGRAM, System.nanoTime(), histogramLogFile);
                     LOGGER.info("Percentiles for host: {}\n {}\n", host, LatencyTools.toJSON(latencyReport));
+                    
+                    // Close log file and exit gracefully after reaching TEST_SIZE
+                    LOGGER.info("Test completed for host: {}. Reached TEST_SIZE: {}", host, TEST_SIZE);
+                    histogramLogFile.close();
+                    this.cancel(); // Cancel this timer task
+                    System.exit(0); // Exit gracefully
                 }
             } catch (IOException e) {
                 LOGGER.error("{} is not reachable.", host);
