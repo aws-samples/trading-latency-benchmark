@@ -19,11 +19,14 @@ export interface InstanceConfig {
     id: string;
     /** EC2 instance type (e.g., 'c7i.4xlarge') */
     instanceType: string;
+    /** Optional Elastic IP allocation ID to assign to this instance */
+    elasticIpAllocationId?: string;
 }
 
 export interface BaseLatencyHuntingStackProps extends cdk.StackProps {
     maxInstancesPerType?: number;
     managedByTag?: string;
+    elasticIps?: string[];  // Optional list of Elastic IP allocation IDs to assign to instances
 }
 
 /**
@@ -35,12 +38,14 @@ export abstract class BaseLatencyHuntingStack extends cdk.Stack {
     protected readonly stateTable: dynamodb.Table;
     protected readonly instanceCreatorLambda: lambda.Function;
     protected readonly provider: Provider;
+    protected readonly elasticIps?: string[];
 
     constructor(scope: cdk.App, id: string, props: BaseLatencyHuntingStackProps) {
         super(scope, id, props);
 
         const maxInstancesPerType = props.maxInstancesPerType || 1;
         const managedByTag = props.managedByTag || 'CDK-LatencyHunting';
+        this.elasticIps = props.elasticIps;
 
         // Create DynamoDB table for instance state tracking
         this.stateTable = new dynamodb.Table(this, 'InstanceStateTable', {
@@ -220,47 +225,143 @@ def handler(event, context):
         instance_type = new_props.get('InstanceType', 'unknown')
         stack_id = event.get('StackId', '')
         
+        # Check EIP changes first
+        old_eip = old_props.get('ElasticIpAllocationId', '')
+        new_eip = new_props.get('ElasticIpAllocationId', '')
+        eip_removed = old_eip and not new_eip  # Had EIP before, now it's gone
+        eip_added = not old_eip and new_eip  # No EIP before, now adding one
+        
+        # If PhysicalResourceId is not an instance ID, check if a real instance exists
+        actual_instance_id = None
+        if not physical_resource_id.startswith('i-'):
+            print(f"PhysicalResourceId is not an instance ID (UUID): {physical_resource_id}")
+            print(f"Checking if instance exists with LogicalResourceId: {event.get('LogicalResourceId')}")
+            
+            try:
+                # Search for instance with this LogicalResourceId
+                filters = [
+                    {'Name': 'tag:CloudFormationLogicalId', 'Values': [event.get('LogicalResourceId', 'unknown')]},
+                    {'Name': 'tag:ManagedBy', 'Values': [managed_by_tag]},
+                    {'Name': 'instance-state-name', 'Values': ['pending', 'running']}
+                ]
+                response = ec2.describe_instances(Filters=filters)
+                
+                if response['Reservations'] and response['Reservations'][0]['Instances']:
+                    actual_instance_id = response['Reservations'][0]['Instances'][0]['InstanceId']
+                    print(f"Found existing instance: {actual_instance_id}")
+                    # Use this as the real physical resource ID
+                    physical_resource_id = actual_instance_id
+            except Exception as e:
+                print(f"Error searching for existing instance: {str(e)}")
+        
         # Check if properties that require replacement have changed
         needs_replacement = (
-            not physical_resource_id.startswith('i-') or  # Failed previous launch
+            (not physical_resource_id.startswith('i-') and not actual_instance_id) or  # Failed launch with no real instance
             old_props.get('KeyName') != new_props.get('KeyName') or
             old_props.get('InstanceType') != new_props.get('InstanceType') or
-            old_props.get('PlacementGroup') != new_props.get('PlacementGroup')
+            old_props.get('PlacementGroup') != new_props.get('PlacementGroup') or
+            eip_removed  # EIP removal requires replacement to get public IP
         )
         
         if needs_replacement:
-            # Signal replacement by returning FAILED with a descriptive reason
-            # CloudFormation will then orchestrate:
-            # 1. Create a new resource (triggers Create handler with new instance)
-            # 2. Delete old resource (triggers Delete handler to clean up old instance)
+            # For replacement, we explicitly terminate old instance and create new one
             print(f"Properties changed requiring replacement for {instance_type}")
+            
+            if eip_removed:
+                print(f"EIP removed - will create new instance with public IP")
+            
+            # Terminate old instance if it exists and is a real instance ID
+            if physical_resource_id and physical_resource_id.startswith('i-'):
+                print(f"Terminating old instance: {physical_resource_id}")
+                try:
+                    ec2.terminate_instances(InstanceIds=[physical_resource_id])
+                    print(f"Old instance {physical_resource_id} termination initiated")
+                except ClientError as e:
+                    if e.response['Error']['Code'] != 'InvalidInstanceID.NotFound':
+                        print(f"Warning: Could not terminate old instance: {str(e)}")
             
             # Write state update to track replacement
             write_state(instance_type, 'replacement-needed', physical_resource_id, 
                        'Update triggered resource replacement', '', stack_id)
             
-            # Return FAILURE to signal CloudFormation to replace the resource
-            # This prevents duplicate instances by letting CloudFormation orchestrate
-            cfnresponse.send(event, context, cfnresponse.FAILED, {
-                'Error': 'Resource properties changed, replacement required',
-                'InstanceType': instance_type,
-                'Reason': 'KeyName, InstanceType, or PlacementGroup changed'
-            }, physical_resource_id)
+            # Fall through to Create logic below to launch new instance
+            # We'll return the new instance ID as PhysicalResourceId
         else:
-            # No replacement needed, instance stays as-is
-            print(f"No replacement needed for {instance_type}, instance {physical_resource_id} unchanged")
+            # Handle Elastic IP changes without replacing instance
+            old_eip = old_props.get('ElasticIpAllocationId', '')
+            new_eip = new_props.get('ElasticIpAllocationId', '')
             
-            # Write state update
-            write_state(instance_type, 'no-change', physical_resource_id, '', '', stack_id)
+            if old_eip != new_eip:
+                print(f"Elastic IP allocation changed for instance {physical_resource_id}")
+                
+                try:
+                    # Disassociate old EIP if it exists
+                    if old_eip:
+                        print(f"Disassociating old Elastic IP: {old_eip}")
+                        try:
+                            addresses = ec2.describe_addresses(AllocationIds=[old_eip])
+                            if addresses['Addresses'] and addresses['Addresses'][0].get('AssociationId'):
+                                association_id = addresses['Addresses'][0]['AssociationId']
+                                ec2.disassociate_address(AssociationId=association_id)
+                                print(f"Old Elastic IP disassociated")
+                        except ClientError as e:
+                            print(f"Warning: Could not disassociate old EIP: {str(e)}")
+                    
+                    # Associate new EIP if provided
+                    if new_eip:
+                        print(f"Associating new Elastic IP: {new_eip}")
+                        ec2.get_waiter('instance_running').wait(InstanceIds=[physical_resource_id])
+                        
+                        assoc_response = ec2.associate_address(
+                            InstanceId=physical_resource_id,
+                            AllocationId=new_eip
+                        )
+                        print(f"New Elastic IP associated: {assoc_response.get('AssociationId')}")
+                        
+                        # Get the new public IP
+                        eip_response = ec2.describe_addresses(AllocationIds=[new_eip])
+                        public_ip = eip_response['Addresses'][0]['PublicIp']
+                    else:
+                        # No new EIP, get regular public IP
+                        instances = ec2.describe_instances(InstanceIds=[physical_resource_id])
+                        public_ip = instances['Reservations'][0]['Instances'][0].get('PublicIpAddress', 'pending')
+                    
+                    write_state(instance_type, 'eip-updated', physical_resource_id, '', '', stack_id)
+                    
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                        'InstanceId': physical_resource_id,
+                        'InstanceType': instance_type,
+                        'Message': 'Elastic IP updated',
+                        'PublicIp': public_ip
+                    }, physical_resource_id)
+                    
+                except Exception as e:
+                    print(f"Error updating Elastic IP: {str(e)}")
+                    # Don't fail - return success with warning
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                        'InstanceId': physical_resource_id,
+                        'InstanceType': instance_type,
+                        'Message': f'EIP update failed: {str(e)}',
+                        'Warning': 'Elastic IP update failed but instance unchanged'
+                    }, physical_resource_id)
+            else:
+                # No replacement needed, instance stays as-is
+                print(f"No replacement needed for {instance_type}, instance {physical_resource_id} unchanged")
+                
+                # Write state update
+                write_state(instance_type, 'no-change', physical_resource_id, '', '', stack_id)
+                
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                    'InstanceId': physical_resource_id,
+                    'InstanceType': instance_type,
+                    'Message': 'No changes required'
+                }, physical_resource_id)
             
-            cfnresponse.send(event, context, cfnresponse.SUCCESS, {
-                'InstanceId': physical_resource_id,
-                'InstanceType': instance_type,
-                'Message': 'No changes required'
-            }, physical_resource_id)
+            # CRITICAL: Return here to prevent falling through to Create logic
+            return
         
-        # CRITICAL: Return here to prevent falling through to Create logic
-        return
+        # If we reach here, needs_replacement is True, so fall through to Create logic
+        print(f"Falling through to Create logic for replacement of {instance_type}")
     
     # Create request
     props = event['ResourceProperties']
@@ -373,17 +474,44 @@ echo "EC2 Hunting setup completed at $(date)"
                 else:
                     raise
         
-        # Wait for public IP
-        max_retries = 30
-        for i in range(max_retries):
+        # Handle Elastic IP allocation if provided
+        elastic_ip_allocation_id = props.get('ElasticIpAllocationId')
+        if elastic_ip_allocation_id:
+            print(f"Assigning Elastic IP allocation {elastic_ip_allocation_id} to instance {instance_id}")
+            # Wait for instance to be in running state before associating EIP
+            ec2.get_waiter('instance_running').wait(InstanceIds=[instance_id])
+            
             try:
-                instances = ec2.describe_instances(InstanceIds=[instance_id])
-                public_ip = instances['Reservations'][0]['Instances'][0].get('PublicIpAddress')
-                if public_ip:
-                    break
-            except:
-                pass
-            time.sleep(2)
+                # Associate the Elastic IP
+                assoc_response = ec2.associate_address(
+                    InstanceId=instance_id,
+                    AllocationId=elastic_ip_allocation_id
+                )
+                print(f"Elastic IP associated successfully: {assoc_response.get('AssociationId')}")
+                
+                # Get the Elastic IP address
+                eip_response = ec2.describe_addresses(AllocationIds=[elastic_ip_allocation_id])
+                public_ip = eip_response['Addresses'][0]['PublicIp']
+                print(f"Instance {instance_id} assigned Elastic IP: {public_ip}")
+            except ClientError as e:
+                print(f"Warning: Failed to associate Elastic IP: {str(e)}")
+                # Fall back to regular public IP
+                public_ip = None
+        else:
+            public_ip = None
+        
+        # Wait for public IP if not using Elastic IP
+        if not public_ip:
+            max_retries = 30
+            for i in range(max_retries):
+                try:
+                    instances = ec2.describe_instances(InstanceIds=[instance_id])
+                    public_ip = instances['Reservations'][0]['Instances'][0].get('PublicIpAddress')
+                    if public_ip:
+                        break
+                except:
+                    pass
+                time.sleep(2)
         
         # Write success to state table
         write_state(instance_type, 'launched', instance_id, '', architecture, event.get('StackId', ''))
@@ -436,7 +564,10 @@ echo "EC2 Hunting setup completed at $(date)"
                 'ec2:DescribeInstances',
                 'ec2:DescribeInstanceTypes',
                 'ec2:DescribeImages',
-                'ec2:CreateTags'
+                'ec2:CreateTags',
+                'ec2:AssociateAddress',
+                'ec2:DescribeAddresses',
+                'ec2:DisassociateAddress'
             ],
             resources: ['*']
         }));
@@ -457,57 +588,69 @@ echo "EC2 Hunting setup completed at $(date)"
      * @param securityGroup Security group for instances
      * @param keyPair Key pair for SSH access
      * @param subnetId Subnet ID to deploy instances in
+     * @param elasticIps Optional array of Elastic IP allocation IDs to assign
      */
     protected createInstances(
         instances: InstanceConfig[],
         vpc: IVpc,
         securityGroup: ISecurityGroup,
         keyPair: IKeyPair,
-        subnetId: string
+        subnetId: string,
+        elasticIps?: string[]
     ): void {
         // Validate that all IDs are unique
         const seenIds = new Set<string>();
         const duplicateIds: string[] = [];
-        
+
         instances.forEach((instance) => {
             if (seenIds.has(instance.id)) {
                 duplicateIds.push(instance.id);
             }
             seenIds.add(instance.id);
         });
-        
+
         if (duplicateIds.length > 0) {
             throw new Error(
                 `Duplicate instance IDs found: ${duplicateIds.join(', ')}. ` +
                 `Each instance must have a unique ID.`
             );
         }
-        
+
         // Create instances using explicit IDs
-        instances.forEach((instance) => {
+        instances.forEach((instance, index) => {
             // Create unique placement group for this instance
             const placementGroup = new CfnPlacementGroup(
-                this, 
-                `PlacementGroup-${instance.id}`, 
+                this,
+                `PlacementGroup-${instance.id}`,
                 {
                     strategy: 'cluster'
                 }
             );
             placementGroup.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
+            // Prepare custom resource properties
+            const properties: { [key: string]: any } = {
+                InstanceType: instance.instanceType,
+                SubnetId: subnetId,
+                SecurityGroupId: securityGroup.securityGroupId,
+                KeyName: keyPair.keyPairName,
+                PlacementGroup: placementGroup.ref
+            };
+
+            // Assign Elastic IP - prioritize instance config, then fall back to array
+            if (instance.elasticIpAllocationId) {
+                properties.ElasticIpAllocationId = instance.elasticIpAllocationId;
+            } else if (elasticIps && index < elasticIps.length) {
+                properties.ElasticIpAllocationId = elasticIps[index];
+            }
+
             // Create instance resource with unique ID
             const instanceResource = new CustomResource(
-                this, 
-                `Instance-${instance.id}`, 
+                this,
+                `Instance-${instance.id}`,
                 {
                     serviceToken: this.provider.serviceToken,
-                    properties: {
-                        InstanceType: instance.instanceType,
-                        SubnetId: subnetId,
-                        SecurityGroupId: securityGroup.securityGroupId,
-                        KeyName: keyPair.keyPairName,
-                        PlacementGroup: placementGroup.ref
-                    }
+                    properties
                 }
             );
 
@@ -572,30 +715,35 @@ echo "EC2 Hunting setup completed at $(date)"
             { id: 'intel-c6i-1', instanceType: 'c6i.4xlarge' },
             // Current generation - Graviton ARM
             { id: 'arm-c8g-1', instanceType: 'c8g.4xlarge' },
-    //   'c8i.xlarge','c7i.xlarge','c6i.xlarge','c6in.xlarge','c5.xlarge','c5n.xlarge','c5d.xlarge',   
-    //   // M family - General purpose Intel
-    //   'm8i.xlarge','m7i.xlarge','m6i.xlarge','m6in.xlarge','m5.xlarge','m5n.xlarge','m5d.xlarge','m5dn.xlarge',     
-    //   // R family - Memory optimized Intel
-    //   'r8i.xlarge','r7i.xlarge','r7iz.xlarge','r6i.xlarge','r6in.xlarge','r5.xlarge','r5n.xlarge','r5d.xlarge','r5dn.xlarge', 
-    //   // D family - Dense storage Intel
-    //   'd3.xlarge','d3en.xlarge',     
-    //   // T family - Burstable Intel
-    //   't3.xlarge',       
-    //   // ===== CURRENT GENERATION - AMD x86 =====
-    //   // C family - Compute optimized AMD
-    //   'c8a.xlarge','c7a.xlarge','c6a.xlarge','c5a.xlarge','c5ad.xlarge',     
-    //   // M family - General purpose AMD
-    //   'm8a.xlarge','m7a.xlarge','m6a.xlarge','m5a.xlarge','m5ad.xlarge',    
-    //   // R family - Memory optimized AMD
-    //   'r8a.xlarge','r7a.xlarge','r6a.xlarge','r5a.xlarge','r5ad.xlarge',     
-    //   // ===== CURRENT GENERATION - AWS GRAVITON ARM =====
-    //   // C family - Compute optimized Graviton
-    //   'c8g.xlarge','c7g.xlarge','c7gn.xlarge','c6g.xlarge','c6gd.xlarge',     
-    //   // M family - General purpose Graviton
-    //   'm8g.xlarge', 'm7g.xlarge', 'm6g.xlarge', 'm6gd.xlarge',     
-    //   // R family - Memory optimized Graviton
-    //   'r8g.xlarge',  'r7g.xlarge',  'r6g.xlarge',  'r6gd.xlarge',     
-    //   'i8g.xlarge','im4gn.xlarge',    
+
+            // Example with Elastic IP specified in config:
+            // { id: 'intel-c7i-1', instanceType: 'c7i.4xlarge', elasticIpAllocationId: 'eipalloc-12345678' },
+            // { id: 'intel-c7i-2', instanceType: 'c7i.4xlarge', elasticIpAllocationId: 'eipalloc-87654321' },
+
+            //   'c8i.xlarge','c7i.xlarge','c6i.xlarge','c6in.xlarge','c5.xlarge','c5n.xlarge','c5d.xlarge',   
+            //   // M family - General purpose Intel
+            //   'm8i.xlarge','m7i.xlarge','m6i.xlarge','m6in.xlarge','m5.xlarge','m5n.xlarge','m5d.xlarge','m5dn.xlarge',     
+            //   // R family - Memory optimized Intel
+            //   'r8i.xlarge','r7i.xlarge','r7iz.xlarge','r6i.xlarge','r6in.xlarge','r5.xlarge','r5n.xlarge','r5d.xlarge','r5dn.xlarge', 
+            //   // D family - Dense storage Intel
+            //   'd3.xlarge','d3en.xlarge',     
+            //   // T family - Burstable Intel
+            //   't3.xlarge',       
+            //   // ===== CURRENT GENERATION - AMD x86 =====
+            //   // C family - Compute optimized AMD
+            //   'c8a.xlarge','c7a.xlarge','c6a.xlarge','c5a.xlarge','c5ad.xlarge',     
+            //   // M family - General purpose AMD
+            //   'm8a.xlarge','m7a.xlarge','m6a.xlarge','m5a.xlarge','m5ad.xlarge',    
+            //   // R family - Memory optimized AMD
+            //   'r8a.xlarge','r7a.xlarge','r6a.xlarge','r5a.xlarge','r5ad.xlarge',     
+            //   // ===== CURRENT GENERATION - AWS GRAVITON ARM =====
+            //   // C family - Compute optimized Graviton
+            //   'c8g.xlarge','c7g.xlarge','c7gn.xlarge','c6g.xlarge','c6gd.xlarge',     
+            //   // M family - General purpose Graviton
+            //   'm8g.xlarge', 'm7g.xlarge', 'm6g.xlarge', 'm6gd.xlarge',     
+            //   // R family - Memory optimized Graviton
+            //   'r8g.xlarge',  'r7g.xlarge',  'r6g.xlarge',  'r6gd.xlarge',     
+            //   'i8g.xlarge','im4gn.xlarge',    
         ];
     }
 }

@@ -20,6 +20,7 @@ VPC_ID=""  # Optional: use existing VPC
 SUBNET_ID=""  # Required for BYOVPC mode
 SECURITY_GROUP_ID=""  # Optional for BYOVPC mode
 USE_EXISTING_VPC="false"  # Set to true to use BYOVPC stack
+ELASTIC_IPS=""  # Optional: comma-separated list of Elastic IP allocation IDs
 STACK_NAME="LatencyHuntingStack"
 
 # Function to print colored output
@@ -49,6 +50,7 @@ OPTIONS:
     -v, --vpc-id VPC_ID          VPC ID for BYOVPC mode (requires --subnet-id)
     -s, --subnet-id SUBNET_ID    Subnet ID for BYOVPC mode (required with --vpc-id)
     -g, --security-group-id SG_ID Security group ID (optional, creates one if not provided)
+    -e, --elastic-ips EIP_LIST   Comma-separated Elastic IP allocation IDs (optional)
     --use-existing-vpc           Use BYOVPC stack (never creates/manages VPC)
     -h, --help                   Show this help message
 
@@ -70,6 +72,11 @@ EXAMPLES:
       --subnet-id subnet-xxxxx \
       --security-group-id sg-xxxxx \
       --key-pair my-keypair
+
+    # With Elastic IPs (first N instances get EIPs, rest get regular public IPs)
+    $0 --region eu-central-1 \
+      --key-pair frankfurt \
+      --elastic-ips eipalloc-12345678,eipalloc-87654321,eipalloc-abcdef01
 
 EOF
     exit 1
@@ -102,6 +109,10 @@ while [[ $# -gt 0 ]]; do
             SECURITY_GROUP_ID="$2"
             shift 2
             ;;
+        -e|--elastic-ips)
+            ELASTIC_IPS="$2"
+            shift 2
+            ;;
         --use-existing-vpc)
             USE_EXISTING_VPC="true"
             shift
@@ -130,6 +141,9 @@ if [ "$USE_EXISTING_VPC" = "true" ]; then
     else
         print_info "Security Group: Will create minimal one"
     fi
+    if [ -n "$ELASTIC_IPS" ]; then
+        print_info "Elastic IPs: $ELASTIC_IPS"
+    fi
     STACK_NAME="LatencyHuntingBYOVPCStack"
     
     # Validate required parameters
@@ -149,6 +163,9 @@ else
         print_info "Using existing VPC: $VPC_ID"
     else
         print_info "Creating new VPC with CIDR: $VPC_CIDR"
+    fi
+    if [ -n "$ELASTIC_IPS" ]; then
+        print_info "Elastic IPs: $ELASTIC_IPS"
     fi
 fi
 print_info ""
@@ -189,6 +206,11 @@ fi
 CDK_CONTEXT="--context deploymentType=latency-hunting"
 CDK_CONTEXT="$CDK_CONTEXT --context region=$REGION"
 CDK_CONTEXT="$CDK_CONTEXT --context keyPairName=$KEY_PAIR_NAME"
+
+# Add Elastic IPs if provided
+if [ -n "$ELASTIC_IPS" ]; then
+    CDK_CONTEXT="$CDK_CONTEXT --context elasticIps=$ELASTIC_IPS"
+fi
 
 # Add mode-specific parameters
 if [ "$USE_EXISTING_VPC" = "true" ]; then

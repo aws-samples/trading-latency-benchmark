@@ -151,7 +151,8 @@ export class LatencyHuntingStack extends BaseLatencyHuntingStack {
       vpc,
       securityGroup,
       keyPair,
-      subnetId
+      subnetId,
+      this.elasticIps
     );
 
     // Add outputs using base class method

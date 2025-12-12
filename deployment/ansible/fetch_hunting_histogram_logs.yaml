@@ -5,6 +5,7 @@
 - name: Clean up old local results before fetching new ones
   hosts: localhost
   gather_facts: no
+  strategy: free  # Each host runs independently for parallel execution
   tasks:
     - name: Clean up old local results
       shell: |

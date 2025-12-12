@@ -4,6 +4,7 @@
 ---
 - name: Run latency benchmark on EC2 hunting instances
   hosts: aws_ec2
+  strategy: free  # Each host runs independently for parallel execution
   gather_facts: yes
   vars:
     target_host: "localhost"
