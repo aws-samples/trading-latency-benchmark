@@ -6,11 +6,14 @@
   hosts: aws_ec2
   gather_facts: yes
   vars:
-    target_host: "10.100.0.140"
+    target_host: "localhost"
     warmup_count: 10
-    test_size: 10000  # Number of test iterations before exiting gracefully
-    test_mode: "latency-test"  # Options: latency-test, ping-latency, payload-ping
+    test_size: 100  # Number of test iterations before exiting gracefully
+    test_mode: "payload-ping"  # Options: latency-test, ping-latency, payload-ping
     payload_sizes: "0,600"  # Payload sizes for payload-ping mode (comma-separated bytes)
+    ping_interval: 1000  # Ping interval in milliseconds for ping-latency and payload-ping modes
+    http_port: 8888  # HTTP port for the target server
+    websocket_port: 8888  # WebSocket port for the target server
     benchmark_dir: "/home/ec2-user/benchmark"  # Working directory for benchmark (can be overridden)
     jar_path: "/home/ec2-user/benchmark/ExchangeFlow-v1.0.0.jar"  # Full path to JAR file (can be overridden)
   tasks:
@@ -63,13 +66,39 @@
     become: no
     when: test_mode == 'payload-ping'
     
+  - name: Update PING_INTERVAL in config.properties
+    lineinfile:
+      path: "{{ benchmark_dir }}/config.properties"
+      regexp: '^PING_INTERVAL='
+      line: 'PING_INTERVAL={{ ping_interval }}'
+    become: no
+    
+  - name: Update HTTP_PORT in config.properties
+    lineinfile:
+      path: "{{ benchmark_dir }}/config.properties"
+      regexp: '^HTTP_PORT='
+      line: 'HTTP_PORT={{ http_port }}'
+    become: no
+    
+  - name: Update WEBSOCKET_PORT in config.properties
+    lineinfile:
+      path: "{{ benchmark_dir }}/config.properties"
+      regexp: '^WEBSOCKET_PORT='
+      line: 'WEBSOCKET_PORT={{ websocket_port }}'
+    become: no
+    
   - name: Display configuration
     shell: |
       echo "=== Benchmark Configuration ==="
       echo "Test Mode: {{ test_mode }}"
       echo "Target Host: {{ target_host }}"
+      echo "HTTP Port: {{ http_port }}"
+      echo "WebSocket Port: {{ websocket_port }}"
       echo "Warmup Count: {{ warmup_count }}"
       echo "Test Size: {{ test_size }}"
+      {% if test_mode in ['ping-latency', 'payload-ping'] %}
+      echo "Ping Interval: {{ ping_interval }} ms"
+      {% endif %}
       {% if test_mode == 'payload-ping' %}
       echo "Payload Sizes: {{ payload_sizes }} bytes"
       {% endif %}
