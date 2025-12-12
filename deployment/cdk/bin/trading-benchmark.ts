@@ -26,6 +26,10 @@ const subnetId = app.node.tryGetContext('subnetId');
 const securityGroupId = app.node.tryGetContext('securityGroupId');
 const useExistingVpc = app.node.tryGetContext('useExistingVpc');
 const availabilityZone = app.node.tryGetContext('availabilityZone');
+const elasticIpsString = app.node.tryGetContext('elasticIps');
+
+// Parse elastic IPs from comma-separated string to array
+const elasticIps = elasticIpsString ? elasticIpsString.split(',').map((eip: string) => eip.trim()) : undefined;
 
 // Environment configuration
 // Note: For VPC lookup to work, we need explicit account and region
@@ -85,7 +89,8 @@ switch (deploymentType.toLowerCase()) {
         vpcId: vpcId,
         subnetId: subnetId,
         keyPairName: keyPairName,
-        securityGroupId: securityGroupId
+        securityGroupId: securityGroupId,
+        elasticIps: elasticIps
       });
     } else {
       // Use original stack that can create or import VPC
@@ -94,7 +99,8 @@ switch (deploymentType.toLowerCase()) {
         env,
         keyPairName: keyPairName || 'virginia',
         vpcCidr,
-        vpcId
+        vpcId,
+        elasticIps: elasticIps
       });
     }
     break;
