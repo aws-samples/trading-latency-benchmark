@@ -66,11 +66,7 @@ export class LatencyHuntingStack extends BaseLatencyHuntingStack {
       'r5d.xlarge',      // 5th gen Intel memory with NVMe
       'r5dn.xlarge',     // 5th gen Intel memory NVMe + network
       
-      // I family - Storage optimized Intel
-      'i4i.xlarge',      // 4th gen Intel storage (NVMe)
-      'i3.xlarge',       // 3rd gen Intel storage (NVMe)
-      'i3en.xlarge',     // 3rd gen Intel storage enhanced networking
-      
+  
       // D family - Dense storage Intel
       'd3.xlarge',       // 3rd gen dense storage
       'd3en.xlarge',     // 3rd gen dense storage enhanced networking
@@ -123,40 +119,8 @@ export class LatencyHuntingStack extends BaseLatencyHuntingStack {
       'r6g.xlarge',      // 6th gen Graviton2 memory
       'r6gd.xlarge',     // 6th gen Graviton2 memory with NVMe
       
-      // I family - Storage optimized Graviton
-      'i4g.xlarge',      // 4th gen Graviton storage (ARM + NVMe)
       'i8g.xlarge',      // 8th gen Graviton4 storage (latest)
       'im4gn.xlarge',    // 4th gen Graviton2 memory + storage
-      
-      // ===== PREVIOUS GENERATION (Still available, cost-effective) =====
-      
-      // M1 - Original general purpose (very old, cheap)
-      'm1.large',        // 1st gen general purpose
-      
-      // M3 - General purpose (old)
-      'm3.xlarge',       // 3rd gen general purpose
-      
-      // M4 - General purpose (prev gen)
-      'm4.xlarge',       // 4th gen general purpose
-      
-      // C1 - Compute optimized (very old)
-      'c1.xlarge',       // 1st gen compute
-      
-      // C3 - Compute optimized (old)
-      'c3.xlarge',       // 3rd gen compute
-      
-      // C4 - Compute optimized (prev gen)
-      'c4.xlarge',       // 4th gen compute
-      
-      // R3 - Memory optimized (old)
-      'r3.xlarge',       // 3rd gen memory
-      
-      // R4 - Memory optimized (prev gen)
-      'r4.xlarge',       // 4th gen memory
-      
-      // I2 - Storage optimized (old)
-      'i2.xlarge',       // 2nd gen storage
-      
     ];
 
     // Use existing VPC or create new one
