@@ -11,6 +11,16 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 
+/**
+ * Configuration for a single instance to be deployed
+ */
+export interface InstanceConfig {
+    /** Unique identifier for this instance (e.g., 'probe-1', 'test-a') */
+    id: string;
+    /** EC2 instance type (e.g., 'c7i.4xlarge') */
+    instanceType: string;
+}
+
 export interface BaseLatencyHuntingStackProps extends cdk.StackProps {
     maxInstancesPerType?: number;
     managedByTag?: string;
@@ -441,36 +451,65 @@ echo "EC2 Hunting setup completed at $(date)"
     }
 
     /**
-     * Create instances for the provided instance types
-     * @param instanceTypes Array of EC2 instance type strings
+     * Create instances for the provided instance configurations
+     * @param instances Array of instance configurations with unique IDs
      * @param vpc VPC to deploy instances in
      * @param securityGroup Security group for instances
      * @param keyPair Key pair for SSH access
      * @param subnetId Subnet ID to deploy instances in
      */
     protected createInstances(
-        instanceTypes: string[],
+        instances: InstanceConfig[],
         vpc: IVpc,
         securityGroup: ISecurityGroup,
         keyPair: IKeyPair,
         subnetId: string
     ): void {
-        instanceTypes.forEach((instanceType) => {
-            const placementGroup = new CfnPlacementGroup(this, `PlacementGroup-${instanceType}`, {
-                strategy: 'cluster'
-            });
+        // Validate that all IDs are unique
+        const seenIds = new Set<string>();
+        const duplicateIds: string[] = [];
+        
+        instances.forEach((instance) => {
+            if (seenIds.has(instance.id)) {
+                duplicateIds.push(instance.id);
+            }
+            seenIds.add(instance.id);
+        });
+        
+        if (duplicateIds.length > 0) {
+            throw new Error(
+                `Duplicate instance IDs found: ${duplicateIds.join(', ')}. ` +
+                `Each instance must have a unique ID.`
+            );
+        }
+        
+        // Create instances using explicit IDs
+        instances.forEach((instance) => {
+            // Create unique placement group for this instance
+            const placementGroup = new CfnPlacementGroup(
+                this, 
+                `PlacementGroup-${instance.id}`, 
+                {
+                    strategy: 'cluster'
+                }
+            );
             placementGroup.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
-            const instanceResource = new CustomResource(this, `Instance-${instanceType}`, {
-                serviceToken: this.provider.serviceToken,
-                properties: {
-                    InstanceType: instanceType,
-                    SubnetId: subnetId,
-                    SecurityGroupId: securityGroup.securityGroupId,
-                    KeyName: keyPair.keyPairName,
-                    PlacementGroup: placementGroup.ref
+            // Create instance resource with unique ID
+            const instanceResource = new CustomResource(
+                this, 
+                `Instance-${instance.id}`, 
+                {
+                    serviceToken: this.provider.serviceToken,
+                    properties: {
+                        InstanceType: instance.instanceType,
+                        SubnetId: subnetId,
+                        SecurityGroupId: securityGroup.securityGroupId,
+                        KeyName: keyPair.keyPairName,
+                        PlacementGroup: placementGroup.ref
+                    }
                 }
-            });
+            );
 
             instanceResource.node.addDependency(placementGroup);
         });
@@ -521,30 +560,42 @@ echo "EC2 Hunting setup completed at $(date)"
     }
 
     /**
-     * Get the default set of instance types for latency hunting
-     * @returns Array of instance type strings
+     * Get the default set of instances for latency hunting
+     * @returns Array of InstanceConfig with unique IDs
      */
-    protected getDefaultInstanceTypes(): string[] {
+    protected getDefaultInstances(): InstanceConfig[] {
         return [
             // Current generation - Intel
-            // 'c8i.4xlarge',
-             'c7i.4xlarge',
-             'c6i.4xlarge',
-            // 'c5.4xlarge',
-            // 'c4.4xlarge',
-            // 'c3.4xlarge',
-            // 'c1.4xlarge',
-
-            // //   Current generation - AMD
-            // 'c8a.4xlarge',
-             'c7a.4xlarge',
-            // 'c6a.4xlarge',
-            // 'c5a.4xlarge',
-
-            // //   Current generation - Graviton ARM
-             'c8g.4xlarge',
-            // 'c7g.4xlarge',
-            // 'c6g.4xlarge',
+            { id: 'intel-c7i-1', instanceType: 'c7i.4xlarge' },
+            { id: 'intel-c7i-2', instanceType: 'c7i.4xlarge' },
+            { id: 'intel-c7i-3', instanceType: 'c7i.4xlarge' },
+            { id: 'intel-c6i-1', instanceType: 'c6i.4xlarge' },
+            // Current generation - Graviton ARM
+            { id: 'arm-c8g-1', instanceType: 'c8g.4xlarge' },
+    //   'c8i.xlarge','c7i.xlarge','c6i.xlarge','c6in.xlarge','c5.xlarge','c5n.xlarge','c5d.xlarge',   
+    //   // M family - General purpose Intel
+    //   'm8i.xlarge','m7i.xlarge','m6i.xlarge','m6in.xlarge','m5.xlarge','m5n.xlarge','m5d.xlarge','m5dn.xlarge',     
+    //   // R family - Memory optimized Intel
+    //   'r8i.xlarge','r7i.xlarge','r7iz.xlarge','r6i.xlarge','r6in.xlarge','r5.xlarge','r5n.xlarge','r5d.xlarge','r5dn.xlarge', 
+    //   // D family - Dense storage Intel
+    //   'd3.xlarge','d3en.xlarge',     
+    //   // T family - Burstable Intel
+    //   't3.xlarge',       
+    //   // ===== CURRENT GENERATION - AMD x86 =====
+    //   // C family - Compute optimized AMD
+    //   'c8a.xlarge','c7a.xlarge','c6a.xlarge','c5a.xlarge','c5ad.xlarge',     
+    //   // M family - General purpose AMD
+    //   'm8a.xlarge','m7a.xlarge','m6a.xlarge','m5a.xlarge','m5ad.xlarge',    
+    //   // R family - Memory optimized AMD
+    //   'r8a.xlarge','r7a.xlarge','r6a.xlarge','r5a.xlarge','r5ad.xlarge',     
+    //   // ===== CURRENT GENERATION - AWS GRAVITON ARM =====
+    //   // C family - Compute optimized Graviton
+    //   'c8g.xlarge','c7g.xlarge','c7gn.xlarge','c6g.xlarge','c6gd.xlarge',     
+    //   // M family - General purpose Graviton
+    //   'm8g.xlarge', 'm7g.xlarge', 'm6g.xlarge', 'm6gd.xlarge',     
+    //   // R family - Memory optimized Graviton
+    //   'r8g.xlarge',  'r7g.xlarge',  'r6g.xlarge',  'r6gd.xlarge',     
+    //   'i8g.xlarge','im4gn.xlarge',    
         ];
     }
 }

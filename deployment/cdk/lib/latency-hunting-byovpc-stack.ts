@@ -8,7 +8,7 @@ import {
   KeyPair
 } from 'aws-cdk-lib/aws-ec2';
 import { RemovalPolicy } from 'aws-cdk-lib';
-import { BaseLatencyHuntingStack, BaseLatencyHuntingStackProps } from './base-latency-hunting-stack';
+import { BaseLatencyHuntingStack, BaseLatencyHuntingStackProps, InstanceConfig } from './base-latency-hunting-stack';
 
 export interface LatencyHuntingBYOVPCStackProps extends BaseLatencyHuntingStackProps {
   vpcId: string;
@@ -39,8 +39,8 @@ export class LatencyHuntingBYOVPCStack extends BaseLatencyHuntingStack {
       throw new Error('keyPairName is required for BYOVPC stack');
     }
 
-    // Define diverse instance types (same as base class default)
-    const instanceTypes = this.getDefaultInstanceTypes();
+    // Use default instances from base class
+    const instances = this.getDefaultInstances();
 
     // Import existing VPC
     const vpc = Vpc.fromLookup(this, 'ExistingVpc', {
@@ -87,7 +87,7 @@ export class LatencyHuntingBYOVPCStack extends BaseLatencyHuntingStack {
 
     // Create instances using base class method
     this.createInstances(
-      instanceTypes,
+      instances,
       vpc,
       securityGroup,
       keyPair,
@@ -96,7 +96,7 @@ export class LatencyHuntingBYOVPCStack extends BaseLatencyHuntingStack {
 
     // Add outputs using base class method
     this.addCommonOutputs(
-      instanceTypes,
+      instances.map(i => i.instanceType),
       props.vpcId,
       props.subnetId,
       securityGroup.securityGroupId

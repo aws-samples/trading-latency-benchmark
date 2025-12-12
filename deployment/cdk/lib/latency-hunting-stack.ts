@@ -8,7 +8,7 @@ import {
   KeyPair
 } from 'aws-cdk-lib/aws-ec2';
 import { RemovalPolicy } from 'aws-cdk-lib';
-import { BaseLatencyHuntingStack, BaseLatencyHuntingStackProps } from './base-latency-hunting-stack';
+import { BaseLatencyHuntingStack, BaseLatencyHuntingStackProps, InstanceConfig } from './base-latency-hunting-stack';
 
 export interface LatencyHuntingStackProps extends BaseLatencyHuntingStackProps {
   keyPairName?: string;
@@ -31,97 +31,8 @@ export class LatencyHuntingStack extends BaseLatencyHuntingStack {
     const vpcCidr = props?.vpcCidr || '10.100.0.0/16';  // Default non-standard CIDR
     const vpcId = props?.vpcId;
 
-    // Define diverse, low-cost instance types to maximize network spine coverage
-    // Includes current and previous generation instances across Intel, AMD, and ARM architectures
-    // Excludes: GPU/accelerated, very large memory (U/X/z1d), HPC, Mac, and metal instances
-    const instanceTypes: string[] = [
-      // ===== CURRENT GENERATION - INTEL x86 =====
-      // C family - Compute optimized Intel
-      'c8i.xlarge',      // 8th gen Intel (latest)
-      'c7i.xlarge',      // 7th gen Intel
-      'c6i.xlarge',      // 6th gen Intel
-      'c6in.xlarge',     // 6th gen Intel network optimized (100 Gbps)
-      'c5.xlarge',       // 5th gen Intel
-      'c5n.xlarge',      // 5th gen Intel network optimized (100 Gbps)
-      'c5d.xlarge',      // 5th gen Intel with local NVMe
-      
-      // M family - General purpose Intel
-      'm8i.xlarge',      // 8th gen Intel (latest)
-      'm7i.xlarge',      // 7th gen Intel
-      'm6i.xlarge',      // 6th gen Intel
-      'm6in.xlarge',     // 6th gen Intel network optimized
-      'm5.xlarge',       // 5th gen Intel
-      'm5n.xlarge',      // 5th gen Intel network optimized
-      'm5d.xlarge',      // 5th gen Intel with local NVMe
-      'm5dn.xlarge',     // 5th gen Intel NVMe + network optimized
-      
-      // R family - Memory optimized Intel
-      'r8i.xlarge',      // 8th gen Intel memory (latest)
-      'r7i.xlarge',      // 7th gen Intel memory
-      'r7iz.xlarge',     // 7th gen Intel memory high freq
-      'r6i.xlarge',      // 6th gen Intel memory
-      'r6in.xlarge',     // 6th gen Intel memory network optimized
-      'r5.xlarge',       // 5th gen Intel memory
-      'r5n.xlarge',      // 5th gen Intel memory network optimized
-      'r5d.xlarge',      // 5th gen Intel memory with NVMe
-      'r5dn.xlarge',     // 5th gen Intel memory NVMe + network
-      
-  
-      // D family - Dense storage Intel
-      'd3.xlarge',       // 3rd gen dense storage
-      'd3en.xlarge',     // 3rd gen dense storage enhanced networking
-      
-      // T family - Burstable Intel
-      't3.xlarge',       // 3rd gen Intel burstable (CPG supported)
-      
-      // ===== CURRENT GENERATION - AMD x86 =====
-      
-      // C family - Compute optimized AMD
-      'c8a.xlarge',      // 8th gen AMD (latest)
-      'c7a.xlarge',      // 7th gen AMD
-      'c6a.xlarge',      // 6th gen AMD
-      'c5a.xlarge',      // 5th gen AMD
-      'c5ad.xlarge',     // 5th gen AMD with local NVMe
-      
-      // M family - General purpose AMD
-      'm8a.xlarge',      // 8th gen AMD (latest)
-      'm7a.xlarge',      // 7th gen AMD
-      'm6a.xlarge',      // 6th gen AMD
-      'm5a.xlarge',      // 5th gen AMD
-      'm5ad.xlarge',     // 5th gen AMD with local NVMe
-      
-      // R family - Memory optimized AMD
-      'r8a.xlarge',      // 8th gen AMD memory (latest)
-      'r7a.xlarge',      // 7th gen AMD memory
-      'r6a.xlarge',      // 6th gen AMD memory
-      'r5a.xlarge',      // 5th gen AMD memory
-      'r5ad.xlarge',     // 5th gen AMD memory with NVMe
-      
-      
-      // ===== CURRENT GENERATION - AWS GRAVITON ARM =====
-      
-      // C family - Compute optimized Graviton
-      'c8g.xlarge',      // 8th gen Graviton4 (latest ARM)
-      'c7g.xlarge',      // 7th gen Graviton3
-      'c7gn.xlarge',     // 7th gen Graviton3 network (200 Gbps!)
-      'c6g.xlarge',      // 6th gen Graviton2
-      'c6gd.xlarge',     // 6th gen Graviton2 with local NVMe
-      
-      // M family - General purpose Graviton
-      'm8g.xlarge',      // 8th gen Graviton4 (latest ARM)
-      'm7g.xlarge',      // 7th gen Graviton3
-      'm6g.xlarge',      // 6th gen Graviton2
-      'm6gd.xlarge',     // 6th gen Graviton2 with local NVMe
-      
-      // R family - Memory optimized Graviton
-      'r8g.xlarge',      // 8th gen Graviton4 memory (latest ARM)
-      'r7g.xlarge',      // 7th gen Graviton3 memory
-      'r6g.xlarge',      // 6th gen Graviton2 memory
-      'r6gd.xlarge',     // 6th gen Graviton2 memory with NVMe
-      
-      'i8g.xlarge',      // 8th gen Graviton4 storage (latest)
-      'im4gn.xlarge',    // 4th gen Graviton2 memory + storage
-    ];
+    // Get instances from overridden method
+    const instances = this.getDefaultInstances();
 
     // Use existing VPC or create new one
     let vpc: cdk.aws_ec2.IVpc;
@@ -236,7 +147,7 @@ export class LatencyHuntingStack extends BaseLatencyHuntingStack {
 
     // Create instances using base class method
     this.createInstances(
-      instanceTypes,
+      instances,
       vpc,
       securityGroup,
       keyPair,
@@ -245,7 +156,7 @@ export class LatencyHuntingStack extends BaseLatencyHuntingStack {
 
     // Add outputs using base class method
     this.addCommonOutputs(
-      instanceTypes,
+      instances.map(i => i.instanceType),
       vpc.vpcId,
       subnetId,
       securityGroup.securityGroupId
