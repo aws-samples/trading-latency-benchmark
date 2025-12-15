@@ -366,6 +366,7 @@ def handler(event, context):
     # Create request
     props = event['ResourceProperties']
     instance_type = props.get('InstanceType', 'unknown')
+    instance_identifier = props.get('InstanceId', instance_type)  # Use ID if provided, fallback to type
     
     try:
         subnet_id = props['SubnetId']
@@ -441,7 +442,7 @@ echo "EC2 Hunting setup completed at $(date)"
             'TagSpecifications': [{
                 'ResourceType': 'instance',
                 'Tags': [
-                    {'Key': 'Name', 'Value': f'Latency-Hunting-Probe-{instance_type}'},
+                    {'Key': 'Name', 'Value': f'Latency-Hunting-Probe-{instance_identifier}'},
                     {'Key': 'Role', 'Value': 'hunting-probe'},
                     {'Key': 'InstanceType', 'Value': instance_type},
                     {'Key': 'Architecture', 'Value': 'latency-hunting'},
@@ -630,6 +631,7 @@ echo "EC2 Hunting setup completed at $(date)"
 
             // Prepare custom resource properties
             const properties: { [key: string]: any } = {
+                InstanceId: instance.id,  // Pass instance ID for unique naming
                 InstanceType: instance.instanceType,
                 SubnetId: subnetId,
                 SecurityGroupId: securityGroup.securityGroupId,
@@ -709,12 +711,20 @@ echo "EC2 Hunting setup completed at $(date)"
     protected getDefaultInstances(): InstanceConfig[] {
         return [
             // Current generation - Intel
-            { id: 'intel-c7i-1', instanceType: 'c7i.4xlarge' },
-            { id: 'intel-c7i-2', instanceType: 'c7i.4xlarge' },
-            { id: 'intel-c7i-3', instanceType: 'c7i.4xlarge' },
-            { id: 'intel-c6i-1', instanceType: 'c6i.4xlarge' },
+            { id: 'intel-c7i-1', instanceType: 'c7i.xlarge' },
+            { id: 'intel-c7i-2', instanceType: 'c7i.xlarge' },
+            { id: 'intel-c7i-3', instanceType: 'c7i.xlarge' },
+            { id: 'intel-c6i-1', instanceType: 'c6i.xlarge' },
+            { id: 'intel-c6i-2', instanceType: 'c6i.xlarge' },
+            { id: 'intel-c6i-3', instanceType: 'c6i.xlarge' },
             // Current generation - Graviton ARM
-            { id: 'arm-c8g-1', instanceType: 'c8g.4xlarge' },
+            { id: 'arm-c8g-1', instanceType: 'c8g.xlarge' },
+            { id: 'arm-c8g-2', instanceType: 'c8g.xlarge' },
+            { id: 'arm-c8g-3', instanceType: 'c8g.xlarge' },
+            { id: 'arm-c8g-4', instanceType: 'c8g.xlarge' },
+            { id: 'arm-c8g-5', instanceType: 'c8g.xlarge' },
+            { id: 'arm-c8g-6', instanceType: 'c8g.xlarge' },
+            { id: 'arm-c8g-7', instanceType: 'c8g.xlarge' },
 
             // Example with Elastic IP specified in config:
             // { id: 'intel-c7i-1', instanceType: 'c7i.4xlarge', elasticIpAllocationId: 'eipalloc-12345678' },

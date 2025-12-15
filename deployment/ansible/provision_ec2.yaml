@@ -183,7 +183,7 @@
       mvn clean install
       cp ./target/ExchangeFlow-1.0-SNAPSHOT.jar /home/ec2-user/
     environment:
-      JAVA_HOME: /usr/lib/jvm/java-17-amazon-corretto
+  #     JAVA_HOME: /usr/lib/jvm/java-17-amazon-corretto
       
   - name: Create mock-trading-server directory
     file:
