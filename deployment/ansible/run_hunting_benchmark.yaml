@@ -4,10 +4,9 @@
 ---
 - name: Run latency benchmark on EC2 hunting instances
   hosts: aws_ec2
-  strategy: free  # Each host runs independently for parallel execution
   gather_facts: yes
   vars:
-    target_host: "localhost"
+    target_host: "10.100.0.82"
     warmup_count: 10
     test_size: 100  # Number of test iterations before exiting gracefully
     test_mode: "payload-ping"  # Options: latency-test, ping-latency, payload-ping
@@ -107,7 +106,14 @@
       echo "Note: Benchmark will exit automatically after reaching TEST_SIZE"
       echo ""
     become: no
-    
+  - name: stop exchange client
+    become: true
+    become_user: root
+    shell: |
+        ps -aux | grep "java" | grep -v "grep" | awk '{print $2}' | while read -r pid ; do
+          echo "Shutting down PID: $pid"
+          kill -9 $pid
+        done
   - name: Clean up existing histogram and CSV files
     shell: |
       cd {{ benchmark_dir }}
