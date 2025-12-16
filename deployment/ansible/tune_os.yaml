@@ -472,7 +472,7 @@
       ansible.builtin.lineinfile:
         path: /etc/default/grub
         regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
-        line: 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8 nvme_core.io_timeout=4294967295 rd.emergency=poweroff rd.shell=0 selinux=1 security=selinux quiet transparent_hugepage=never audit=0 nmi_watchdog=0 nohz=on nosoftlockup skew_tick=1 acpi_irq_nobalance isolcpus={{ isolated_cores }} nohz_full={{ isolated_cores }} rcu_nocbs={{ isolated_cores }}"'
+        line: 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8 nvme_core.io_timeout=4294967295 rd.emergency=poweroff rd.shell=0 selinux=1 security=selinux quiet audit=0 nmi_watchdog=0 nohz=on nosoftlockup skew_tick=1 acpi_irq_nobalance isolcpus={{ isolated_cores }} nohz_full={{ isolated_cores }} rcu_nocbs={{ isolated_cores }}"'
       register: grub_updated_graviton
       when: is_graviton
 
@@ -520,13 +520,20 @@
       register: cpu_partitioning
 
     # ==========================================
-    # MEMORY TUNING
+    # MEMORY TUNING - ARCHITECTURE SPECIFIC
     # ==========================================
-    - name: Disable Transparent Huge Pages (apply immediately)
+    # x86: Disable THP (traditional HFT recommendation)
+    # Graviton: Enable THP with madvise (AWS Graviton best practice for TLB performance)
+    - name: Configure Transparent Huge Pages based on architecture
       ansible.builtin.shell: |
         if [ -d /sys/kernel/mm/transparent_hugepage ]; then
+          {% if is_graviton %}
+          echo madvise > /sys/kernel/mm/transparent_hugepage/enabled
+          echo madvise > /sys/kernel/mm/transparent_hugepage/defrag
+          {% else %}
           echo never > /sys/kernel/mm/transparent_hugepage/enabled
           echo never > /sys/kernel/mm/transparent_hugepage/defrag
+          {% endif %}
           if [ -f /sys/kernel/mm/transparent_hugepage/khugepaged/defrag ]; then
             echo 0 > /sys/kernel/mm/transparent_hugepage/khugepaged/defrag
           fi
@@ -534,12 +541,12 @@
       changed_when: true
       ignore_errors: yes
 
-    - name: Create THP disable service
+    - name: Create THP configuration service (x86 - disable)
       ansible.builtin.copy:
-        dest: /etc/systemd/system/disable-thp.service
+        dest: /etc/systemd/system/configure-thp.service
         content: |
           [Unit]
-          Description=Disable Transparent Huge Pages
+          Description=Configure Transparent Huge Pages
           DefaultDependencies=no
           After=local-fs.target
           ConditionPathExists=/sys/kernel/mm/transparent_hugepage
@@ -552,10 +559,31 @@
           [Install]
           WantedBy=sysinit.target
         mode: '0644'
+      when: is_x86
 
-    - name: Enable THP disable service
+    - name: Create THP configuration service (Graviton - enable madvise)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/configure-thp.service
+        content: |
+          [Unit]
+          Description=Configure Transparent Huge Pages
+          DefaultDependencies=no
+          After=local-fs.target
+          ConditionPathExists=/sys/kernel/mm/transparent_hugepage
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/sh -c "if [ -d /sys/kernel/mm/transparent_hugepage ]; then echo madvise > /sys/kernel/mm/transparent_hugepage/enabled; echo madvise > /sys/kernel/mm/transparent_hugepage/defrag; if [ -f /sys/kernel/mm/transparent_hugepage/khugepaged/defrag ]; then echo 0 > /sys/kernel/mm/transparent_hugepage/khugepaged/defrag; fi; fi"
+          RemainAfterExit=yes
+          
+          [Install]
+          WantedBy=sysinit.target
+        mode: '0644'
+      when: is_graviton
+
+    - name: Enable THP configuration service
       ansible.builtin.systemd:
-        name: disable-thp.service
+        name: configure-thp.service
         enabled: yes
         daemon_reload: yes
 
@@ -775,8 +803,8 @@
             # Disable all offloading features as per guidelines
             /sbin/ethtool -K {{ item }} rx off tx off sg off gso off gro off || true
             
-            # Disable adaptive interrupt coalescing, set static moderation
-            /sbin/ethtool -C {{ item }} adaptive-rx off rx-usecs 1 tx-usecs 1 || true
+            # Disable adaptive interrupt coalescing per ENA best practices
+            /sbin/ethtool -C {{ item }} adaptive-rx off rx-usecs 0 tx-usecs 0 || true
             
             # Increase ring buffer sizes
             /sbin/ethtool -G {{ item }} rx 4096 tx 4096 || true
@@ -1057,36 +1085,23 @@
     - name: Gather service facts
       ansible.builtin.service_facts:
 
-    - name: Stop and disable irqbalance service
+    - name: Configure irqbalance to avoid isolated cores (ENA best practice)
+      ansible.builtin.copy:
+        dest: /etc/sysconfig/irqbalance
+        content: |
+          # ENA best practice: Keep irqbalance enabled for CPU load-aware IRQ distribution
+          # But ban isolated cores from IRQ handling
+          IRQBALANCE_BANNED_CPUS={{ '%x' | format((2 ** (effective_cores|int)) - 1 - ((2 ** (housekeeping_core_count|int)) - 1)) }}
+        mode: '0644'
+      register: irqbalance_config
+
+    - name: Restart irqbalance service with new configuration
       ansible.builtin.systemd:
         name: irqbalance
-        state: stopped
-        enabled: no
-      ignore_errors: yes
-
-    - name: Create systemd unit to disable irqbalance on boot
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/disable-irqbalance.service
-        content: |
-          [Unit]
-          Description=Disable irqbalance service
-          Before=irqbalance.service
-          
-          [Service]
-          Type=oneshot
-          ExecStart=/bin/systemctl stop irqbalance.service
-          ExecStart=/bin/systemctl mask irqbalance.service
-          RemainAfterExit=yes
-          
-          [Install]
-          WantedBy=multi-user.target
-        mode: '0644'
-
-    - name: Enable irqbalance disable service
-      ansible.builtin.systemd:
-        name: disable-irqbalance.service
+        state: restarted
         enabled: yes
-        daemon_reload: yes
+      when: irqbalance_config.changed
+      ignore_errors: yes
 
     - name: Stop and disable amazon-ssm-agent service
       ansible.builtin.systemd:
@@ -1152,10 +1167,10 @@
       ansible.builtin.debug:
         msg:
           - "✓ Services optimized"
-          - "  - irqbalance: disabled"
+          - "  - irqbalance: configured to exclude isolated cores (ENA best practice)"
           - "  - amazon-ssm-agent: disabled"
           - "  - iptables: disabled"
-          - "  - Services will remain disabled on reboot"
+          - "  - Services will remain configured on reboot"
 
     - name: Configure ultra-low-latency tuned profile
       ansible.builtin.copy:
@@ -1310,10 +1325,10 @@
             fi
           done
           
-          # Disable THP explicitly
+          # Enable THP with madvise for better TLB performance on Graviton
           if [ -d /sys/kernel/mm/transparent_hugepage ]; then
-            echo never > /sys/kernel/mm/transparent_hugepage/enabled
-            echo never > /sys/kernel/mm/transparent_hugepage/defrag
+            echo madvise > /sys/kernel/mm/transparent_hugepage/enabled
+            echo madvise > /sys/kernel/mm/transparent_hugepage/defrag
           fi
           
           exit 0
