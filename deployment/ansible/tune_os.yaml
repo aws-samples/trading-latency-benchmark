@@ -7,8 +7,13 @@
   
   vars:
     backup_dir: "/root/system_tuning_backup_{{ ansible_date_time.date }}"
-    busy_poll_value: 50 # Adjust between 25-100
-    busy_read_value: 50 # Adjust between 25-100
+    # Architecture-specific busy polling values
+    # x86 (Intel/AMD) can handle aggressive polling better due to active cooling
+    # Graviton should use lower values to avoid thermal throttling
+    busy_poll_value_x86: 50
+    busy_read_value_x86: 50
+    busy_poll_value_graviton: 25
+    busy_read_value_graviton: 25
   
   tasks:
     # ==========================================
@@ -41,6 +46,11 @@
         is_amd: false
       when: is_graviton
 
+    - name: Set architecture-specific busy polling values
+      ansible.builtin.set_fact:
+        busy_poll_value: "{{ busy_poll_value_graviton if is_graviton else busy_poll_value_x86 }}"
+        busy_read_value: "{{ busy_read_value_graviton if is_graviton else busy_read_value_x86 }}"
+
     - name: Display architecture information
       ansible.builtin.debug:
         msg:
@@ -50,6 +60,7 @@
           - "Is AMD: {{ is_amd }}"
           - "Is Graviton (ARM64): {{ is_graviton }}"
           - "CPU Model: {{ ansible_processor[2] | default(ansible_processor[0]) }}"
+          - "Busy polling values: poll={{ busy_poll_value }}, read={{ busy_read_value }}"
 
     - name: Create backup directory
       file:
@@ -461,7 +472,7 @@
       ansible.builtin.lineinfile:
         path: /etc/default/grub
         regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
-        line: 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8 nvme_core.io_timeout=4294967295 rd.emergency=poweroff rd.shell=0 selinux=1 security=selinux quiet transparent_hugepage=never audit=0 nmi_watchdog=0 nohz=on nosoftlockup cpuidle.off=1 skew_tick=1 acpi_irq_nobalance idle=poll isolcpus={{ isolated_cores }} nohz_full={{ isolated_cores }} rcu_nocbs={{ isolated_cores }}"'
+        line: 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8 nvme_core.io_timeout=4294967295 rd.emergency=poweroff rd.shell=0 selinux=1 security=selinux quiet transparent_hugepage=never audit=0 nmi_watchdog=0 nohz=on nosoftlockup skew_tick=1 acpi_irq_nobalance isolcpus={{ isolated_cores }} nohz_full={{ isolated_cores }} rcu_nocbs={{ isolated_cores }}"'
       register: grub_updated_graviton
       when: is_graviton
 
