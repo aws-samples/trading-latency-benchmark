@@ -1,5 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
-import { Vpc, SubnetType, Instance, InstanceType, MachineImage, SecurityGroup, Port, Peer, BlockDeviceVolume, KeyPair } from 'aws-cdk-lib/aws-ec2';
+import { Vpc, SubnetType, Instance, InstanceType, MachineImage, SecurityGroup, Port, Peer, BlockDeviceVolume, KeyPair, AmazonLinuxCpuType } from 'aws-cdk-lib/aws-ec2';
 import { RemovalPolicy } from 'aws-cdk-lib';
 
 export interface TradingBenchmarkAmiBuilderStackProps extends cdk.StackProps {
@@ -26,7 +26,7 @@ export class TradingBenchmarkAmiBuilderStack extends cdk.Stack {
         // Create a minimal VPC for AMI building
         const vpc = new Vpc(this, 'AmiBuilderVPC', {
             natGateways: 0, // No NAT gateway needed - use public subnet
-            availabilityZones: ['us-east-1a'],
+            maxAzs: 1, // Use only first AZ in the region
             subnetConfiguration: [
                 {
                     cidrMask: 24,
@@ -56,11 +56,6 @@ export class TradingBenchmarkAmiBuilderStack extends cdk.Stack {
             'Allow SSH access for configuration'
         );
 
-        // Use base AMI if specified, otherwise use latest Amazon Linux 2023
-        const ami = props?.baseAmi
-            ? MachineImage.genericLinux({ 'us-east-1': props.baseAmi })
-            : MachineImage.latestAmazonLinux2023();
-
         // Import existing key pair
         const keyPairName = props?.keyPairName || 'virginia';
         const keyPair = KeyPair.fromKeyPairName(this, 'ImportedKeyPair', keyPairName);
@@ -74,6 +69,19 @@ export class TradingBenchmarkAmiBuilderStack extends cdk.Stack {
             instanceTypeObj = new InstanceType('c7i.4xlarge');
         }
 
+        // Detect architecture from instance type and select matching AMI
+        // ARM64 instance types: c8g, c7g, c6g, m8g, m7g, m6g, r8g, r7g, r6g, etc.
+        const isArm64 = instanceType.match(/^[a-z][0-9]+g[a-z]?\./i) !== null;
+        
+        // Use base AMI if specified, otherwise use latest Amazon Linux 2023 with matching architecture
+        const ami = props?.baseAmi
+            ? MachineImage.genericLinux({ [this.region]: props.baseAmi })
+            : MachineImage.latestAmazonLinux2023({
+                cpuType: isArm64 ? AmazonLinuxCpuType.ARM_64 : AmazonLinuxCpuType.X86_64
+            });
+        
+        console.log(`Instance type: ${instanceType}, Detected architecture: ${isArm64 ? 'ARM64' : 'x86_64'}`);
+
         // Create single instance for AMI building
         this.instance = new Instance(this, 'AmiBuilderInstance', {
             vpc,
@@ -81,13 +89,12 @@ export class TradingBenchmarkAmiBuilderStack extends cdk.Stack {
             machineImage: ami,
             securityGroup,
             vpcSubnets: {
-                availabilityZones: ['us-east-1a'],
                 subnetType: SubnetType.PUBLIC
             },
             keyPair,
             blockDevices: [{
                 deviceName: "/dev/xvda",
-                volume: BlockDeviceVolume.ebs(512, {
+                volume: BlockDeviceVolume.ebs(30, {
                     deleteOnTermination: true
                 })
             }]

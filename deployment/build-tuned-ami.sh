@@ -11,7 +11,7 @@ set -e  # Exit on error
 STACK_NAME="TradingBenchmarkAmiBuilderStack"
 INSTANCE_TYPE="${INSTANCE_TYPE:-c7i.4xlarge}"
 SSH_KEY_FILE="${SSH_KEY_FILE:-~/.ssh/tlb-demo.pem}"
-SSH_KEY_NAME="tlb-demo"
+SSH_KEY_NAME=""  # Will be derived from SSH_KEY_FILE
 REGION="${AWS_REGION:-us-east-1}"
 AMI_NAME_PREFIX="trading-benchmark-tuned"
 CLEANUP="${CLEANUP:-true}"
@@ -131,12 +131,17 @@ if [ ! -d "node_modules" ]; then
     npm install
 fi
 
+# Set AWS region environment variables for CDK
+export AWS_DEFAULT_REGION="$REGION"
+export CDK_DEFAULT_REGION="$REGION"
+
 # Deploy the AMI builder stack
-echo "Deploying AMI builder stack..."
+echo "Deploying AMI builder stack to region: $REGION"
 cdk deploy $STACK_NAME \
     --context deploymentType=ami-builder \
     --context instanceType="$INSTANCE_TYPE" \
     --context keyPairName="$SSH_KEY_NAME" \
+    --context region="$REGION" \
     --require-approval never \
     --outputs-file ./ami-builder-outputs.json
 
@@ -179,51 +184,46 @@ done
 
 echo -e "${GREEN}Instance is ready and SSH is accessible${NC}"
 
-# Step 3: Create temporary Ansible inventory
-echo -e "\n${YELLOW}[Step 3/7] Creating Ansible inventory...${NC}"
-TEMP_INVENTORY=$(mktemp)
-cat > "$TEMP_INVENTORY" << EOF
-[aws_ec2]
-$INSTANCE_IP ansible_user=ec2-user ansible_ssh_private_key_file=$SSH_KEY_FILE ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-EOF
-
-echo "Temporary inventory created at: $TEMP_INVENTORY"
-
-# Step 4: Run OS tuning playbook
-echo -e "\n${YELLOW}[Step 4/7] Running OS tuning playbook...${NC}"
+# Step 3: Run OS tuning playbook using dynamic inventory
+echo -e "\n${YELLOW}[Step 3/7] Running OS tuning playbook...${NC}"
 echo "This will take several minutes and will reboot the instance..."
 cd "$ANSIBLE_DIR"
 
-# Check if instance is in dynamic inventory
-# The inventory hostname is based on the Name tag
+# Set AWS region for dynamic inventory lookup
+export AWS_REGION="$REGION"
+
+# Verify instance is discoverable in dynamic inventory
 INVENTORY_HOSTNAME="Trading-Benchmark-AMI-Builder-Instance"
-echo "Verifying instance is discoverable in Ansible inventory..."
+echo "Verifying instance is discoverable in dynamic inventory (region: $REGION)..."
 echo "Looking for host: $INVENTORY_HOSTNAME"
-ANSIBLE_INVENTORY_CHECK=$(ansible-inventory -i ./inventory/inventory.aws_ec2.yml --list 2>&1 | grep -c "$INVENTORY_HOSTNAME" || true)
+ANSIBLE_INVENTORY_CHECK=$(ansible-inventory -i ./inventory/ami-builder-inventory.aws_ec2.yml --list 2>&1 | grep -c "$INVENTORY_HOSTNAME" || true)
 if [ "$ANSIBLE_INVENTORY_CHECK" -eq 0 ]; then
     echo -e "${RED}Error: Host '$INVENTORY_HOSTNAME' not found in dynamic inventory${NC}"
-    echo -e "${YELLOW}Make sure the instance has the tag 'Name: Trading-Benchmark-AMI-Builder-Instance'${NC}"
-    echo -e "${YELLOW}Checking current inventory...${NC}"
-    ansible-inventory -i ./inventory/inventory.aws_ec2.yml --graph
-    rm -f "$TEMP_INVENTORY"
+    echo "Checking what's in the inventory..."
+    ansible-inventory -i ./inventory/ami-builder-inventory.aws_ec2.yml --graph
+    echo ""
+    echo -e "${YELLOW}Troubleshooting: Ensure instance has these tags:${NC}"
+    echo "  - Role: ami-builder"
+    echo "  - Purpose: os-tuned-ami"
+    echo "  - Name: Trading-Benchmark-AMI-Builder-Instance"
     exit 1
 fi
-echo -e "${GREEN}Host '$INVENTORY_HOSTNAME' found in inventory (IP: $INSTANCE_IP)${NC}"
+echo -e "${GREEN}Host '$INVENTORY_HOSTNAME' found in inventory${NC}"
 
-# Run the tune_os.yaml playbook using dynamic inventory
+# Run the playbook using the AMI builder dynamic inventory
 echo "Running OS tuning playbook on host: $INVENTORY_HOSTNAME"
 ANSIBLE_OUTPUT=$(mktemp)
 ansible-playbook tune_os.yaml \
-    -i ./inventory/inventory.aws_ec2.yml \
+    -i ./inventory/ami-builder-inventory.aws_ec2.yml \
     --key-file "$SSH_KEY_FILE" \
-    -e "ansible_host_key_checking=False" \
+    -e 'ansible_host_key_checking=False' \
     --limit "$INVENTORY_HOSTNAME" 2>&1 | tee "$ANSIBLE_OUTPUT"
 
 ANSIBLE_EXIT_CODE=${PIPESTATUS[0]}
 if [ $ANSIBLE_EXIT_CODE -ne 0 ]; then
     echo -e "${RED}Error: Ansible playbook failed with exit code $ANSIBLE_EXIT_CODE${NC}"
     echo "Check output above for details"
-    rm -f "$TEMP_INVENTORY" "$ANSIBLE_OUTPUT"
+    rm -f "$ANSIBLE_OUTPUT"
     exit 1
 fi
 
@@ -233,15 +233,15 @@ if [ "$HOSTS_CHANGED" -eq 0 ]; then
     echo -e "${RED}Error: Ansible playbook did not run on any hosts${NC}"
     echo "Playbook output:"
     cat "$ANSIBLE_OUTPUT"
-    rm -f "$TEMP_INVENTORY" "$ANSIBLE_OUTPUT"
+    rm -f "$ANSIBLE_OUTPUT"
     exit 1
 fi
 
 rm -f "$ANSIBLE_OUTPUT"
 echo -e "${GREEN}OS tuning completed successfully${NC}"
 
-# Step 5: Wait for instance to be back online after reboot
-echo -e "\n${YELLOW}[Step 5/7] Waiting for instance to come back online after reboot...${NC}"
+# Step 4: Wait for instance to be back online after reboot
+echo -e "\n${YELLOW}[Step 4/7] Waiting for instance to come back online after reboot...${NC}"
 sleep 30  # Give it some time to start rebooting
 
 ELAPSED=0
@@ -253,7 +253,6 @@ while ! ssh -i "$SSH_KEY_FILE" \
 
     if [ $ELAPSED -ge $MAX_WAIT_TIME ]; then
         echo -e "${RED}Error: Timeout waiting for instance to come back online${NC}"
-        rm -f "$TEMP_INVENTORY"
         exit 1
     fi
 
@@ -290,18 +289,41 @@ echo -e "${GREEN}✓ Tuning report found${NC}"
 echo "Checking tuning markers..."
 VERIFICATION_FAILED=0
 
-# Check THP is disabled
+# Detect architecture on remote instance
+REMOTE_ARCH=$(ssh -i "$SSH_KEY_FILE" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    ec2-user@"$INSTANCE_IP" \
+    "uname -m 2>/dev/null || echo 'unknown'")
+
+IS_ARM64=false
+if [ "$REMOTE_ARCH" = "aarch64" ]; then
+    IS_ARM64=true
+fi
+
+# Check THP configuration (architecture-aware)
 THP_STATUS=$(ssh -i "$SSH_KEY_FILE" \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     ec2-user@"$INSTANCE_IP" \
     "cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo 'error'")
 
-if echo "$THP_STATUS" | grep -q "never"; then
-    echo -e "${GREEN}✓ Transparent Huge Pages disabled${NC}"
+if [ "$IS_ARM64" = true ]; then
+    # Graviton: expect madvise (AWS best practice for better TLB performance)
+    if echo "$THP_STATUS" | grep -q "madvise"; then
+        echo -e "${GREEN}✓ THP configured as 'madvise' (Graviton/ARM64 best practice for TLB performance)${NC}"
+    else
+        echo -e "${YELLOW}⚠ THP status: $THP_STATUS (expected 'madvise' for Graviton)${NC}"
+        VERIFICATION_FAILED=1
+    fi
 else
-    echo -e "${YELLOW}⚠ THP status: $THP_STATUS${NC}"
-    VERIFICATION_FAILED=1
+    # x86: expect never (traditional HFT/trading best practice)
+    if echo "$THP_STATUS" | grep -q "never"; then
+        echo -e "${GREEN}✓ THP disabled (x86 best practice for predictable latency)${NC}"
+    else
+        echo -e "${YELLOW}⚠ THP status: $THP_STATUS (expected 'never' for x86)${NC}"
+        VERIFICATION_FAILED=1
+    fi
 fi
 
 # Check CPU isolation
@@ -338,11 +360,8 @@ fi
 
 echo -e "${GREEN}OS tuning verification completed${NC}"
 
-# Clean up temporary inventory
-rm -f "$TEMP_INVENTORY"
-
-# Step 6: Stop instance and create AMI
-echo -e "\n${YELLOW}[Step 6/7] Stopping instance and creating AMI...${NC}"
+# Step 5: Stop instance and create AMI
+echo -e "\n${YELLOW}[Step 5/7] Stopping instance and creating AMI...${NC}"
 echo "Stopping instance..."
 aws ec2 stop-instances --instance-ids "$INSTANCE_ID" --region "$REGION" > /dev/null
 aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID" --region "$REGION"
@@ -368,9 +387,9 @@ echo "Waiting for AMI to be available (this may take several minutes)..."
 aws ec2 wait image-available --image-ids "$AMI_ID" --region "$REGION"
 echo -e "${GREEN}AMI is now available!${NC}"
 
-# Step 7: Clean up
+# Step 6: Clean up
 if [ "$CLEANUP" == "true" ]; then
-    echo -e "\n${YELLOW}[Step 7/7] Cleaning up resources...${NC}"
+    echo -e "\n${YELLOW}[Step 6/7] Cleaning up resources...${NC}"
 
     # Use CloudFormation to delete stack (more reliable than CDK with version mismatches)
     echo "Destroying CDK stack via CloudFormation..."
@@ -387,7 +406,7 @@ if [ "$CLEANUP" == "true" ]; then
 
     echo -e "${GREEN}Cleanup completed${NC}"
 else
-    echo -e "\n${YELLOW}[Step 7/7] Skipping cleanup (instance will remain running)${NC}"
+    echo -e "\n${YELLOW}[Step 6/7] Skipping cleanup (instance will remain running)${NC}"
     echo "Instance ID: $INSTANCE_ID"
     echo "Instance IP: $INSTANCE_IP"
     echo ""
