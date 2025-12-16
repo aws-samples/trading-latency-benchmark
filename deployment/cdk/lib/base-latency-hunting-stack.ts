@@ -21,6 +21,8 @@ export interface InstanceConfig {
     instanceType: string;
     /** Optional Elastic IP allocation ID to assign to this instance */
     elasticIpAllocationId?: string;
+    /** Optional custom AMI ID to use instead of auto-detecting latest Amazon Linux 2023 */
+    amiId?: string;
 }
 
 export interface BaseLatencyHuntingStackProps extends cdk.StackProps {
@@ -225,43 +227,53 @@ def handler(event, context):
         instance_type = new_props.get('InstanceType', 'unknown')
         stack_id = event.get('StackId', '')
         
-        # Check EIP changes first
-        old_eip = old_props.get('ElasticIpAllocationId', '')
-        new_eip = new_props.get('ElasticIpAllocationId', '')
-        eip_removed = old_eip and not new_eip  # Had EIP before, now it's gone
-        eip_added = not old_eip and new_eip  # No EIP before, now adding one
-        
-        # If PhysicalResourceId is not an instance ID, check if a real instance exists
-        actual_instance_id = None
-        if not physical_resource_id.startswith('i-'):
-            print(f"PhysicalResourceId is not an instance ID (UUID): {physical_resource_id}")
-            print(f"Checking if instance exists with LogicalResourceId: {event.get('LogicalResourceId')}")
+        # Check if this is a failed resource that should be retried
+        if physical_resource_id.startswith('failed-'):
+            print(f"Detected failed resource: {physical_resource_id}")
+            print(f"Will retry launching instance type {instance_type}")
+            # Write state update
+            write_state(instance_type, 'retry-after-failure', '', 
+                       f'Retrying previously failed resource {physical_resource_id}', '', stack_id)
+            # Force replacement to retry
+            needs_replacement = True
+        else:
+            # Check EIP changes first
+            old_eip = old_props.get('ElasticIpAllocationId', '')
+            new_eip = new_props.get('ElasticIpAllocationId', '')
+            eip_removed = old_eip and not new_eip  # Had EIP before, now it's gone
+            eip_added = not old_eip and new_eip  # No EIP before, now adding one
             
-            try:
-                # Search for instance with this LogicalResourceId
-                filters = [
-                    {'Name': 'tag:CloudFormationLogicalId', 'Values': [event.get('LogicalResourceId', 'unknown')]},
-                    {'Name': 'tag:ManagedBy', 'Values': [managed_by_tag]},
-                    {'Name': 'instance-state-name', 'Values': ['pending', 'running']}
-                ]
-                response = ec2.describe_instances(Filters=filters)
+            # If PhysicalResourceId is not an instance ID, check if a real instance exists
+            actual_instance_id = None
+            if not physical_resource_id.startswith('i-'):
+                print(f"PhysicalResourceId is not an instance ID (UUID): {physical_resource_id}")
+                print(f"Checking if instance exists with LogicalResourceId: {event.get('LogicalResourceId')}")
                 
-                if response['Reservations'] and response['Reservations'][0]['Instances']:
-                    actual_instance_id = response['Reservations'][0]['Instances'][0]['InstanceId']
-                    print(f"Found existing instance: {actual_instance_id}")
-                    # Use this as the real physical resource ID
-                    physical_resource_id = actual_instance_id
-            except Exception as e:
-                print(f"Error searching for existing instance: {str(e)}")
-        
-        # Check if properties that require replacement have changed
-        needs_replacement = (
-            (not physical_resource_id.startswith('i-') and not actual_instance_id) or  # Failed launch with no real instance
-            old_props.get('KeyName') != new_props.get('KeyName') or
-            old_props.get('InstanceType') != new_props.get('InstanceType') or
-            old_props.get('PlacementGroup') != new_props.get('PlacementGroup') or
-            eip_removed  # EIP removal requires replacement to get public IP
-        )
+                try:
+                    # Search for instance with this LogicalResourceId
+                    filters = [
+                        {'Name': 'tag:CloudFormationLogicalId', 'Values': [event.get('LogicalResourceId', 'unknown')]},
+                        {'Name': 'tag:ManagedBy', 'Values': [managed_by_tag]},
+                        {'Name': 'instance-state-name', 'Values': ['pending', 'running']}
+                    ]
+                    response = ec2.describe_instances(Filters=filters)
+                    
+                    if response['Reservations'] and response['Reservations'][0]['Instances']:
+                        actual_instance_id = response['Reservations'][0]['Instances'][0]['InstanceId']
+                        print(f"Found existing instance: {actual_instance_id}")
+                        # Use this as the real physical resource ID
+                        physical_resource_id = actual_instance_id
+                except Exception as e:
+                    print(f"Error searching for existing instance: {str(e)}")
+            
+            # Check if properties that require replacement have changed
+            needs_replacement = (
+                (not physical_resource_id.startswith('i-') and not actual_instance_id) or  # Failed launch with no real instance
+                old_props.get('KeyName') != new_props.get('KeyName') or
+                old_props.get('InstanceType') != new_props.get('InstanceType') or
+                old_props.get('PlacementGroup') != new_props.get('PlacementGroup') or
+                eip_removed  # EIP removal requires replacement to get public IP
+            )
         
         if needs_replacement:
             # For replacement, we explicitly terminate old instance and create new one
@@ -378,23 +390,38 @@ def handler(event, context):
         print(f"Adding {delay:.2f}s delay to avoid API rate limiting")
         time.sleep(delay)
         
-        # Detect architecture
-        instance_types_info = ec2.describe_instance_types(InstanceTypes=[instance_type])
-        architecture = instance_types_info['InstanceTypes'][0]['ProcessorInfo']['SupportedArchitectures'][0]
-        print(f"Instance type {instance_type} architecture: {architecture}")
+        # Check if custom AMI is provided
+        ami_id = props.get('AmiId')
         
-        # Get AMI
-        ami_filters = [
-            {'Name': 'name', 'Values': ['al2023-ami-*']},
-            {'Name': 'state', 'Values': ['available']},
-            {'Name': 'architecture', 'Values': [architecture]},
-            {'Name': 'owner-alias', 'Values': ['amazon']}
-        ]
-        images = ec2.describe_images(Filters=ami_filters, Owners=['amazon'])
-        if not images['Images']:
-            raise Exception(f"No AMI found for architecture {architecture}")
-        sorted_images = sorted(images['Images'], key=lambda x: x['CreationDate'], reverse=True)
-        ami_id = sorted_images[0]['ImageId']
+        if ami_id:
+            # Use custom AMI directly
+            print(f"Using provided custom AMI: {ami_id}")
+            # Still detect architecture for logging purposes
+            instance_types_info = ec2.describe_instance_types(InstanceTypes=[instance_type])
+            architecture = instance_types_info['InstanceTypes'][0]['ProcessorInfo']['SupportedArchitectures'][0]
+            print(f"Instance type {instance_type} architecture: {architecture}")
+        else:
+            # Auto-detect latest Amazon Linux 2023 AMI
+            print(f"No custom AMI provided, auto-detecting latest Amazon Linux 2023")
+            
+            # Detect architecture
+            instance_types_info = ec2.describe_instance_types(InstanceTypes=[instance_type])
+            architecture = instance_types_info['InstanceTypes'][0]['ProcessorInfo']['SupportedArchitectures'][0]
+            print(f"Instance type {instance_type} architecture: {architecture}")
+            
+            # Get latest AL2023 AMI for this architecture
+            ami_filters = [
+                {'Name': 'name', 'Values': ['al2023-ami-*']},
+                {'Name': 'state', 'Values': ['available']},
+                {'Name': 'architecture', 'Values': [architecture]},
+                {'Name': 'owner-alias', 'Values': ['amazon']}
+            ]
+            images = ec2.describe_images(Filters=ami_filters, Owners=['amazon'])
+            if not images['Images']:
+                raise Exception(f"No AMI found for architecture {architecture}")
+            sorted_images = sorted(images['Images'], key=lambda x: x['CreationDate'], reverse=True)
+            ami_id = sorted_images[0]['ImageId']
+            print(f"Auto-detected AMI: {ami_id}")
         
         user_data_script = '''#!/bin/bash
 set -e
@@ -430,14 +457,6 @@ echo "EC2 Hunting setup completed at $(date)"
                 'Groups': [security_group_id],
                 'AssociatePublicIpAddress': True
             }],
-            'BlockDeviceMappings': [{
-                'DeviceName': '/dev/xvda',
-                'Ebs': {
-                    'VolumeSize': 30,
-                    'VolumeType': 'gp3',
-                    'DeleteOnTermination': True
-                }
-            }],
             'UserData': user_data_script,
             'TagSpecifications': [{
                 'ResourceType': 'instance',
@@ -452,6 +471,18 @@ echo "EC2 Hunting setup completed at $(date)"
                 ]
             }]
         }
+        
+        # Only add BlockDeviceMappings for auto-detected AMIs
+        # Custom AMIs should use their built-in volume/snapshot configuration
+        if not props.get('AmiId'):
+            run_params['BlockDeviceMappings'] = [{
+                'DeviceName': '/dev/xvda',
+                'Ebs': {
+                    'VolumeSize': 30,
+                    'VolumeType': 'gp3',
+                    'DeleteOnTermination': True
+                }
+            }]
         
         if placement_group:
             run_params['Placement'] = {'GroupName': placement_group}
@@ -639,6 +670,11 @@ echo "EC2 Hunting setup completed at $(date)"
                 PlacementGroup: placementGroup.ref
             };
 
+            // Assign custom AMI if provided
+            if (instance.amiId) {
+                properties.AmiId = instance.amiId;
+            }
+
             // Assign Elastic IP - prioritize instance config, then fall back to array
             if (instance.elasticIpAllocationId) {
                 properties.ElasticIpAllocationId = instance.elasticIpAllocationId;
@@ -707,53 +743,80 @@ echo "EC2 Hunting setup completed at $(date)"
     /**
      * Get the default set of instances for latency hunting
      * @returns Array of InstanceConfig with unique IDs
+     * 
+     * CUSTOM AMI CONFIGURATION:
+     * You can specify custom tuned AMIs per instance. Build AMIs using:
+     *   cd deployment && ./build-tuned-ami.sh --instance-type <type> --ami-name <name>
+     * 
+     * AMI SIZE CLASS MAPPING (based on vCPU count and CPU isolation):
+     *   - Small (4-8 vCPU):    c7i.xlarge, c7i.2xlarge
+     *   - Medium (16-32 vCPU): c7i.4xlarge, c7i.8xlarge  
+     *   - Large (48-96 vCPU):  c7i.12xlarge, c7i.24xlarge
+     *   - XLarge (128-192 vCPU): c7i.48xlarge
+     * 
+     * Build separate AMIs for each architecture (x86_64 vs arm64) and size class for optimal performance.
+     * 
+     * CONFIGURATION EXAMPLES:
+     * 
+     * Example 1: Define AMI IDs and use them
+     *   const x86MediumAmi = 'ami-0123456789abcdef0';
+     *   const armMediumAmi = 'ami-0fedcba9876543210';
+     *   return [
+     *     { id: 'intel-1', instanceType: 'c7i.4xlarge', amiId: x86MediumAmi },
+     *     { id: 'arm-1', instanceType: 'c8g.4xlarge', amiId: armMediumAmi }
+     *   ];
+     * 
+     * Example 2: Mix custom and auto-detected AMIs
+     *   return [
+     *     { id: 'prod-1', instanceType: 'c7i.4xlarge', amiId: x86MediumAmi },
+     *     { id: 'test-1', instanceType: 'c7i.xlarge' }  // Auto-detects latest AL2023
+     *   ];
+     * 
+     * Example 3: Combine with Elastic IP
+     *   { id: 'intel-eip', instanceType: 'c7i.4xlarge', amiId: x86Ami, elasticIpAllocationId: 'eipalloc-12345678' }
      */
     protected getDefaultInstances(): InstanceConfig[] {
         return [
-            // Current generation - Intel
-            { id: 'intel-c7i-1', instanceType: 'c7i.xlarge' },
-            { id: 'intel-c7i-2', instanceType: 'c7i.xlarge' },
-            { id: 'intel-c7i-3', instanceType: 'c7i.xlarge' },
-            { id: 'intel-c6i-1', instanceType: 'c6i.xlarge' },
-            { id: 'intel-c6i-2', instanceType: 'c6i.xlarge' },
-            { id: 'intel-c6i-3', instanceType: 'c6i.xlarge' },
-            // Current generation - Graviton ARM
-            { id: 'arm-c8g-1', instanceType: 'c8g.xlarge' },
-            { id: 'arm-c8g-2', instanceType: 'c8g.xlarge' },
-            { id: 'arm-c8g-3', instanceType: 'c8g.xlarge' },
-            { id: 'arm-c8g-4', instanceType: 'c8g.xlarge' },
-            { id: 'arm-c8g-5', instanceType: 'c8g.xlarge' },
-            { id: 'arm-c8g-6', instanceType: 'c8g.xlarge' },
-            { id: 'arm-c8g-7', instanceType: 'c8g.xlarge' },
+            // Current generation - Intel (using auto-detected Amazon Linux 2023)
+            { id: 'intel-c7i-1', instanceType: 'c7i.xlarge'},
+            { id: 'intel-c7i-2', instanceType: 'c7i.2xlarge'},
+            { id: 'intel-c7i-3', instanceType: 'c7i.4xlarge'},
+            { id: 'intel-c7i-4', instanceType: 'c7i.8xlarge'},
+            { id: 'intel-c7i-5', instanceType: 'c7i.12xlarge'},
+            { id: 'intel-c7i-6', instanceType: 'c7i.16xlarge'},
+            { id: 'intel-c7i-7', instanceType: 'c7i.24xlarge'},
+            { id: 'intel-c7i-8', instanceType: 'c7i.48xlarge'},
+            { id: 'intel-c7i-9', instanceType: 'c7i.metal-24xl'},
+            { id: 'intel-c7i-10', instanceType: 'c7i.metal-48xl'},
 
-            // Example with Elastic IP specified in config:
-            // { id: 'intel-c7i-1', instanceType: 'c7i.4xlarge', elasticIpAllocationId: 'eipalloc-12345678' },
-            // { id: 'intel-c7i-2', instanceType: 'c7i.4xlarge', elasticIpAllocationId: 'eipalloc-87654321' },
-
-            //   'c8i.xlarge','c7i.xlarge','c6i.xlarge','c6in.xlarge','c5.xlarge','c5n.xlarge','c5d.xlarge',   
-            //   // M family - General purpose Intel
-            //   'm8i.xlarge','m7i.xlarge','m6i.xlarge','m6in.xlarge','m5.xlarge','m5n.xlarge','m5d.xlarge','m5dn.xlarge',     
-            //   // R family - Memory optimized Intel
-            //   'r8i.xlarge','r7i.xlarge','r7iz.xlarge','r6i.xlarge','r6in.xlarge','r5.xlarge','r5n.xlarge','r5d.xlarge','r5dn.xlarge', 
-            //   // D family - Dense storage Intel
-            //   'd3.xlarge','d3en.xlarge',     
-            //   // T family - Burstable Intel
-            //   't3.xlarge',       
-            //   // ===== CURRENT GENERATION - AMD x86 =====
-            //   // C family - Compute optimized AMD
-            //   'c8a.xlarge','c7a.xlarge','c6a.xlarge','c5a.xlarge','c5ad.xlarge',     
-            //   // M family - General purpose AMD
-            //   'm8a.xlarge','m7a.xlarge','m6a.xlarge','m5a.xlarge','m5ad.xlarge',    
-            //   // R family - Memory optimized AMD
-            //   'r8a.xlarge','r7a.xlarge','r6a.xlarge','r5a.xlarge','r5ad.xlarge',     
-            //   // ===== CURRENT GENERATION - AWS GRAVITON ARM =====
-            //   // C family - Compute optimized Graviton
-            //   'c8g.xlarge','c7g.xlarge','c7gn.xlarge','c6g.xlarge','c6gd.xlarge',     
-            //   // M family - General purpose Graviton
-            //   'm8g.xlarge', 'm7g.xlarge', 'm6g.xlarge', 'm6gd.xlarge',     
-            //   // R family - Memory optimized Graviton
-            //   'r8g.xlarge',  'r7g.xlarge',  'r6g.xlarge',  'r6gd.xlarge',     
-            //   'i8g.xlarge','im4gn.xlarge',    
+            // Current generation - Graviton ARM (using auto-detected Amazon Linux 2023)
+            { id: 'arm-c8g-1', instanceType: 'c8g.xlarge'},
+            { id: 'arm-c8g-2', instanceType: 'c8g.2xlarge' },
+            { id: 'arm-c8g-3', instanceType: 'c8g.4xlarge' },
+            { id: 'arm-c8g-4', instanceType: 'c8g.8xlarge' },
+            { id: 'arm-c8g-5', instanceType: 'c8g.12xlarge' },
+            { id: 'arm-c8g-6', instanceType: 'c8g.16xlarge' },
+            { id: 'arm-c8g-7', instanceType: 'c8g.24xlarge' },
+            { id: 'arm-c8g-8', instanceType: 'c8g.48xlarge' },
+            { id: 'arm-c8g-9', instanceType: 'c8g.metal-24xl' },
+            { id: 'arm-c8g-10', instanceType: 'c8g.metal-48xl' },
+            
+            // // Current generation - Intel (auto-detected AMI)
+            // { id: 'intel-c7i-1', instanceType: 'c7i.xlarge' },
+            // { id: 'intel-c7i-2', instanceType: 'c7i.xlarge' },
+            // { id: 'intel-c7i-3', instanceType: 'c7i.xlarge' },
+            // { id: 'intel-c6i-1', instanceType: 'c6i.xlarge' },
+            // { id: 'intel-c6i-2', instanceType: 'c6i.xlarge' },
+            // { id: 'intel-c6i-3', instanceType: 'c6i.xlarge' },
+            
+            // // Current generation - Graviton ARM (auto-detected AMI)
+            // { id: 'arm-c8g-1', instanceType: 'c8g.xlarge' },
+            // { id: 'arm-c8g-2', instanceType: 'c8g.xlarge' },
+            // { id: 'arm-c8g-3', instanceType: 'c8g.xlarge' },
+            // { id: 'arm-c8g-4', instanceType: 'c8g.xlarge' },
+            // { id: 'arm-c8g-5', instanceType: 'c8g.xlarge' },
+            // { id: 'arm-c8g-6', instanceType: 'c8g.xlarge' },
+            // { id: 'arm-c8g-7', instanceType: 'c8g.xlarge' },
         ];
     }
 }

@@ -1,0 +1,30 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+# Dynamic inventory for AMI builder instance
+# Filters instances tagged as Role=ami-builder
+# Region is controlled by AWS_REGION environment variable
+
+plugin: amazon.aws.aws_ec2
+regions:
+  - us-east-1
+  - us-west-2
+  - eu-central-1
+  - ap-northeast-1
+  - ap-southeast-1
+include_filters:
+  - tag:Role:
+    - 'ami-builder'
+  - tag:Purpose:
+    - 'os-tuned-ami'
+hostnames:
+  - name: tag:Name
+    separator: ''
+compose:
+  # Use the public IP address to connect to the host
+  ansible_host: public_ip_address
+keyed_groups:
+  - key: tag:Role
+    separator: ''
+  - key: tag:Purpose
+    separator: ''
