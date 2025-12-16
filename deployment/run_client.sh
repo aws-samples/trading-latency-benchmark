@@ -103,16 +103,45 @@ DIRECT_MEM=$((HEAP_SIZE_NUM * 512))  # In MB
 
 echo "JVM Heap Size: $HEAP_SIZE (Direct Memory: ${DIRECT_MEM}m)"
 
+# Detect CPU architecture
+CPU_ARCH=$(uname -m)
+IS_GRAVITON=false
+if [ "$CPU_ARCH" == "aarch64" ]; then
+    IS_GRAVITON=true
+    echo "Detected Graviton/ARM architecture"
+else
+    echo "Detected x86_64 architecture"
+fi
+
 # Check if hugepages are configured by tune_os.yaml
 HUGEPAGES_AVAIL=$(grep HugePages_Total /proc/meminfo | awk '{print $2}')
 HUGEPAGE_SIZE=$(grep Hugepagesize /proc/meminfo | awk '{print $2}')
 
+# Check THP status
+THP_ENABLED=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo "unknown")
+
+# Configure memory flags based on architecture and available features
 if [ "$HUGEPAGES_AVAIL" -gt 0 ] 2>/dev/null; then
     echo "Hugepages detected: $HUGEPAGES_AVAIL pages of ${HUGEPAGE_SIZE}KB each"
     HUGEPAGE_FLAGS="-XX:+UseLargePages -XX:LargePageSizeInBytes=${HUGEPAGE_SIZE}k"
+elif [ "$IS_GRAVITON" = true ] && [[ "$THP_ENABLED" == *"madvise"* || "$THP_ENABLED" == *"always"* ]]; then
+    # Graviton with THP enabled - use TransparentHugePages
+    echo "THP enabled ($THP_ENABLED) - using TransparentHugePages for Graviton"
+    HUGEPAGE_FLAGS="-XX:+UseTransparentHugePages"
 else
-    echo "Hugepages not configured - using regular pages"
+    echo "Using regular pages (Hugepages: $HUGEPAGES_AVAIL, THP: $THP_ENABLED)"
     HUGEPAGE_FLAGS=""
+fi
+
+# Architecture-specific JVM tuning (Graviton optimization guide recommendations)
+if [ "$IS_GRAVITON" = true ]; then
+    # Graviton-specific: Optimize code cache to reduce instruction footprint pressure
+    # Start with conservative 64MB and tune up/down based on your application
+    CODE_CACHE_FLAGS="-XX:ReservedCodeCacheSize=64M -XX:InitialCodeCacheSize=64M"
+    echo "Graviton: Using optimized code cache (64MB)"
+else
+    # x86: Use defaults (256MB code cache)
+    CODE_CACHE_FLAGS=""
 fi
 
 # Adjust Netty arenas based on number of cores allocated
@@ -133,6 +162,7 @@ numactl --localalloc -- taskset -c $CLIENT_CORES $RT_PRIORITY java \
 -XX:MaxDirectMemorySize=${DIRECT_MEM}m \
 -XX:+AlwaysPreTouch \
 $HUGEPAGE_FLAGS \
+$CODE_CACHE_FLAGS \
 -XX:+UnlockExperimentalVMOptions \
 -XX:+UseZGC \
 -XX:ConcGCThreads=$CLIENT_GC_THREADS \

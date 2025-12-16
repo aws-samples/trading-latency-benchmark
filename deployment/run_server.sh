@@ -78,9 +78,25 @@ else
     echo "WARNING: Only 1 isolated core available - client and server will share"
 fi
 
+# Detect CPU architecture
+CPU_ARCH=$(uname -m)
+IS_GRAVITON=false
+if [ "$CPU_ARCH" == "aarch64" ]; then
+    IS_GRAVITON=true
+    echo "Detected Graviton/ARM architecture"
+else
+    echo "Detected x86_64 architecture"
+fi
+
 echo "Server CPU cores: $SERVER_CORES"
 echo "Total isolated cores available: $TOTAL_ISOLATED"
 echo "Note: Client uses cores starting from $START_CORE, server uses $SERVER_CORES"
+
+# Check THP status for Graviton
+if [ "$IS_GRAVITON" = true ]; then
+    THP_STATUS=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo "unknown")
+    echo "Graviton THP status: $THP_STATUS (should be [madvise] for optimal performance)"
+fi
 
 # Set thread priorities
 cd /home/ec2-user/mock-trading-server
