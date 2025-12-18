@@ -337,6 +337,72 @@
       when: is_amd
 
     # ==========================================
+    # AMD EPYC SPECIFIC - RCU AND KERNEL THREAD MANAGEMENT
+    # ==========================================
+    - name: Check AMD CPU boost status (for monitoring)
+      ansible.builtin.shell: |
+        cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo "Not available"
+      register: amd_boost_status
+      when: is_amd
+      changed_when: false
+
+    - name: Log AMD frequency information
+      ansible.builtin.debug:
+        msg:
+          - "AMD Boost Status: {{ amd_boost_status.stdout }}"
+          - "Note: For deterministic timing, consider BIOS setting: Determinism Control = Performance Deterministic"
+          - "Refer to AMD EPYC Low Latency Tuning Guide for BIOS optimization details"
+      when: is_amd
+
+    - name: Create kernel thread affinity service (AMD-optimized)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/kernel-thread-affinity.service
+        content: |
+          [Unit]
+          Description=Set kernel thread affinity to housekeeping cores (AMD EPYC optimized)
+          After=multi-user.target
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash -c 'for thread in $(ps -eLo comm,pid | grep -E "^(rcu|migration|watchdog|kworker)" | awk "{print \\$2}"); do taskset -acp {{ housekeeping_cores }} $thread 2>/dev/null || true; done'
+          RemainAfterExit=yes
+          
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      when: is_amd
+
+    - name: Enable kernel thread affinity service
+      ansible.builtin.systemd:
+        name: kernel-thread-affinity.service
+        enabled: yes
+        daemon_reload: yes
+      when: is_amd
+
+    - name: Apply RCU and kernel thread affinity immediately (AMD)
+      ansible.builtin.shell: |
+        # Move RCU threads to housekeeping cores
+        for thread in $(pgrep -a rcu | awk '{print $1}'); do
+          taskset -acp {{ housekeeping_cores }} $thread 2>/dev/null || true
+        done
+        # Move other kernel threads
+        for thread in $(ps -eLo comm,pid | grep -E "^(migration|watchdog|kworker)" | awk '{print $2}'); do
+          taskset -acp {{ housekeeping_cores }} $thread 2>/dev/null || true
+        done
+      changed_when: true
+      when: is_amd
+      ignore_errors: yes
+
+    - name: Verify AMD EPYC kernel thread configuration
+      ansible.builtin.debug:
+        msg:
+          - "✓ AMD EPYC kernel thread affinity configured"
+          - "  - RCU threads moved to housekeeping cores: {{ housekeeping_cores }}"
+          - "  - Service: /etc/systemd/system/kernel-thread-affinity.service"
+          - "  - Boot parameters include: rcupdate.rcu_cpu_stall_suppress=1, rcu_nocb_poll"
+      when: is_amd
+
+    # ==========================================
     # WORKQUEUE CPU AFFINITY - COMMON
     # ==========================================
     # First apply the setting immediately for the current session
@@ -464,7 +530,7 @@
       ansible.builtin.lineinfile:
         path: /etc/default/grub
         regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
-        line: 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8 nvme_core.io_timeout=4294967295 rd.emergency=poweroff rd.shell=0 selinux=1 security=selinux quiet transparent_hugepage=never audit=0 nmi_watchdog=0 nohz=on clocksource=tsc nosoftlockup mce=ignore_ce cpuidle.off=1 skew_tick=1 acpi_irq_nobalance processor.max_cstate=0 idle=poll isolcpus={{ isolated_cores }} nohz_full={{ isolated_cores }} rcu_nocbs={{ isolated_cores }} tsc=reliable"'
+        line: 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8 nvme_core.io_timeout=4294967295 rd.emergency=poweroff rd.shell=0 selinux=1 security=selinux quiet transparent_hugepage=never audit=0 nmi_watchdog=0 nohz=on clocksource=tsc nosoftlockup mce=ignore_ce cpuidle.off=1 skew_tick=1 acpi_irq_nobalance processor.max_cstate=0 idle=poll isolcpus={{ isolated_cores }} nohz_full={{ isolated_cores }} rcu_nocbs={{ isolated_cores }} rcupdate.rcu_cpu_stall_suppress=1 rcu_nocb_poll kthread_cpus={{ housekeeping_cores }} tsc=reliable"'
       register: grub_updated_amd
       when: is_amd
 
@@ -986,6 +1052,10 @@
           kernel.panic_on_rcu_stall = 1
           kernel.printk = 3 3 3 3
           kernel.perf_event_paranoid = -1
+          
+          # AMD EPYC specific - memory tuning from Low Latency Guide
+          vm.stat_interval = 10
+          kernel.hung_task_timeout_secs = 600
         mode: '0644'
 
     - name: Disable syscall auditing but leave auditd functioning
@@ -1527,3 +1597,93 @@
             echo "$disk: $(cat /sys/block/$disk/queue/scheduler 2>/dev/null || echo "Not available")"
           done
         mode: '0755'
+
+    - name: Create AMD EPYC-specific verification script
+      ansible.builtin.copy:
+        dest: /usr/local/bin/verify-amd-epyc-tuning.sh
+        content: |
+          #!/bin/bash
+          echo "==================================================================="
+          echo "AMD EPYC LOW LATENCY TUNING VERIFICATION"
+          echo "==================================================================="
+          echo "Date: $(date)"
+          echo "Hostname: $(hostname)"
+          
+          echo -e "\n=== CPU INFORMATION ==="
+          echo "Architecture: $(uname -m)"
+          grep "model name" /proc/cpuinfo | head -1
+          echo "CPU Vendor: $(grep -m1 "vendor_id" /proc/cpuinfo | awk '{print $3}')"
+          
+          echo -e "\n=== CPU ISOLATION ==="
+          echo "Isolated CPUs: $(cat /sys/devices/system/cpu/isolated 2>/dev/null || echo 'Not configured')"
+          
+          echo -e "\n=== RCU THREAD PLACEMENT (AMD EPYC Optimization) ==="
+          echo "RCU threads and their CPU affinity:"
+          for pid in $(pgrep rcu 2>/dev/null); do
+            if [ -f /proc/$pid/status ]; then
+              name=$(grep "Name:" /proc/$pid/status | awk '{print $2}')
+              affinity=$(taskset -cp $pid 2>/dev/null | awk -F: '{print $2}' | xargs)
+              echo "  $name (PID $pid): CPUs $affinity"
+            fi
+          done
+          
+          echo -e "\n=== KERNEL THREAD PLACEMENT ==="
+          echo "Sample of kernel threads on housekeeping cores:"
+          for thread in migration watchdog kworker; do
+            pid=$(ps -eLo comm,pid | grep "^$thread" | head -1 | awk '{print $2}')
+            if [ ! -z "$pid" ] && [ -f /proc/$pid/status ]; then
+              affinity=$(taskset -cp $pid 2>/dev/null | awk -F: '{print $2}' | xargs)
+              echo "  $thread (PID $pid): CPUs $affinity"
+            fi
+          done
+          
+          echo -e "\n=== CPU FREQUENCIES (AMD EPYC) ==="
+          echo "Current frequencies per CPU:"
+          paste <(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq 2>/dev/null | awk '{print $1/1000 " MHz"}') \
+                <(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null) | \
+                nl -v 0 -w 3 -s ": " | head -8
+          echo "  ... (showing first 8 CPUs)"
+          
+          echo -e "\n=== AMD BOOST STATUS ==="
+          if [ -f /sys/devices/system/cpu/cpufreq/boost ]; then
+            boost_status=$(cat /sys/devices/system/cpu/cpufreq/boost)
+            echo "AMD Boost: $([ "$boost_status" = "1" ] && echo "Enabled" || echo "Disabled")"
+          else
+            echo "AMD Boost status: Not available"
+          fi
+          
+          echo -e "\n=== BOOT PARAMETERS (AMD-specific highlighted) ==="
+          cmdline=$(cat /proc/cmdline)
+          echo "$cmdline" | grep -o "rcupdate\.rcu_cpu_stall_suppress=[^ ]*" && echo "  ✓ RCU stall suppress: CONFIGURED" || echo "  ✗ RCU stall suppress: NOT FOUND"
+          echo "$cmdline" | grep -o "rcu_nocb_poll" && echo "  ✓ RCU callback polling: CONFIGURED" || echo "  ✗ RCU callback polling: NOT FOUND"
+          echo "$cmdline" | grep -o "kthread_cpus=[^ ]*" && echo "  ✓ Kernel thread CPUs: CONFIGURED" || echo "  ✗ Kernel thread CPUs: NOT FOUND"
+          echo "$cmdline" | grep -o "isolcpus=[^ ]*" && echo "  ✓ CPU isolation: CONFIGURED" || echo "  ✗ CPU isolation: NOT FOUND"
+          echo "$cmdline" | grep -o "rcu_nocbs=[^ ]*" && echo "  ✓ RCU no-callback CPUs: CONFIGURED" || echo "  ✗ RCU no-callback CPUs: NOT FOUND"
+          
+          echo -e "\n=== INTERRUPT DISTRIBUTION ==="
+          echo "Top 10 interrupt sources and their CPU affinity:"
+          cat /proc/interrupts | head -15 | tail -10
+          
+          echo -e "\n=== MEMORY SETTINGS (AMD EPYC) ==="
+          echo "Huge Pages:"
+          grep Huge /proc/meminfo | head -3
+          echo "VM Statistics Interval: $(cat /proc/sys/vm/stat_interval 2>/dev/null || echo 'Not set')"
+          echo "Hung Task Timeout: $(cat /proc/sys/kernel/hung_task_timeout_secs 2>/dev/null || echo 'Not set')"
+          
+          echo -e "\n=== NUMA CONFIGURATION ==="
+          numactl --hardware 2>/dev/null | head -10 || echo "numactl not available"
+          
+          echo -e "\n=== SYSTEMD SERVICES STATUS ==="
+          for service in kernel-thread-affinity workqueue-affinity fix-writeback-numa amd-max-freq; do
+            if systemctl list-unit-files | grep -q "^$service.service"; then
+              status=$(systemctl is-enabled $service 2>/dev/null || echo "not-found")
+              echo "  $service: $status"
+            fi
+          done
+          
+          echo -e "\n==================================================================="
+          echo "VERIFICATION COMPLETE"
+          echo "For more details, see: /root/trading_system_tuning_report.txt"
+          echo "==================================================================="
+        mode: '0755'
+      when: is_amd
