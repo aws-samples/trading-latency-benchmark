@@ -49,8 +49,8 @@
     become: yes
     become_user: root
     get_url:
-      url: "https://dlcdn.apache.org/maven/maven-3/3.9.11/binaries/apache-maven-3.9.11-bin.tar.gz"
-      dest: "/tmp/apache-maven-3.9.11-bin.tar.gz"
+      url: "https://dlcdn.apache.org/maven/maven-3/3.9.12/binaries/apache-maven-3.9.12-bin.tar.gz"
+      dest: "/tmp/apache-maven-3.9.12-bin.tar.gz"
       mode: '0644'
     register: maven_download
     
@@ -58,10 +58,10 @@
     become: yes
     become_user: root
     unarchive:
-      src: "/tmp/apache-maven-3.9.11-bin.tar.gz"
+      src: "/tmp/apache-maven-3.9.12-bin.tar.gz"
       dest: "/opt/maven"
       remote_src: yes
-      creates: "/opt/maven/apache-maven-3.9.11"
+      creates: "/opt/maven/apache-maven-3.9.12"
     when: maven_download is changed
     
   - name: Create Maven profile script
@@ -71,7 +71,7 @@
       dest: /etc/profile.d/maven.sh
       content: |
         #!/bin/bash
-        export MAVEN_HOME=/opt/maven/apache-maven-3.9.11
+        export MAVEN_HOME=/opt/maven/apache-maven-3.9.12
         export PATH=$MAVEN_HOME/bin:$PATH
       mode: '0755'
       
@@ -79,7 +79,7 @@
     become: yes
     become_user: root
     file:
-      src: /opt/maven/apache-maven-3.9.11/bin/mvn
+      src: /opt/maven/apache-maven-3.9.12/bin/mvn
       dest: /usr/bin/mvn
       state: link
       
@@ -177,7 +177,7 @@
     become: yes
     become_user: ec2-user
     shell: |
-      export MAVEN_HOME=/opt/maven/apache-maven-3.9.11
+      export MAVEN_HOME=/opt/maven/apache-maven-3.9.12
       export PATH=$MAVEN_HOME/bin:$PATH
       cd /home/ec2-user/hft-client
       mvn clean install
