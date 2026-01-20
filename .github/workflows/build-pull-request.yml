@@ -9,6 +9,9 @@ jobs:
   java-client:
     name: Build Java Client
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hft_client/java_client
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -32,7 +35,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: java-client-jar
-          path: target/*.jar
+          path: hft_client/java_client/target/*.jar
           retention-days: 7
 
   rust-server:
