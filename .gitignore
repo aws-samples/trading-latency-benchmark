@@ -467,3 +467,4 @@ config.properties.bak
 
 # Kiro
 .kiro/
+*.code-workspace
