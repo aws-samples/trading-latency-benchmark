@@ -148,7 +148,7 @@
       
   - name: copy java source code
     copy:
-      src: ../../src/
+      src: ../../hft_client/java_client/src/
       dest: /home/ec2-user/hft-client/src
       owner: ec2-user
       group: ec2-user
@@ -158,7 +158,7 @@
       
   - name: copy pom xml
     copy:
-      src: ../../pom.xml
+      src: ../../hft_client/java_client/pom.xml
       dest: /home/ec2-user/hft-client/pom.xml
       owner: ec2-user
       group: ec2-user
@@ -168,7 +168,7 @@
       
   - name: copy client config properties to ec2
     copy:
-      src: ../../src/main/resources/config.properties
+      src: ../../hft_client/java_client/src/main/resources/config.properties
       dest: /home/ec2-user/config.properties
       owner: ec2-user
       group: ec2-user
@@ -194,8 +194,10 @@
       mode: 0755
     tags:
       - deploy
+
       
-  - name: copy mock trading server
+  # if /target still exists, copy process will take significantly longer
+  - name: Copy mock trading server
     copy:
       src: ../../mock-trading-server/
       dest: /home/ec2-user/mock-trading-server/
@@ -204,6 +206,30 @@
       mode: 0644
     tags:
       - deploy
+
+  # - name: Copy mock trading server
+  #   ansible.posix.synchronize:
+  #     src: ../../mock-trading-server/
+  #     dest: /home/ec2-user/mock-trading-server/
+  #     delete: yes
+  #     recursive: yes
+  #     rsync_opts:
+  #       - "--exclude=target/"
+  #       - "--exclude=**/*.rs.bk"
+  #       - "--exclude=.cargo/"
+  #       - "--exclude=.rustfmt.toml"
+  #   tags:
+  #     - deploy
+
+  # - name: Set ownership for mock trading server
+  #   ansible.builtin.file:
+  #     path: /home/ec2-user/mock-trading-server/
+  #     owner: ec2-user
+  #     group: ec2-user
+  #     mode: '0644'
+  #     recurse: yes
+  #   tags:
+  #     - deploy
       
   - name: Download Rust Installer
     get_url:

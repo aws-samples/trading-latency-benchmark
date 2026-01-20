@@ -105,7 +105,7 @@ for log_file in $(find "$OUTPUT_DIR" -name "*.hlog" -type f); do
     
     # Run the Java program to analyze the log
     echo "Running analysis for $instance_name..."
-    REPORT_OUTPUT=$(java -jar ../target/ExchangeFlow-1.0-SNAPSHOT.jar latency-report "$log_file")
+    REPORT_OUTPUT=$(java -jar ../hft_client/java_client/target/ExchangeFlow-1.0-SNAPSHOT.jar latency-report "$log_file")
     
     if [ $? -ne 0 ]; then
         echo "Error: Failed to generate report for $log_file"

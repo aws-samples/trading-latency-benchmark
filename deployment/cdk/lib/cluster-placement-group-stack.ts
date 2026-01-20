@@ -28,6 +28,8 @@ export class TradingBenchmarkClusterPlacementGroupStack extends cdk.Stack {
 
     // Default instance types if not provided
     const clientInstanceType = props?.clientInstanceType || 'c7i.4xlarge';
+    // todo availability issue
+    // todo check for availability first?
     const serverInstanceType = props?.serverInstanceType || 'c6in.4xlarge';
 
     // Create VPC with explicitly disabled endpoints
@@ -129,7 +131,8 @@ export class TradingBenchmarkClusterPlacementGroupStack extends cdk.Stack {
     const ami = MachineImage.latestAmazonLinux2023();
 
     // Import existing key pair
-    const keyPair = KeyPair.fromKeyPairName(this, 'ImportedKeyPair', 'virginia');
+    // todo fix key pair name
+    const keyPair = KeyPair.fromKeyPairName(this, 'ImportedKeyPair', 'us_dev');
 
     // Parse instance types
     let clientInstanceTypeObj: InstanceType;

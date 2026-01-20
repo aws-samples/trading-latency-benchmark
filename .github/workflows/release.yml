@@ -12,6 +12,9 @@ jobs:
   build-java:
     name: Build Java Client
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hft_client/java_client
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -51,7 +54,7 @@ jobs:
           fi
           rm -rf META-INF
           
-          cp "$JAR_FILE" ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
+          cp "$JAR_FILE" ../../ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
       
       - name: Upload JAR
         uses: actions/upload-artifact@v4

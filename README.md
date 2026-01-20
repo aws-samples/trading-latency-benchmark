@@ -51,7 +51,12 @@ Before using this benchmark suite, ensure you have the following prerequisites:
 - **AWS CLI**: Configured with appropriate credentials and default region
 - **AWS CDK**: Installed and bootstrapped in your AWS account
 - **Ansible**: Version 2.9+ installed on your local machine
-- **SSH Key Pair**: Generated and registered with AWS for EC2 instance access (e.g., `~/.ssh/virginia.pem`)
+- **SSH Key Pair**: Generated and registered with AWS for EC2 instance access
+
+Set the `SSH_KEY_FILE` environment variable to point to your key:
+```bash
+export SSH_KEY_FILE=~/.ssh/virginia.pem
+```
 
 ## Getting Started
 
@@ -61,7 +66,7 @@ For fastest deployment and optimal performance, build a pre-tuned AMI first:
 
 ```bash
 cd deployment
-./build-tuned-ami.sh --key-file ~/.ssh/virginia.pem
+./build-tuned-ami.sh --key-file $SSH_KEY_FILE
 ```
 
 This creates an AMI with all OS-level optimizations pre-applied (CPU isolation, network tuning, hugepages, etc.). The process takes ~20-30 minutes but eliminates the need to run OS tuning on every deployment.
@@ -136,7 +141,7 @@ Or use the automated build script (recommended):
 
 ```bash
 cd deployment
-./build-tuned-ami.sh --instance-type c7i.4xlarge --key-file ~/.ssh/virginia.pem
+./build-tuned-ami.sh --instance-type c7i.4xlarge --key-file $SSH_KEY_FILE
 ```
 
 
@@ -148,25 +153,25 @@ After deploying the infrastructure, use the following Ansible playbooks to run t
 cd ../ansible
 
 # Provision EC2 instances, and deploy both client and server applications
-ansible-playbook provision_ec2.yaml --key-file ~/.ssh/your-key.pem -i ./inventory/inventory.aws_ec2.yml
+ansible-playbook provision_ec2.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
 
 # Stop any existing tests
-ansible-playbook stop_latency_test.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
+ansible-playbook stop_latency_test.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
 
 # Apply OS-level performance tuning
-ansible-playbook tune_os.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
+ansible-playbook tune_os.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
 
 # Start the mock trading server
-ansible-playbook restart_mock_trading_server.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
+ansible-playbook restart_mock_trading_server.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
 
 # Start the HFT client
-ansible-playbook restart_hft_client.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
+ansible-playbook restart_hft_client.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
 
 # Start the test run for desired duration
-ansible-playbook start_latency_test.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
+ansible-playbook start_latency_test.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
 
 # Let the test run for desired duration, then stop it
-ansible-playbook stop_latency_test.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
+ansible-playbook stop_latency_test.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
 ```
 
 ### 3. Collect and Analyze Results
@@ -174,8 +179,8 @@ ansible-playbook stop_latency_test.yaml --key-file ~/.ssh/virginia.pem -i ./inve
 After running the tests, collect and analyze the latency results:
 
 ```bash
-cd ..
-./show_latency_reports.sh --inventory $(PWD)/ansible/inventory/inventory.aws_ec2.yml --key ~/.ssh/virginia.pem
+cd ../deployment
+./show_latency_reports.sh --inventory $(PWD)/ansible/inventory/inventory.aws_ec2.yml --key $SSH_KEY_FILE
 ```
 
 This script will:

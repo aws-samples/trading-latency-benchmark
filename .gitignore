@@ -464,3 +464,6 @@ app.zip
 # Configuration backups
 config.properties.bak
 *.properties.bak
+
+# Kiro
+.kiro/
