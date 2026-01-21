@@ -54,7 +54,7 @@ jobs:
           cp "$JAR_FILE" ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
       
       - name: Upload JAR
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: java-jar
           path: ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
@@ -110,7 +110,7 @@ jobs:
           strip mock-trading-server-${{ steps.get_version.outputs.VERSION }}-${SUFFIX} || true
       
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: rust-${{ matrix.target }}
           path: mock-trading-server-${{ steps.get_version.outputs.VERSION }}-*
@@ -150,7 +150,7 @@ jobs:
              mock-trading-server-${{ steps.get_version.outputs.VERSION }}-${SUFFIX}
       
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: rust-${{ matrix.target }}
           path: mock-trading-server-${{ steps.get_version.outputs.VERSION }}-*
@@ -181,7 +181,7 @@ jobs:
              mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe
       
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: rust-windows
           path: mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe
@@ -232,7 +232,7 @@ jobs:
             '
       
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: cpp-linux-${{ matrix.arch }}
           path: cpp-client-${{ steps.get_version.outputs.VERSION }}-linux-${{ matrix.arch }}.tar.gz
@@ -276,7 +276,7 @@ jobs:
           tar -czf ../../cpp-client-${{ steps.get_version.outputs.VERSION }}-macos-${{ matrix.arch }}.tar.gz hft_client
       
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: cpp-macos-${{ matrix.arch }}
           path: cpp-client-${{ steps.get_version.outputs.VERSION }}-macos-${{ matrix.arch }}.tar.gz
@@ -332,7 +332,7 @@ jobs:
           7z a ../../../cpp-client-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.zip *.exe *.dll
       
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: cpp-windows-x86_64
           path: cpp-client-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.zip
