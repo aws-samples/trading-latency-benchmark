@@ -11,11 +11,24 @@
     become: true
     become_user: root
     shell: |
-      ps -aux | grep "mock-trading-server" | grep -v "grep" | awk '{print $2}' | while read -r pid ; do
-        echo "Shutting down PID: $pid"
-        kill -9 $pid
-      done
+      pids=$(pgrep -f mock-trading-server || true)
+      if [ -n "$pids" ]; then
+        echo "$pids" | while read -r pid; do
+          echo "Shutting down PID: $pid"
+          kill -9 "$pid" 2>/dev/null || true
+        done
+      else
+        echo "No mock-trading-server process found"
+      fi
+    ignore_errors: true
+
+  - name: kill stale tmux server session
+    shell: tmux kill-session -t test_server 2>/dev/null || true
+    ignore_errors: true
+
   - name: start exchange server
-    shell: tmux new-session -d -s test_server 'bash -c "cd /home/ec2-user/mock-trading-server; ./target/release/mock-trading-server > output.log 2>&1"'
+    become: true
+    become_user: root
+    shell: tmux new-session -d -s test_server 'bash -c "cd /home/ec2-user; ./run_server.sh >> server_output.log 2>&1"'
     async: 45
     poll: 0

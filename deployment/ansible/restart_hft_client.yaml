@@ -18,6 +18,6 @@
     - name: start hft client
       become: true
       become_user: root
-      shell: "tmux new -s test_client -d bash -c 'cd /home/ec2-user/; ./run_client.sh > output.log 2>&1'"
+      shell: "tmux new -s test_client -d bash -c 'cd /home/ec2-user/; ./run_client.sh >> client_output.log 2>&1'"
       async: 45
       poll: 0

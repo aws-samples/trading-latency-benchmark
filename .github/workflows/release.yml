@@ -227,11 +227,11 @@ jobs:
               yum install -y gcc-c++ make git tar gzip openssl-devel python3-pip zlib-devel
               pip3 install cmake --upgrade
               export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
-              cd cpp-client
+              cd hft_client/cpp-client
               cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
               cmake --build build --config Release
               cd build
-              tar -czf ../../cpp-client-${{ steps.get_version.outputs.VERSION }}-linux-${{ matrix.arch }}.tar.gz hft_client
+              tar -czf ../../../cpp-client-${{ steps.get_version.outputs.VERSION }}-linux-${{ matrix.arch }}.tar.gz hft_client
             '
       
       - name: Upload artifact
@@ -265,7 +265,7 @@ jobs:
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
       
       - name: Build
-        working-directory: cpp-client
+        working-directory: hft_client/cpp-client
         run: |
           export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
           cmake -B build \
@@ -275,8 +275,8 @@ jobs:
       
       - name: Create tarball
         run: |
-          cd cpp-client/build
-          tar -czf ../../cpp-client-${{ steps.get_version.outputs.VERSION }}-macos-${{ matrix.arch }}.tar.gz hft_client
+          cd hft_client/cpp-client/build
+          tar -czf ../../../cpp-client-${{ steps.get_version.outputs.VERSION }}-macos-${{ matrix.arch }}.tar.gz hft_client
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -312,27 +312,27 @@ jobs:
       
       - name: Build
         shell: bash
-        working-directory: cpp-client
+        working-directory: hft_client/cpp-client
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake
+            -DCMAKE_TOOLCHAIN_FILE=../../vcpkg/scripts/buildsystems/vcpkg.cmake
           cmake --build build --config Release
       
       - name: Copy DLLs
         shell: bash
         run: |
-          cp vcpkg/installed/x64-windows/bin/libssl-3-x64.dll cpp-client/build/Release/
-          cp vcpkg/installed/x64-windows/bin/libcrypto-3-x64.dll cpp-client/build/Release/
-          cp "C:/Windows/System32/msvcp140.dll" cpp-client/build/Release/ || true
-          cp "C:/Windows/System32/vcruntime140.dll" cpp-client/build/Release/ || true
-          cp "C:/Windows/System32/vcruntime140_1.dll" cpp-client/build/Release/ || true
+          cp vcpkg/installed/x64-windows/bin/libssl-3-x64.dll hft_client/cpp-client/build/Release/
+          cp vcpkg/installed/x64-windows/bin/libcrypto-3-x64.dll hft_client/cpp-client/build/Release/
+          cp "C:/Windows/System32/msvcp140.dll" hft_client/cpp-client/build/Release/ || true
+          cp "C:/Windows/System32/vcruntime140.dll" hft_client/cpp-client/build/Release/ || true
+          cp "C:/Windows/System32/vcruntime140_1.dll" hft_client/cpp-client/build/Release/ || true
       
       - name: Create archive
         shell: bash
         run: |
-          cd cpp-client/build/Release
-          7z a ../../../cpp-client-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.zip *.exe *.dll
+          cd hft_client/cpp-client/build/Release
+          7z a ../../../../cpp-client-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.zip *.exe *.dll
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4

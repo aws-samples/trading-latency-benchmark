@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: cpp-client
+        working-directory: hft_client/cpp-client
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -104,7 +104,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cpp-client-linux-binary
-          path: cpp-client/build/*
+          path: hft_client/cpp-client/build/*
           retention-days: 7
 
   cpp-client-windows:
@@ -112,7 +112,7 @@ jobs:
     runs-on: windows-latest
     defaults:
       run:
-        working-directory: cpp-client
+        working-directory: hft_client/cpp-client
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -154,7 +154,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cpp-client-windows-binary
-          path: cpp-client/build/Release/*.dll cpp-client/build/Release/*.exe
+          path: hft_client/cpp-client/build/Release/*.dll hft_client/cpp-client/build/Release/*.exe
           retention-days: 7
 
   cdk-infrastructure:

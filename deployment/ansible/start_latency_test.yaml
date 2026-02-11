@@ -21,7 +21,7 @@
       become: yes
       become_user: root
       shell: |
-        tmux new-session -d -s test_client 'bash -c "cd /home/ec2-user/; ./run_client.sh > output.log 2>&1"'
+        tmux new-session -d -s test_client 'bash -c "cd /home/ec2-user/; ./run_client.sh >> client_output.log 2>&1"'
       # depending on tmux version this could be instead
       # tmux new -s test_client -d bash -c 'cd /home/ec2-user/; ./{{ run_script[inventory_hostname] }} > output.log 2>&1'
       async: 45

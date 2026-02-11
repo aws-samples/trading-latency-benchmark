@@ -179,7 +179,7 @@ ansible-playbook stop_latency_test.yaml --key-file $SSH_KEY_FILE -i ./inventory/
 After running the tests, collect and analyze the latency results:
 
 ```bash
-cd ../deployment
+cd ..
 ./show_latency_reports.sh --inventory $(PWD)/ansible/inventory/inventory.aws_ec2.yml --key $SSH_KEY_FILE
 ```
 

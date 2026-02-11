@@ -230,6 +230,11 @@ export class TradingBenchmarkClusterPlacementGroupStack extends cdk.Stack {
       description: 'Server Public IP'
     });
 
+    new cdk.CfnOutput(this, 'ServerPrivateIp', {
+      value: serverInstance.instancePrivateIp,
+      description: 'Server Private IP (used as trading endpoint for client)'
+    });
+
     new cdk.CfnOutput(this, 'PlacementGroupName', {
       value: placementGroup.ref,
       description: 'Placement Group Name'
