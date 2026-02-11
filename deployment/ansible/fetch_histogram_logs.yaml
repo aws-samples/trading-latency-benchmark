@@ -7,8 +7,19 @@
   collections:
     - amazon.aws.ec2_instance
   tasks:
-    - name: copy histogram file to local
+    - name: find histogram log files
+      shell: find /home/ec2-user -maxdepth 3 -name "histogram.hlog" -type f 2>/dev/null
+      register: hlog_files
+      changed_when: false
+
+    - name: display found histogram files
+      debug:
+        msg: "Found histogram files: {{ hlog_files.stdout_lines }}"
+
+    - name: fetch histogram files to local
       fetch:
-        src: /home/ec2-user/histogram.hlog
-        dest: ../../histogram_logs/
-        validate_checksum: false
+        src: "{{ item }}"
+        dest: "../../histogram_logs/{{ inventory_hostname }}/{{ item | basename }}"
+        flat: yes
+      loop: "{{ hlog_files.stdout_lines }}"
+      when: hlog_files.stdout_lines | length > 0

@@ -1,0 +1,21 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: Check if ExchangeFlow Java client is still running
+  hosts: aws_ec2
+  gather_facts: false
+  tasks:
+  - name: Check for ExchangeFlow process
+    # avoid matching itself using regex 
+    shell: pgrep -f '[E]xchangeFlow' || true
+    register: process_check
+    changed_when: false
+
+  - name: Report process status
+    debug:
+      msg: "ExchangeFlow is {{ 'RUNNING (pid: ' + process_check.stdout + ')' if process_check.stdout else 'STOPPED' }}"
+
+  - name: Set running fact
+    set_fact:
+      client_running: "{{ process_check.stdout | length > 0 }}"

@@ -196,40 +196,23 @@
       - deploy
 
       
-  # if /target still exists, copy process will take significantly longer
   - name: Copy mock trading server
-    copy:
+    synchronize:
       src: ../../mock-trading-server/
       dest: /home/ec2-user/mock-trading-server/
-      owner: ec2-user
-      group: ec2-user
-      mode: 0644
+      rsync_opts:
+        - "--exclude=target"
     tags:
       - deploy
 
-  # - name: Copy mock trading server
-  #   ansible.posix.synchronize:
-  #     src: ../../mock-trading-server/
-  #     dest: /home/ec2-user/mock-trading-server/
-  #     delete: yes
-  #     recursive: yes
-  #     rsync_opts:
-  #       - "--exclude=target/"
-  #       - "--exclude=**/*.rs.bk"
-  #       - "--exclude=.cargo/"
-  #       - "--exclude=.rustfmt.toml"
-  #   tags:
-  #     - deploy
-
-  # - name: Set ownership for mock trading server
-  #   ansible.builtin.file:
-  #     path: /home/ec2-user/mock-trading-server/
-  #     owner: ec2-user
-  #     group: ec2-user
-  #     mode: '0644'
-  #     recurse: yes
-  #   tags:
-  #     - deploy
+  - name: Fix mock trading server ownership and permissions
+    become: yes
+    shell: |
+      chown -R ec2-user:ec2-user /home/ec2-user/mock-trading-server
+      find /home/ec2-user/mock-trading-server -type f -exec chmod 0644 {} +
+      find /home/ec2-user/mock-trading-server -type d -exec chmod 0755 {} +
+    tags:
+      - deploy
       
   - name: Download Rust Installer
     get_url:
@@ -274,3 +257,21 @@
       owner: ec2-user
       group: ec2-user
       mode: 0755
+
+  - name: Configure trading server endpoint in config.properties
+    lineinfile:
+      path: /home/ec2-user/config.properties
+      regexp: '^HOST='
+      line: "HOST={{ trading_server_host }}"
+    when: trading_server_host is defined
+    tags:
+      - configure
+
+  - name: Configure test size in config.properties
+    lineinfile:
+      path: /home/ec2-user/config.properties
+      regexp: '^TEST_SIZE='
+      line: "TEST_SIZE={{ trading_test_size }}"
+    when: trading_test_size is defined
+    tags:
+      - configure

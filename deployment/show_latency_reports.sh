@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT-0
 
 # Configuration variables
-INVENTORY="./ansible/inventory/virginia_inventory.aws_ec2.yml"
-SSH_KEY_FILE="~/.ssh/virginia_keypair.pem"
+INVENTORY="./ansible/inventory/inventory.aws_ec2.yml"
+SSH_KEY_FILE="${SSH_KEY_FILE:-$HOME/.ssh/virginia_keypair.pem}"
 OUTPUT_DIR="../histogram_logs"
 REPORT_SUMMARY_FILE="latency_report_summary.txt"
 
