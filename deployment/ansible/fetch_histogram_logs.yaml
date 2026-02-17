@@ -8,7 +8,7 @@
     - amazon.aws.ec2_instance
   tasks:
     - name: find histogram log files
-      shell: find /home/ec2-user -maxdepth 3 -name "histogram.hlog" -type f 2>/dev/null
+      shell: find /home/ec2-user -maxdepth 3 -name "*.hlog" -type f 2>/dev/null
       register: hlog_files
       changed_when: false
 

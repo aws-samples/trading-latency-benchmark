@@ -2,8 +2,19 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
+# Generic HFT client launcher supporting java, rust, and cpp clients.
+# Usage: ./run_client.sh [java|rust|cpp]
+# Default: java (backwards compatible)
+
 # Dynamic CPU core allocation based on tune_os.yaml configuration
 # This script automatically adapts to different instance sizes
+
+CLIENT_TYPE="${1:-java}"
+echo "Client type: $CLIENT_TYPE"
+
+# ============================================================
+# Shared: CPU core isolation and allocation
+# ============================================================
 
 # Function to calculate isolated cores if config file doesn't exist
 calculate_isolated_cores() {
@@ -71,6 +82,10 @@ fi
 echo "Client CPU cores: $CLIENT_CORES (GC threads: $CLIENT_GC_THREADS)"
 echo "Total isolated cores available: $TOTAL_ISOLATED"
 
+# ============================================================
+# Shared: Real-time scheduling
+# ============================================================
+
 # Check if we have real-time scheduling permissions
 if chrt -f 80 true 2>/dev/null; then
     echo "Using real-time scheduling (priority 80)"
@@ -82,26 +97,9 @@ else
     RT_PRIORITY=""
 fi
 
-# Dynamic memory configuration based on available memory and tune_os.yaml settings
-TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-TOTAL_MEM_GB=$((TOTAL_MEM_KB / 1024 / 1024))
-
-# Calculate heap size: use 25% of total memory, minimum 1GB, maximum 8GB for trading app
-if [ $TOTAL_MEM_GB -le 4 ]; then
-    HEAP_SIZE="1g"
-elif [ $TOTAL_MEM_GB -le 16 ]; then
-    HEAP_SIZE="2g"
-elif [ $TOTAL_MEM_GB -le 32 ]; then
-    HEAP_SIZE="4g"
-else
-    HEAP_SIZE="8g"
-fi
-
-# Calculate direct memory (for Netty buffers): 50% of heap
-HEAP_SIZE_NUM=$(echo $HEAP_SIZE | sed 's/g//')
-DIRECT_MEM=$((HEAP_SIZE_NUM * 512))  # In MB
-
-echo "JVM Heap Size: $HEAP_SIZE (Direct Memory: ${DIRECT_MEM}m)"
+# ============================================================
+# Shared: Architecture detection
+# ============================================================
 
 # Detect CPU architecture
 CPU_ARCH=$(uname -m)
@@ -113,87 +111,161 @@ else
     echo "Detected x86_64 architecture"
 fi
 
-# Check if hugepages are configured by tune_os.yaml
-HUGEPAGES_AVAIL=$(grep HugePages_Total /proc/meminfo | awk '{print $2}')
-HUGEPAGE_SIZE=$(grep Hugepagesize /proc/meminfo | awk '{print $2}')
+# ============================================================
+# Launch client based on CLIENT_TYPE
+# ============================================================
 
-# Check THP status
-THP_ENABLED=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo "unknown")
+case "$CLIENT_TYPE" in
+  rust)
+    echo "Launching Rust HFT client"
 
-# Configure memory flags based on architecture and available features
-if [ "$HUGEPAGES_AVAIL" -gt 0 ] 2>/dev/null; then
-    echo "Hugepages detected: $HUGEPAGES_AVAIL pages of ${HUGEPAGE_SIZE}KB each"
-    HUGEPAGE_FLAGS="-XX:+UseLargePages -XX:LargePageSizeInBytes=${HUGEPAGE_SIZE}k"
-elif [ "$IS_GRAVITON" = true ] && [[ "$THP_ENABLED" == *"madvise"* || "$THP_ENABLED" == *"always"* ]]; then
-    # Graviton with THP enabled - use TransparentHugePages
-    echo "THP enabled ($THP_ENABLED) - using TransparentHugePages for Graviton"
-    HUGEPAGE_FLAGS="-XX:+UseTransparentHugePages"
-else
-    echo "Using regular pages (Hugepages: $HUGEPAGES_AVAIL, THP: $THP_ENABLED)"
-    HUGEPAGE_FLAGS=""
-fi
+    RUST_BINARY="/home/ec2-user/rust-hft-client/target/release/hft_client"
+    if [ ! -f "$RUST_BINARY" ]; then
+        echo "ERROR: Rust binary not found at $RUST_BINARY"
+        exit 1
+    fi
 
-# Architecture-specific JVM tuning (Graviton optimization guide recommendations)
-if [ "$IS_GRAVITON" = true ]; then
-    # Graviton-specific: Optimize code cache to reduce instruction footprint pressure
-    # Start with conservative 64MB and tune up/down based on your application
-    CODE_CACHE_FLAGS="-XX:ReservedCodeCacheSize=64M -XX:InitialCodeCacheSize=64M"
-    echo "Graviton: Using optimized code cache (64MB)"
-else
-    # x86: Use defaults (256MB code cache)
-    CODE_CACHE_FLAGS=""
-fi
+    # Rust-specific optimizations
+    # MALLOC_ARENA_MAX: limit glibc malloc arenas to reduce memory fragmentation
+    # MALLOC_MMAP_THRESHOLD_: force mmap for large allocations to avoid heap fragmentation
+    # RUST_LOG: default to info if not set
+    export MALLOC_ARENA_MAX=2
+    export MALLOC_MMAP_THRESHOLD_=131072
+    export RUST_LOG="${RUST_LOG:-info}"
 
-# Adjust Netty arenas based on number of cores allocated
-if [ $TOTAL_ISOLATED -ge 8 ]; then
-    NETTY_ARENAS=4
-elif [ $TOTAL_ISOLATED -ge 4 ]; then
-    NETTY_ARENAS=3
-else
-    NETTY_ARENAS=2
-fi
+    # Use --localalloc instead of specific node binding
+    numactl --localalloc -- taskset -c $CLIENT_CORES $RT_PRIORITY \
+        "$RUST_BINARY"
+    ;;
 
-echo "Netty Direct Arenas: $NETTY_ARENAS"
+  cpp)
+    echo "Launching C++ HFT client"
 
-# -Dio.netty.handler.ssl.openssl.engine=qatengine
-# Use --localalloc instead of specific node binding
-numactl --localalloc -- taskset -c $CLIENT_CORES $RT_PRIORITY java \
--Xms${HEAP_SIZE} -Xmx${HEAP_SIZE} \
--XX:MaxDirectMemorySize=${DIRECT_MEM}m \
--XX:+AlwaysPreTouch \
-$HUGEPAGE_FLAGS \
-$CODE_CACHE_FLAGS \
--XX:+UnlockExperimentalVMOptions \
--XX:+UseZGC \
--XX:ConcGCThreads=$CLIENT_GC_THREADS \
--XX:ZCollectionInterval=300 \
--XX:+UseNUMA \
--XX:+UnlockDiagnosticVMOptions \
--XX:GuaranteedSafepointInterval=0 \
--XX:+UseCountedLoopSafepoints \
--XX:+DisableExplicitGC \
--XX:+UseCompressedOops \
--XX:+UseTLAB \
--XX:+UseThreadPriorities \
--XX:ThreadPriorityPolicy=1 \
--XX:CompileThreshold=1000 \
--XX:+TieredCompilation \
--XX:CompileCommand=inline,com.aws.trading.*::* \
--Djava.nio.channels.spi.SelectorProvider=sun.nio.ch.EPollSelectorProvider \
--Dsun.rmi.dgc.server.gcInterval=0x7FFFFFFFFFFFFFFE \
--Dsun.rmi.dgc.client.gcInterval=0x7FFFFFFFFFFFFFFE \
--Dfile.encoding=UTF-8 \
--Dio.netty.allocator.numDirectArenas=$NETTY_ARENAS \
--Dio.netty.allocator.numHeapArenas=0 \
--Dio.netty.allocator.tinyCacheSize=256 \
--Dio.netty.allocator.smallCacheSize=64 \
--Dio.netty.allocator.normalCacheSize=32 \
--Dio.netty.allocator.maxOrder=9 \
--Dio.netty.buffer.checkBounds=false \
--Dio.netty.buffer.checkAccessible=false \
--Dio.netty.leakDetection.level=DISABLED \
--Dio.netty.recycler.maxCapacity=32 \
--Dio.netty.eventLoop.maxPendingTasks=1024 \
--Dio.netty.noPreferDirect=false \
--server \
--jar ExchangeFlow-1.0-SNAPSHOT.jar latency-test
+    CPP_BINARY="/home/ec2-user/cpp-hft-client/build/hft_client"
+    if [ ! -f "$CPP_BINARY" ]; then
+        echo "ERROR: C++ binary not found at $CPP_BINARY"
+        exit 1
+    fi
+
+    # C++-specific optimizations
+    # MALLOC_ARENA_MAX: limit glibc malloc arenas to reduce memory fragmentation
+    # MALLOC_MMAP_THRESHOLD_: force mmap for large allocations to avoid heap fragmentation
+    export MALLOC_ARENA_MAX=2
+    export MALLOC_MMAP_THRESHOLD_=131072
+
+    # Use --localalloc instead of specific node binding
+    numactl --localalloc -- taskset -c $CLIENT_CORES $RT_PRIORITY \
+        "$CPP_BINARY"
+    ;;
+
+  java|*)
+    echo "Launching Java HFT client"
+
+    # Dynamic memory configuration based on available memory and tune_os.yaml settings
+    TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    TOTAL_MEM_GB=$((TOTAL_MEM_KB / 1024 / 1024))
+
+    # Calculate heap size: use 25% of total memory, minimum 1GB, maximum 8GB for trading app
+    if [ $TOTAL_MEM_GB -le 4 ]; then
+        HEAP_SIZE="1g"
+    elif [ $TOTAL_MEM_GB -le 16 ]; then
+        HEAP_SIZE="2g"
+    elif [ $TOTAL_MEM_GB -le 32 ]; then
+        HEAP_SIZE="4g"
+    else
+        HEAP_SIZE="8g"
+    fi
+
+    # Calculate direct memory (for Netty buffers): 50% of heap
+    HEAP_SIZE_NUM=$(echo $HEAP_SIZE | sed 's/g//')
+    DIRECT_MEM=$((HEAP_SIZE_NUM * 512))  # In MB
+
+    echo "JVM Heap Size: $HEAP_SIZE (Direct Memory: ${DIRECT_MEM}m)"
+    echo "GC threads: $CLIENT_GC_THREADS"
+
+    # Check if hugepages are configured by tune_os.yaml
+    HUGEPAGES_AVAIL=$(grep HugePages_Total /proc/meminfo | awk '{print $2}')
+    HUGEPAGE_SIZE=$(grep Hugepagesize /proc/meminfo | awk '{print $2}')
+
+    # Check THP status
+    THP_ENABLED=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo "unknown")
+
+    # Configure memory flags based on architecture and available features
+    if [ "$HUGEPAGES_AVAIL" -gt 0 ] 2>/dev/null; then
+        echo "Hugepages detected: $HUGEPAGES_AVAIL pages of ${HUGEPAGE_SIZE}KB each"
+        HUGEPAGE_FLAGS="-XX:+UseLargePages -XX:LargePageSizeInBytes=${HUGEPAGE_SIZE}k"
+    elif [ "$IS_GRAVITON" = true ] && [[ "$THP_ENABLED" == *"madvise"* || "$THP_ENABLED" == *"always"* ]]; then
+        # Graviton with THP enabled - use TransparentHugePages
+        echo "THP enabled ($THP_ENABLED) - using TransparentHugePages for Graviton"
+        HUGEPAGE_FLAGS="-XX:+UseTransparentHugePages"
+    else
+        echo "Using regular pages (Hugepages: $HUGEPAGES_AVAIL, THP: $THP_ENABLED)"
+        HUGEPAGE_FLAGS=""
+    fi
+
+    # Architecture-specific JVM tuning (Graviton optimization guide recommendations)
+    if [ "$IS_GRAVITON" = true ]; then
+        # Graviton-specific: Optimize code cache to reduce instruction footprint pressure
+        # Start with conservative 64MB and tune up/down based on your application
+        CODE_CACHE_FLAGS="-XX:ReservedCodeCacheSize=64M -XX:InitialCodeCacheSize=64M"
+        echo "Graviton: Using optimized code cache (64MB)"
+    else
+        # x86: Use defaults (256MB code cache)
+        CODE_CACHE_FLAGS=""
+    fi
+
+    # Adjust Netty arenas based on number of cores allocated
+    if [ $TOTAL_ISOLATED -ge 8 ]; then
+        NETTY_ARENAS=4
+    elif [ $TOTAL_ISOLATED -ge 4 ]; then
+        NETTY_ARENAS=3
+    else
+        NETTY_ARENAS=2
+    fi
+
+    echo "Netty Direct Arenas: $NETTY_ARENAS"
+
+    # -Dio.netty.handler.ssl.openssl.engine=qatengine
+    # Use --localalloc instead of specific node binding
+    numactl --localalloc -- taskset -c $CLIENT_CORES $RT_PRIORITY java \
+    -Xms${HEAP_SIZE} -Xmx${HEAP_SIZE} \
+    -XX:MaxDirectMemorySize=${DIRECT_MEM}m \
+    -XX:+AlwaysPreTouch \
+    $HUGEPAGE_FLAGS \
+    $CODE_CACHE_FLAGS \
+    -XX:+UnlockExperimentalVMOptions \
+    -XX:+UseZGC \
+    -XX:ConcGCThreads=$CLIENT_GC_THREADS \
+    -XX:ZCollectionInterval=300 \
+    -XX:+UseNUMA \
+    -XX:+UnlockDiagnosticVMOptions \
+    -XX:GuaranteedSafepointInterval=0 \
+    -XX:+UseCountedLoopSafepoints \
+    -XX:+DisableExplicitGC \
+    -XX:+UseCompressedOops \
+    -XX:+UseTLAB \
+    -XX:+UseThreadPriorities \
+    -XX:ThreadPriorityPolicy=1 \
+    -XX:CompileThreshold=1000 \
+    -XX:+TieredCompilation \
+    -XX:CompileCommand=inline,com.aws.trading.*::* \
+    -Djava.nio.channels.spi.SelectorProvider=sun.nio.ch.EPollSelectorProvider \
+    -Dsun.rmi.dgc.server.gcInterval=0x7FFFFFFFFFFFFFFE \
+    -Dsun.rmi.dgc.client.gcInterval=0x7FFFFFFFFFFFFFFE \
+    -Dfile.encoding=UTF-8 \
+    -Dio.netty.allocator.numDirectArenas=$NETTY_ARENAS \
+    -Dio.netty.allocator.numHeapArenas=0 \
+    -Dio.netty.allocator.tinyCacheSize=256 \
+    -Dio.netty.allocator.smallCacheSize=64 \
+    -Dio.netty.allocator.normalCacheSize=32 \
+    -Dio.netty.allocator.maxOrder=9 \
+    -Dio.netty.buffer.checkBounds=false \
+    -Dio.netty.buffer.checkAccessible=false \
+    -Dio.netty.leakDetection.level=DISABLED \
+    -Dio.netty.recycler.maxCapacity=32 \
+    -Dio.netty.eventLoop.maxPendingTasks=1024 \
+    -Dio.netty.noPreferDirect=false \
+    -server \
+    -jar ExchangeFlow-1.0-SNAPSHOT.jar latency-test
+    ;;
+esac

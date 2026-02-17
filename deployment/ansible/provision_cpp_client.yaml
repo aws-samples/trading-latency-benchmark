@@ -1,0 +1,168 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: Provision EC2 for C++ HFT client
+  hosts: aws_ec2
+  collections:
+    - amazon.aws.ec2_instance
+  tasks:
+  - name: Install system dependencies for Amazon Linux 2023
+    become: yes
+    become_user: root
+    dnf:
+      name:
+        - make
+        - gcc
+        - gcc-c++
+        - patch
+        - glibc-devel
+        - git
+        - openssl-devel
+        - pkg-config
+        - zlib-devel
+        - numactl
+        - ethtool
+        - perf
+        - procps-ng
+        - chrony
+        - hwloc
+        - util-linux-core
+        - sysstat
+        - wget
+        - tar
+      state: present
+
+  - name: Check if CMake 3.27+ is installed
+    shell: cmake --version 2>/dev/null | head -1 | grep -oP '\d+\.\d+' | head -1
+    register: cmake_version
+    changed_when: false
+    failed_when: false
+
+  - name: Install CMake 3.27 from source
+    become: yes
+    become_user: root
+    shell: |
+      wget -q https://github.com/Kitware/CMake/releases/download/v3.27.9/cmake-3.27.9-linux-$(uname -m).tar.gz -O /tmp/cmake.tar.gz
+      tar -xzf /tmp/cmake.tar.gz -C /opt/
+      ln -sf /opt/cmake-3.27.9-linux-$(uname -m)/bin/cmake /usr/local/bin/cmake
+      ln -sf /opt/cmake-3.27.9-linux-$(uname -m)/bin/ctest /usr/local/bin/ctest
+      rm -f /tmp/cmake.tar.gz
+    when: cmake_version.stdout == '' or cmake_version.stdout is version('3.27', '<')
+    tags:
+      - build
+
+  - name: Generate self-signed certificates
+    shell: |
+      openssl req -x509 -newkey rsa:4096 -sha256 -days 365 \
+      -nodes -keyout localhost.key -out localhost.crt \
+      -subj "/CN=localhost" \
+      -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+
+      openssl pkcs12 -export -out keystore.p12 \
+      -inkey localhost.key \
+      -in localhost.crt \
+      -passout pass:123456
+    args:
+      creates: keystore.p12
+
+  - name: Create cpp-hft-client directory
+    file:
+      path: /home/ec2-user/cpp-hft-client
+      state: directory
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy
+
+  - name: Copy C++ HFT client source
+    synchronize:
+      src: ../../hft_client/cpp-client/
+      dest: /home/ec2-user/cpp-hft-client/
+      rsync_opts:
+        - "--exclude=build"
+        - "--exclude=.kiro"
+        - "--exclude=libs"
+    tags:
+      - deploy
+
+  - name: Fix C++ client ownership and permissions
+    become: yes
+    shell: |
+      chown -R ec2-user:ec2-user /home/ec2-user/cpp-hft-client
+      find /home/ec2-user/cpp-hft-client -type f -exec chmod 0644 {} +
+      find /home/ec2-user/cpp-hft-client -type d -exec chmod 0755 {} +
+    tags:
+      - deploy
+
+  - name: Build C++ HFT client
+    become: yes
+    become_user: ec2-user
+    shell: |
+      mkdir -p /home/ec2-user/cpp-hft-client/build
+      cd /home/ec2-user/cpp-hft-client/build
+      /usr/local/bin/cmake -DCMAKE_BUILD_TYPE=Release ..
+      /usr/local/bin/cmake --build . -j$(nproc)
+    register: cpp_build
+    tags:
+      - build
+
+  - name: Verify C++ client binary exists
+    stat:
+      path: /home/ec2-user/cpp-hft-client/build/hft_client
+    register: cpp_binary
+
+  - name: Report build result
+    debug:
+      msg: "C++ HFT client binary: {{ 'BUILT (' + cpp_binary.stat.size|string + ' bytes)' if cpp_binary.stat.exists else 'BUILD FAILED' }}"
+
+  - name: Copy client config properties
+    copy:
+      src: ../../hft_client/cpp-client/config.properties
+      dest: /home/ec2-user/config.properties
+      owner: ec2-user
+      group: ec2-user
+    tags:
+      - configure
+
+  - name: Configure trading server endpoint in config.properties
+    lineinfile:
+      path: /home/ec2-user/config.properties
+      regexp: '^HOST='
+      line: "HOST={{ trading_server_host }}"
+    when: trading_server_host is defined
+    tags:
+      - configure
+
+  - name: Configure test size in config.properties
+    lineinfile:
+      path: /home/ec2-user/config.properties
+      regexp: '^TEST_SIZE='
+      line: "TEST_SIZE={{ trading_test_size }}"
+    when: trading_test_size is defined
+    tags:
+      - configure
+
+  - name: Ensure histogram_logs directory exists
+    file:
+      path: /home/ec2-user/histogram_logs
+      state: directory
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+
+  - name: Copy deployment scripts
+    copy:
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    loop:
+      - { src: ../run_client.sh, dest: /home/ec2-user/run_client.sh }
+      - { src: ../run_server.sh, dest: /home/ec2-user/run_server.sh }
+      - { src: ../stop.sh, dest: /home/ec2-user/stop.sh }
+      - { src: ../latency_report.sh, dest: /home/ec2-user/latency_report.sh }
+    tags:
+      - deploy
