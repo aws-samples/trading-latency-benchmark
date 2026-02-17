@@ -23,6 +23,7 @@
 #   -r, --region REGION           AWS region (default: us-east-1)
 #   --client-instance-type TYPE   EC2 instance type (default: c6in.2xlarge)
 #   --test-size COUNT             Number of trading rounds per client (default: 10)
+#   --client-type TYPE             HFT client to run: java, rust, cpp (default: java)
 #   --base-ami AMI_ID             Use existing tuned AMI (skips AMI build and OS tuning)
 #   --no-cleanup                  Keep all resources on success (always kept on failure)
 #   --start-from-step N           Resume from step N (1-9), skipping earlier steps
@@ -47,6 +48,7 @@ SSH_KEY_FILE="${SSH_KEY_FILE:-}"
 # sufficient for latency benchmarking. Single EC2 instance runs both client and server.
 # Override with --client-instance-type if needed.
 CLIENT_INSTANCE_TYPE="c6in.2xlarge"
+CLIENT_TYPE="java"
 TEST_SIZE=10
 BASE_AMI=""
 CLEANUP_ON_SUCCESS=true
@@ -92,6 +94,7 @@ while [[ $# -gt 0 ]]; do
         -k|--key-file)        SSH_KEY_FILE="$2"; shift 2 ;;
         -r|--region)          REGION="$2"; shift 2 ;;
         --client-instance-type) CLIENT_INSTANCE_TYPE="$2"; shift 2 ;;
+        --client-type)        CLIENT_TYPE="$2"; shift 2 ;;
         --server-instance-type) log_warn "--server-instance-type ignored (single EC2 mode)"; shift 2 ;;
         --test-size)          TEST_SIZE="$2"; shift 2 ;;
         --base-ami)           BASE_AMI="$2"; shift 2 ;;
@@ -154,6 +157,7 @@ log "Repo Root:           $REPO_ROOT"
 log "Region:              $REGION"
 log "SSH Key:             $SSH_KEY_FILE ($SSH_KEY_NAME)"
 log "Client Instance:     $CLIENT_INSTANCE_TYPE"
+log "Client Type:         $CLIENT_TYPE"
 log "Mode:                Single EC2 (client+server on localhost)"
 log "Test Size:           $TEST_SIZE"
 log "Base AMI:            ${BASE_AMI:-none (will build)}"
@@ -392,6 +396,15 @@ PROVISION_EXTRA_VARS+=(-e "trading_test_size=$TEST_SIZE")
 
 sleep 5
 run_playbook "provision" provision_ec2.yaml -i "$INVENTORY" "${PROVISION_EXTRA_VARS[@]}"
+
+# Run additional provisioning for non-java clients
+if [[ "$CLIENT_TYPE" == "rust" ]]; then
+    log "Running Rust client provisioning..."
+    run_playbook "provision_rust" provision_rust_client.yaml -i "$INVENTORY" "${PROVISION_EXTRA_VARS[@]}"
+elif [[ "$CLIENT_TYPE" == "cpp" ]]; then
+    log "Running C++ client provisioning..."
+    run_playbook "provision_cpp" provision_cpp_client.yaml -i "$INVENTORY" "${PROVISION_EXTRA_VARS[@]}"
+fi
 else
     log_step "Step 3: Skipped (resuming from step $START_FROM_STEP)"
     cd "$ANSIBLE_DIR"
@@ -444,16 +457,17 @@ log_step "Step 6: Starting Latency Test"
 
 sleep 5
 run_playbook "start_client" start_latency_test.yaml \
-    -i "$INVENTORY"
+    -i "$INVENTORY" \
+    -e "client_type=$CLIENT_TYPE"
 else
     log_step "Step 6: Skipped (resuming from step $START_FROM_STEP)"
 fi
 
 # ============================================================
-# Step 7: Wait for Java client to finish
+# Step 7: Wait for HFT client to finish
 # ============================================================
 if [[ "$START_FROM_STEP" -le 7 ]]; then
-log_step "Step 7: Waiting for ExchangeFlow client to complete"
+log_step "Step 7: Waiting for HFT client to complete"
 
 ELAPSED=0
 POLL_INTERVAL=15
@@ -469,7 +483,7 @@ while true; do
     STOPPED_COUNT=$(echo "$CHECK_OUTPUT" | grep -c "STOPPED" || true)
 
     if [[ "$STOPPED_COUNT" -gt 0 && "$RUNNING_COUNT" -eq 0 ]]; then
-        log_ok "ExchangeFlow client finished on all hosts after ${ELAPSED}s"
+        log_ok "HFT client finished on all hosts after ${ELAPSED}s"
         break
     fi
 
