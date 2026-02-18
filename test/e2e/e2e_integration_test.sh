@@ -7,13 +7,14 @@
 # This script performs a full lifecycle test:
 #   1. Build an OS-tuned AMI
 #   2. Deploy single-instance stack (client+server on one EC2)
-#   3. Provision instances (install deps, build client/server)
-#   4. Apply OS tuning
-#   5. Start mock trading server
-#   6. Start latency test client
-#   7. Wait for client to finish (polls every 15s)
-#   8. Collect results
-#   9. Validate and tear down
+#   3. Apply OS tuning (reboot)
+#   4. Provision base (system deps, mock trading server)
+#   5. Provision HFT client (java, rust, or cpp)
+#   6. Start mock trading server
+#   7. Start latency test client
+#   8. Wait for client to finish (polls every 15s)
+#   9. Collect results
+#  10. Validate and tear down
 #
 # Usage:
 #   ./e2e_integration_test.sh [options]
@@ -26,7 +27,7 @@
 #   --client-type TYPE             HFT client to run: java, rust, cpp (default: java)
 #   --base-ami AMI_ID             Use existing tuned AMI (skips AMI build and OS tuning)
 #   --no-cleanup                  Keep all resources on success (always kept on failure)
-#   --start-from-step N           Resume from step N (1-9), skipping earlier steps
+#   --start-from-step N           Resume from step N (1-10), skipping earlier steps
 #   -h, --help                    Show this help message
 
 set -euo pipefail
@@ -121,8 +122,8 @@ fi
 SSH_KEY_NAME=$(basename "$SSH_KEY_FILE" .pem)
 
 # Validate start-from-step
-if [[ "$START_FROM_STEP" -lt 1 || "$START_FROM_STEP" -gt 9 ]]; then
-    log_err "--start-from-step must be between 1 and 9"
+if [[ "$START_FROM_STEP" -lt 1 || "$START_FROM_STEP" -gt 10 ]]; then
+    log_err "--start-from-step must be between 1 and 10"
     exit 1
 fi
 
@@ -377,14 +378,41 @@ else
 fi
 
 # ============================================================
-# Step 3: Wait for instances and provision
+# Step 3: Apply OS Tuning (skipped when using a pre-built tuned AMI)
 # ============================================================
-if [[ "$START_FROM_STEP" -le 3 ]]; then
-log_step "Step 3: Provisioning Instances"
+if [[ -n "$AMI_ID" ]]; then
+    log_step "Step 3: Skipped (AMI already includes OS tuning)"
+elif [[ "$START_FROM_STEP" -le 3 ]]; then
+log_step "Step 3: Applying OS Tuning"
 
 cd "$ANSIBLE_DIR"
 export AWS_REGION="$REGION"
 
+wait_for_ssh "$INVENTORY"
+
+sleep 5
+run_playbook "tune_os" tune_os.yaml -i "$INVENTORY"
+
+# Wait for reboot after tuning
+log "Waiting for instances to reboot after OS tuning..."
+sleep 60
+wait_for_ssh "$INVENTORY"
+else
+    log_step "Step 3: Skipped (resuming from step $START_FROM_STEP)"
+    cd "$ANSIBLE_DIR"
+    export AWS_REGION="$REGION"
+fi
+
+# ============================================================
+# Step 4: Provision base (system deps, mock trading server)
+# ============================================================
+if [[ "$START_FROM_STEP" -le 4 ]]; then
+log_step "Step 4: Provisioning Base (system deps, mock server)"
+
+cd "$ANSIBLE_DIR"
+export AWS_REGION="$REGION"
+
+# Ensure SSH is available (may have rebooted in step 3)
 wait_for_ssh "$INVENTORY"
 
 # Build extra vars for config customization
@@ -396,17 +424,8 @@ PROVISION_EXTRA_VARS+=(-e "trading_test_size=$TEST_SIZE")
 
 sleep 5
 run_playbook "provision" provision_ec2.yaml -i "$INVENTORY" "${PROVISION_EXTRA_VARS[@]}"
-
-# Run additional provisioning for non-java clients
-if [[ "$CLIENT_TYPE" == "rust" ]]; then
-    log "Running Rust client provisioning..."
-    run_playbook "provision_rust" provision_rust_client.yaml -i "$INVENTORY" "${PROVISION_EXTRA_VARS[@]}"
-elif [[ "$CLIENT_TYPE" == "cpp" ]]; then
-    log "Running C++ client provisioning..."
-    run_playbook "provision_cpp" provision_cpp_client.yaml -i "$INVENTORY" "${PROVISION_EXTRA_VARS[@]}"
-fi
 else
-    log_step "Step 3: Skipped (resuming from step $START_FROM_STEP)"
+    log_step "Step 4: Skipped (resuming from step $START_FROM_STEP)"
     cd "$ANSIBLE_DIR"
     export AWS_REGION="$REGION"
 
@@ -415,29 +434,35 @@ else
 fi
 
 # ============================================================
-# Step 4: Apply OS Tuning (skipped when using a pre-built tuned AMI)
+# Step 5: Provision HFT client
 # ============================================================
-if [[ -n "$AMI_ID" ]]; then
-    log_step "Step 4: Skipped (AMI already includes OS tuning)"
-elif [[ "$START_FROM_STEP" -le 4 ]]; then
-log_step "Step 4: Applying OS Tuning"
+if [[ "$START_FROM_STEP" -le 5 ]]; then
+log_step "Step 5: Provisioning $CLIENT_TYPE HFT client"
 
-sleep 5
-run_playbook "tune_os" tune_os.yaml -i "$INVENTORY"
+cd "$ANSIBLE_DIR"
+export AWS_REGION="$REGION"
 
-# Wait for reboot after tuning
-log "Waiting for instances to reboot after OS tuning..."
-sleep 60
-wait_for_ssh "$INVENTORY"
+# Build extra vars for config customization
+PROVISION_EXTRA_VARS=()
+if [[ -n "$SERVER_PRIVATE_IP" ]]; then
+    PROVISION_EXTRA_VARS+=(-e "trading_server_host=$SERVER_PRIVATE_IP")
+fi
+PROVISION_EXTRA_VARS+=(-e "trading_test_size=$TEST_SIZE")
+
+case "$CLIENT_TYPE" in
+    rust) run_playbook "provision_rust" provision_rust_client.yaml -i "$INVENTORY" "${PROVISION_EXTRA_VARS[@]}" ;;
+    cpp)  run_playbook "provision_cpp" provision_cpp_client.yaml -i "$INVENTORY" "${PROVISION_EXTRA_VARS[@]}" ;;
+    java|*) run_playbook "provision_java" provision_java_client.yaml -i "$INVENTORY" "${PROVISION_EXTRA_VARS[@]}" ;;
+esac
 else
-    log_step "Step 4: Skipped (resuming from step $START_FROM_STEP)"
+    log_step "Step 5: Skipped (resuming from step $START_FROM_STEP)"
 fi
 
 # ============================================================
-# Step 5: Start Server
+# Step 6: Start Server
 # ============================================================
-if [[ "$START_FROM_STEP" -le 5 ]]; then
-log_step "Step 5: Starting Mock Trading Server"
+if [[ "$START_FROM_STEP" -le 6 ]]; then
+log_step "Step 6: Starting Mock Trading Server"
 
 sleep 5
 run_playbook "start_server" restart_mock_trading_server.yaml \
@@ -446,28 +471,28 @@ run_playbook "start_server" restart_mock_trading_server.yaml \
 # Give server time to start
 sleep 10
 else
-    log_step "Step 5: Skipped (resuming from step $START_FROM_STEP)"
+    log_step "Step 6: Skipped (resuming from step $START_FROM_STEP)"
 fi
 
 # ============================================================
-# Step 6: Start Latency Test
+# Step 7: Start Latency Test
 # ============================================================
-if [[ "$START_FROM_STEP" -le 6 ]]; then
-log_step "Step 6: Starting Latency Test"
+if [[ "$START_FROM_STEP" -le 7 ]]; then
+log_step "Step 7: Starting Latency Test"
 
 sleep 5
 run_playbook "start_client" start_latency_test.yaml \
     -i "$INVENTORY" \
     -e "client_type=$CLIENT_TYPE"
 else
-    log_step "Step 6: Skipped (resuming from step $START_FROM_STEP)"
+    log_step "Step 7: Skipped (resuming from step $START_FROM_STEP)"
 fi
 
 # ============================================================
-# Step 7: Wait for HFT client to finish
+# Step 8: Wait for HFT client to finish
 # ============================================================
-if [[ "$START_FROM_STEP" -le 7 ]]; then
-log_step "Step 7: Waiting for HFT client to complete"
+if [[ "$START_FROM_STEP" -le 8 ]]; then
+log_step "Step 8: Waiting for HFT client to complete"
 
 ELAPSED=0
 POLL_INTERVAL=15
@@ -492,25 +517,25 @@ while true; do
     ELAPSED=$((ELAPSED + POLL_INTERVAL))
 done
 else
-    log_step "Step 7: Skipped (resuming from step $START_FROM_STEP)"
-fi
-
-# ============================================================
-# Step 8: Collect results
-# ============================================================
-if [[ "$START_FROM_STEP" -le 8 ]]; then
-log_step "Step 8: Collecting Results"
-
-sleep 5
-run_playbook "fetch_logs" fetch_histogram_logs.yaml -i "$INVENTORY"
-else
     log_step "Step 8: Skipped (resuming from step $START_FROM_STEP)"
 fi
 
 # ============================================================
-# Step 9: Validate results
+# Step 9: Collect results
 # ============================================================
-log_step "Step 9: Validating Results"
+if [[ "$START_FROM_STEP" -le 9 ]]; then
+log_step "Step 9: Collecting Results"
+
+sleep 5
+run_playbook "fetch_logs" fetch_histogram_logs.yaml -i "$INVENTORY"
+else
+    log_step "Step 9: Skipped (resuming from step $START_FROM_STEP)"
+fi
+
+# ============================================================
+# Step 10: Validate results
+# ============================================================
+log_step "Step 10: Validating Results"
 
 HISTOGRAM_DIR="${REPO_ROOT}/histogram_logs"
 HLOG_FILES=$(find "$HISTOGRAM_DIR" -maxdepth 2 -name "*.hlog" -type f 2>/dev/null || echo "")

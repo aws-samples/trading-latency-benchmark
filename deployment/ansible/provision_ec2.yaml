@@ -1,17 +1,18 @@
 #  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: MIT-0
 
+# Base provisioning: system dependencies, TLS certs, mock trading server,
+# deployment scripts, and shared config. Client-specific provisioning is
+# handled by provision_java_client.yaml, provision_rust_client.yaml, or
+# provision_cpp_client.yaml.
+
 ---
-- name: provision ec2 for latency tests
+- name: Provision EC2 base and mock trading server
   hosts: aws_ec2
   collections:
     - amazon.aws.ec2_instance
   tasks:
-  - name: Get hostname
-    command: echo {{ ansible_hostname.split('-')[1] }}
-    register: hostname
-    
-  - name: Install dependencies for Amazon Linux 2023
+  - name: Install base dependencies for Amazon Linux 2023
     become: yes
     become_user: root
     dnf:
@@ -21,12 +22,10 @@
         - patch
         - glibc-devel
         - git
-        - apr-devel
         - openssl-devel
         - wget
         - vim
         - tmux
-        - java-17-amazon-corretto
         - numactl
         - ethtool
         - perf
@@ -36,155 +35,36 @@
         - util-linux-core
         - sysstat
       state: present
-    
-  - name: Create Maven installation directory
-    become: yes
-    become_user: root
-    file:
-      path: /opt/maven
-      state: directory
-      mode: '0755'
-      
-  - name: Download Maven
-    become: yes
-    become_user: root
-    get_url:
-      url: "https://dlcdn.apache.org/maven/maven-3/3.9.12/binaries/apache-maven-3.9.12-bin.tar.gz"
-      dest: "/tmp/apache-maven-3.9.12-bin.tar.gz"
-      mode: '0644'
-    register: maven_download
-    
-  - name: Extract Maven
-    become: yes
-    become_user: root
-    unarchive:
-      src: "/tmp/apache-maven-3.9.12-bin.tar.gz"
-      dest: "/opt/maven"
-      remote_src: yes
-      creates: "/opt/maven/apache-maven-3.9.12"
-    when: maven_download is changed
-    
-  - name: Create Maven profile script
-    become: yes
-    become_user: root
-    copy:
-      dest: /etc/profile.d/maven.sh
-      content: |
-        #!/bin/bash
-        export MAVEN_HOME=/opt/maven/apache-maven-3.9.12
-        export PATH=$MAVEN_HOME/bin:$PATH
-      mode: '0755'
-      
-  - name: Create Maven symlink
-    become: yes
-    become_user: root
-    file:
-      src: /opt/maven/apache-maven-3.9.12/bin/mvn
-      dest: /usr/bin/mvn
-      state: link
-      
-  - name: Generate Self Signed certificates
+
+  - name: Generate self-signed certificates
     shell: |
       openssl req -x509 -newkey rsa:4096 -sha256 -days 365 \
       -nodes -keyout localhost.key -out localhost.crt \
       -subj "/CN=localhost" \
       -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-      
+
       openssl pkcs12 -export -out keystore.p12 \
       -inkey localhost.key \
       -in localhost.crt \
       -passout pass:123456
     args:
       creates: keystore.p12
-      
-  - name: copy run client script to ec2
-    copy:
-      src: ../run_client.sh
-      dest: /home/ec2-user/run_client.sh
-      owner: ec2-user
-      group: ec2-user
-      mode: 0755
-    tags:
-      - deploy
-  - name: copy run server script to ec2
-    copy:
-      src: ../run_server.sh
-      dest: /home/ec2-user/run_server.sh
-      owner: ec2-user
-      group: ec2-user
-      mode: 0755
-    tags:
-      - deploy   
 
-  - name: copy stop script to ec2
+  - name: Copy deployment scripts
     copy:
-      src: ../stop.sh
-      dest: /home/ec2-user/stop.sh
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
       owner: ec2-user
       group: ec2-user
       mode: 0755
+    loop:
+      - { src: ../run_client.sh, dest: /home/ec2-user/run_client.sh }
+      - { src: ../run_server.sh, dest: /home/ec2-user/run_server.sh }
+      - { src: ../stop.sh, dest: /home/ec2-user/stop.sh }
+      - { src: ../latency_report.sh, dest: /home/ec2-user/latency_report.sh }
     tags:
       - deploy
-      
-  - name: copy latency report script to ec2
-    copy:
-      src: ../latency_report.sh
-      dest: /home/ec2-user/latency_report.sh
-      owner: ec2-user
-      group: ec2-user
-      mode: 0755
-    tags:
-      - deploy
-      
-  - name: Create hft-client directory
-    file:
-      path: /home/ec2-user/hft-client/src
-      state: directory
-      owner: ec2-user
-      group: ec2-user
-      mode: 0755
-    tags:
-      - deploy
-      
-  - name: copy java source code
-    copy:
-      src: ../../hft_client/java_client/src/
-      dest: /home/ec2-user/hft-client/src
-      owner: ec2-user
-      group: ec2-user
-      mode: 0644
-    tags:
-      - deploy
-      
-  - name: copy pom xml
-    copy:
-      src: ../../hft_client/java_client/pom.xml
-      dest: /home/ec2-user/hft-client/pom.xml
-      owner: ec2-user
-      group: ec2-user
-      mode: 0644
-    tags:
-      - deploy
-      
-  - name: copy client config properties to ec2
-    copy:
-      src: ../../hft_client/java_client/src/main/resources/config.properties
-      dest: /home/ec2-user/config.properties
-      owner: ec2-user
-      group: ec2-user
-      
-  - name: Build HFT Client
-    become: yes
-    become_user: ec2-user
-    shell: |
-      export MAVEN_HOME=/opt/maven/apache-maven-3.9.12
-      export PATH=$MAVEN_HOME/bin:$PATH
-      cd /home/ec2-user/hft-client
-      mvn clean install
-      cp ./target/ExchangeFlow-1.0-SNAPSHOT.jar /home/ec2-user/
-    environment:
-  #     JAVA_HOME: /usr/lib/jvm/java-17-amazon-corretto
-      
+
   - name: Create mock-trading-server directory
     file:
       path: /home/ec2-user/mock-trading-server
@@ -195,7 +75,6 @@
     tags:
       - deploy
 
-      
   - name: Copy mock trading server
     synchronize:
       src: ../../mock-trading-server/
@@ -213,7 +92,7 @@
       find /home/ec2-user/mock-trading-server -type d -exec chmod 0755 {} +
     tags:
       - deploy
-      
+
   - name: Download Rust Installer
     get_url:
       url: https://sh.rustup.rs
@@ -222,7 +101,7 @@
       force: 'yes'
     tags:
       - rust
-      
+
   - name: Install Rust for ec2-user
     become: yes
     become_user: ec2-user
@@ -231,7 +110,7 @@
       creates: /home/ec2-user/.cargo/bin/rustc
     tags:
       - rust
-      
+
   - name: Build Exchange Server
     become: yes
     become_user: ec2-user
@@ -241,15 +120,14 @@
       cargo clean
       cargo update
       cargo build --release
-    # Removed 'creates' argument to ensure it always builds with the latest code
-      
-  - name: copy mock trading server configuration toml file
+
+  - name: Copy mock trading server configuration toml file
     copy:
       src: ../../mock-trading-server/configuration.toml
       dest: /home/ec2-user/mock-trading-server/configuration.toml
       owner: ec2-user
       group: ec2-user
-      
+
   - name: Ensure histogram_logs directory exists
     file:
       path: /home/ec2-user/histogram_logs
@@ -257,21 +135,3 @@
       owner: ec2-user
       group: ec2-user
       mode: 0755
-
-  - name: Configure trading server endpoint in config.properties
-    lineinfile:
-      path: /home/ec2-user/config.properties
-      regexp: '^HOST='
-      line: "HOST={{ trading_server_host }}"
-    when: trading_server_host is defined
-    tags:
-      - configure
-
-  - name: Configure test size in config.properties
-    lineinfile:
-      path: /home/ec2-user/config.properties
-      regexp: '^TEST_SIZE='
-      line: "TEST_SIZE={{ trading_test_size }}"
-    when: trading_test_size is defined
-    tags:
-      - configure
