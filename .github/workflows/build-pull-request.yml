@@ -74,6 +74,42 @@ jobs:
           path: mock-trading-server/target/release/mock-trading-server
           retention-days: 7
 
+  rust-client:
+    name: Build Rust HFT Client
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hft_client/rust_client
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      
+      - name: Check formatting
+        run: cargo fmt --check
+        continue-on-error: true
+      
+      - name: Run Clippy
+        run: cargo clippy -- -D warnings
+        continue-on-error: true
+      
+      - name: Build
+        run: cargo build --release
+      
+      - name: Run tests
+        run: cargo test
+      
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-client-binary
+          path: hft_client/rust_client/target/release/hft_client
+          retention-days: 7
+
   cpp-client-linux:
     name: Build C++ Client (Linux)
     runs-on: ubuntu-latest
@@ -89,7 +125,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential libssl-dev libboost-all-dev
+          sudo apt-get install -y cmake build-essential libssl-dev libboost-all-dev zlib1g-dev
       
       - name: Create build directory
         run: mkdir -p build
