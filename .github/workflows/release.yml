@@ -189,6 +189,62 @@ jobs:
           name: rust-windows
           path: mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe
 
+  build-rust-client-linux:
+    name: Build Rust HFT Client (Linux)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            cross: true
+          - target: aarch64-unknown-linux-gnu
+            cross: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+      
+      - name: Get version
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+      - name: Install cargo-zigbuild (for ARM64 cross-compilation)
+        if: matrix.cross == true
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+      
+      - name: Build
+        working-directory: hft_client/rust_client
+        run: |
+          if [ "${{ matrix.cross }}" == "true" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+      
+      - name: Prepare binary
+        run: |
+          ARCH=$(echo ${{ matrix.target }} | cut -d'-' -f1)
+          if [ "$ARCH" = "x86_64" ]; then
+            SUFFIX="linux-x86_64"
+          else
+            SUFFIX="linux-aarch64"
+          fi
+          cp hft_client/rust_client/target/${{ matrix.target }}/release/hft_client \
+             hft-client-rust-${{ steps.get_version.outputs.VERSION }}-${SUFFIX}
+          strip hft-client-rust-${{ steps.get_version.outputs.VERSION }}-${SUFFIX} || true
+      
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-client-${{ matrix.target }}
+          path: hft-client-rust-${{ steps.get_version.outputs.VERSION }}-*
+
   build-cpp-linux:
     name: Build C++ Client (Linux)
     runs-on: ubuntu-latest
@@ -342,7 +398,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [build-java, build-rust-linux, build-rust-macos, build-rust-windows, build-cpp-linux, build-cpp-macos, build-cpp-windows]
+    needs: [build-java, build-rust-linux, build-rust-macos, build-rust-windows, build-rust-client-linux, build-cpp-linux, build-cpp-macos, build-cpp-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -396,6 +452,7 @@ jobs:
           ### 📦 Components
           
           - **Java Trading Client** - ✅ Cross-platform (all architectures)
+          - **Rust HFT Client** - ✅ Linux (x86_64 & ARM64/Graviton)
           - **Rust Mock Server** - ✅ Linux (x86_64 & ARM64/Graviton), macOS (Intel & Apple Silicon), Windows
           - **C++ Client** - ✅ Multi-platform: Linux (x86_64 & ARM64/Graviton), macOS (Intel & Apple Silicon), Windows
           - **Configuration Samples** - 📝 All config files with documentation
@@ -411,6 +468,18 @@ jobs:
           \`\`\`bash
           java -jar ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
           \`\`\`
+          
+          **Rust HFT Client (Linux only):**
+          - **Linux x86_64:**
+            \`\`\`bash
+            chmod +x hft-client-rust-${{ steps.get_version.outputs.VERSION }}-linux-x86_64
+            ./hft-client-rust-${{ steps.get_version.outputs.VERSION }}-linux-x86_64
+            \`\`\`
+          - **Linux ARM64 (Graviton):**
+            \`\`\`bash
+            chmod +x hft-client-rust-${{ steps.get_version.outputs.VERSION }}-linux-aarch64
+            ./hft-client-rust-${{ steps.get_version.outputs.VERSION }}-linux-aarch64
+            \`\`\`
           
           **C++ Client (choose your platform):**
           - **Linux x86_64:** 
