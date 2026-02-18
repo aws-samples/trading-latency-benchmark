@@ -7,26 +7,12 @@
   collections:
     - amazon.aws.ec2_instance
   tasks:
-  - name: Install system dependencies for Amazon Linux 2023
+  - name: Install Rust-specific dependencies
     become: yes
     become_user: root
     dnf:
       name:
-        - make
-        - gcc
-        - patch
-        - glibc-devel
-        - git
-        - openssl-devel
         - pkg-config
-        - numactl
-        - ethtool
-        - perf
-        - procps-ng
-        - chrony
-        - hwloc
-        - util-linux-core
-        - sysstat
       state: present
 
   - name: Download Rust installer
@@ -46,20 +32,6 @@
       creates: /home/ec2-user/.cargo/bin/rustc
     tags:
       - rust
-
-  - name: Generate self-signed certificates
-    shell: |
-      openssl req -x509 -newkey rsa:4096 -sha256 -days 365 \
-      -nodes -keyout localhost.key -out localhost.crt \
-      -subj "/CN=localhost" \
-      -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-
-      openssl pkcs12 -export -out keystore.p12 \
-      -inkey localhost.key \
-      -in localhost.crt \
-      -passout pass:123456
-    args:
-      creates: keystore.p12
 
   - name: Create rust-hft-client directory
     file:
@@ -137,26 +109,3 @@
     when: trading_test_size is defined
     tags:
       - configure
-
-  - name: Ensure histogram_logs directory exists
-    file:
-      path: /home/ec2-user/histogram_logs
-      state: directory
-      owner: ec2-user
-      group: ec2-user
-      mode: 0755
-
-  - name: Copy deployment scripts
-    copy:
-      src: "{{ item.src }}"
-      dest: "{{ item.dest }}"
-      owner: ec2-user
-      group: ec2-user
-      mode: 0755
-    loop:
-      - { src: ../run_client.sh, dest: /home/ec2-user/run_client.sh }
-      - { src: ../run_server.sh, dest: /home/ec2-user/run_server.sh }
-      - { src: ../stop.sh, dest: /home/ec2-user/stop.sh }
-      - { src: ../latency_report.sh, dest: /home/ec2-user/latency_report.sh }
-    tags:
-      - deploy
