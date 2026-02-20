@@ -59,6 +59,7 @@ private:
     random_device rd;
     mt19937 gen;
     struct hdr_histogram* histogram;
+    struct timespec histogramStartTimeSpec;
     void hdrPrint();
     void saveHistogramToFile();
     template<typename T>

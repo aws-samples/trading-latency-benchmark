@@ -138,11 +138,12 @@ void ExchangeClientLatencyTestHandler::hdrPrint(){
     hdr_reset(histogram);
 }
 void ExchangeClientLatencyTestHandler::saveHistogramToFile() {
-    // Create host-named directory (dots replaced with underscores)
+    // Create host-named directory (dots replaced with underscores) — consistent with Java client
     std::string folder = Config::HOST;
     std::replace(folder.begin(), folder.end(), '.', '_');
     mkdir(folder.c_str(), 0755);
 
+    // Use same filename as Java client for consistency
     std::string path = folder + "/histogram_cpp.hlog";
     FILE* f = fopen(path.c_str(), "a");
     if (!f) {
@@ -156,9 +157,20 @@ void ExchangeClientLatencyTestHandler::saveHistogramToFile() {
     struct timespec now;
     clock_gettime(CLOCK_REALTIME, &now);
 
+    // Write header with proper format — matching Java's HistogramLogWriter pattern:
+    // comment, format version, start time, base time, legend
     hdr_log_write_header(&writer, f, "C++ HFT Client 0.0.1", &now);
-    hdr_log_write(&writer, f, &now, &now, histogram);
+
+    // Write interval histogram with proper start/end timestamps
+    // start = when histogram recording began, end = current time
+    // This matches Java: histogramLogWriter.outputIntervalHistogram(histogram)
+    // with setBaseTime(histogramStartTime) and outputStartTime(currentTime)
+    hdr_log_write(&writer, f, &this->histogramStartTimeSpec, &now, histogram);
+
     fclose(f);
+
+    // Update histogramStartTime for next interval (like Java's histogramStartTime = currentTime)
+    this->histogramStartTimeSpec = now;
 
     logger("Histogram saved to " + path);
 }
@@ -236,6 +248,7 @@ void ExchangeClientLatencyTestHandler::on_message(T* c, websocketpp::connection_
     } else if (type == "SUBSCRIPTIONS") {
         logger(parsedObject.dump());
         this->testStartTime = chrono::steady_clock::now();
+        clock_gettime(CLOCK_REALTIME, &this->histogramStartTimeSpec);
         sendOrder(c, m_hdl);
     } else {
         logger("Unhandled object " + parsedObject.dump());
