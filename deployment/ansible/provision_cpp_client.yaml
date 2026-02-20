@@ -13,6 +13,8 @@
     dnf:
       name:
         - gcc-c++
+        - git
+        - openssl-devel
         - pkg-config
         - zlib-devel
         - tar
@@ -71,6 +73,7 @@
     become: yes
     become_user: ec2-user
     shell: |
+      rm -rf /home/ec2-user/cpp-hft-client/build
       mkdir -p /home/ec2-user/cpp-hft-client/build
       cd /home/ec2-user/cpp-hft-client/build
       /usr/local/bin/cmake -DCMAKE_BUILD_TYPE=Release ..
