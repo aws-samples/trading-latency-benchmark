@@ -6,9 +6,9 @@ This directory contains the AWS CDK code for deploying the infrastructure requir
 
 The CDK code supports multiple deployment architectures:
 
-1. **Single Instance Stack** (default): Deploys two EC2 instances for benchmarking different instance types
-2. **Cluster Placement Group Stack**: Deploys client and server instances within a Cluster Placement Group for optimal network performance
-3. **Multi-AZ Stack**: Deploys instances across multiple availability zones to measure cross-AZ latency
+1. **Single Instance Stack** (default): Deploys two EC2 instances in a single availability zone (AZ) but **not within a Cluster Placement Group** for benchmarking different instance types
+2. **Cluster Placement Group Stack**: Deploys tow EC2 instances (client and server) in a single AZ **within** a Cluster Placement Group (CPG) for optimal network performance
+3. **Multi-AZ Stack**: Deploys instances across multiple AZs to measure cross-AZ latency
 
 ## Prerequisites
 

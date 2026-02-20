@@ -27,6 +27,9 @@
 #include <openssl/rand.h>
 //#include <hdr_histogram.h>
 #include "hdr/hdr_histogram.h"
+#include "hdr/hdr_histogram_log.h"
+#include <sys/stat.h>
+#include <algorithm>
 using namespace std;
 using json = nlohmann::json;
 
@@ -40,7 +43,7 @@ ExchangeClientLatencyTestHandler::ExchangeClientLatencyTestHandler(int apiToken,
     this->histogram = new hdr_histogram();
     hdr_init(
             1,  // Minimum value
-            INT64_C(3600000000),  // Maximum value (1 hour in microseconds)
+            INT64_C(3600000000000),  // Maximum value (1 hour in nanoseconds)
             3,  // Number of significant figures
             &histogram);  // Pointer to initialise
 }
@@ -97,11 +100,10 @@ bool ExchangeClientLatencyTestHandler::calculateRoundTrip(chrono::steady_clock::
     }
     auto roundTripTime = eventReceiveTime - it->second;
     if (roundTripTime.count() > 0) {
-        long long roundTripTimeInMicroseconds = chrono::duration_cast<chrono::microseconds>(roundTripTime).count();
-        //logger("RTT:" + std::to_string(roundTripTimeInMicroseconds));
+        long long roundTripTimeInNanoseconds = chrono::duration_cast<chrono::nanoseconds>(roundTripTime).count();
         hdr_record_value(
                 histogram,  // Histogram to record to
-                roundTripTimeInMicroseconds);
+                roundTripTimeInNanoseconds);
     }
     sentTimeMap.erase(it);
     return false;
@@ -119,19 +121,48 @@ void ExchangeClientLatencyTestHandler::hdrPrint(){
     int64_t valueW = hdr_max(histogram);
     std::stringstream ss;
     ss << "Percentiles: {" << std::endl;
-    ss << "        \"50.0%\":\"" << value50 << "µs\"," << std::endl;
-    ss << "        \"90.0%\":\"" << value90 << "µs\"," << std::endl;
-    ss << "        \"95.0%\":\"" << value95 << "µs\"," << std::endl;
-    ss << "        \"99.0%\":\"" << value99 << "µs\"," << std::endl;
-    ss << "        \"99.9%\":\"" << value99_9 << "µs\"," << std::endl;
-    ss << "        \"99.99%\":\"" << value99_99 << "µs\"," << std::endl;
-    ss << "        \"W\":\"" << valueW << "µs\"" << std::endl;
+    ss << "        \"50.0%\":\"" << value50 << "ns\"," << std::endl;
+    ss << "        \"90.0%\":\"" << value90 << "ns\"," << std::endl;
+    ss << "        \"95.0%\":\"" << value95 << "ns\"," << std::endl;
+    ss << "        \"99.0%\":\"" << value99 << "ns\"," << std::endl;
+    ss << "        \"99.9%\":\"" << value99_9 << "ns\"," << std::endl;
+    ss << "        \"99.99%\":\"" << value99_99 << "ns\"," << std::endl;
+    ss << "        \"W\":\"" << valueW << "ns\"" << std::endl;
     ss << "}";
     std::cout << ss.str() << std::endl;
+
+    // Save histogram to .hlog file in host-named directory
+    saveHistogramToFile();
     
     // Reset histogram for next interval (like Java's hdr.reset())
     hdr_reset(histogram);
 }
+void ExchangeClientLatencyTestHandler::saveHistogramToFile() {
+    // Create host-named directory (dots replaced with underscores)
+    std::string folder = Config::HOST;
+    std::replace(folder.begin(), folder.end(), '.', '_');
+    mkdir(folder.c_str(), 0755);
+
+    std::string path = folder + "/histogram_cpp.hlog";
+    FILE* f = fopen(path.c_str(), "a");
+    if (!f) {
+        logger("Failed to open histogram log file: " + path);
+        return;
+    }
+
+    struct hdr_log_writer writer;
+    hdr_log_writer_init(&writer);
+
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    hdr_log_write_header(&writer, f, "C++ HFT Client 0.0.1", &now);
+    hdr_log_write(&writer, f, &now, &now, histogram);
+    fclose(f);
+
+    logger("Histogram saved to " + path);
+}
+
 websocketpp::connection_hdl ExchangeClientLatencyTestHandler::get_hdl() const{
     return this->hdl;
 }
@@ -191,6 +222,12 @@ void ExchangeClientLatencyTestHandler::on_message(T* c, websocketpp::connection_
         }
         if (orderResponseCount % Config::TEST_SIZE == 0) {
             hdrPrint();
+
+            // Test complete — close connection to exit gracefully
+            logger("Test completed. Reached TEST_SIZE: " + std::to_string(Config::TEST_SIZE) + ". Exiting gracefully.");
+            websocketpp::lib::error_code ec;
+            c->close(m_hdl, websocketpp::close::status::normal, "test complete", ec);
+            return;
         }
     } else if (type == "AUTHENTICATED") {
         logger(parsedObject.dump());

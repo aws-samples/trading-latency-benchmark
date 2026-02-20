@@ -1,0 +1,141 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: Provision EC2 for Java HFT client
+  hosts: aws_ec2
+  collections:
+    - amazon.aws.ec2_instance
+  tasks:
+  - name: Install Java dependencies for Amazon Linux 2023
+    become: yes
+    become_user: root
+    dnf:
+      name:
+        - java-17-amazon-corretto
+        - apr-devel
+      state: present
+
+  - name: Create Maven installation directory
+    become: yes
+    become_user: root
+    file:
+      path: /opt/maven
+      state: directory
+      mode: '0755'
+
+  - name: Download Maven
+    become: yes
+    become_user: root
+    get_url:
+      url: "https://dlcdn.apache.org/maven/maven-3/3.9.12/binaries/apache-maven-3.9.12-bin.tar.gz"
+      dest: "/tmp/apache-maven-3.9.12-bin.tar.gz"
+      mode: '0644'
+    register: maven_download
+
+  - name: Extract Maven
+    become: yes
+    become_user: root
+    unarchive:
+      src: "/tmp/apache-maven-3.9.12-bin.tar.gz"
+      dest: "/opt/maven"
+      remote_src: yes
+      creates: "/opt/maven/apache-maven-3.9.12"
+    when: maven_download is changed
+
+  - name: Create Maven profile script
+    become: yes
+    become_user: root
+    copy:
+      dest: /etc/profile.d/maven.sh
+      content: |
+        #!/bin/bash
+        export MAVEN_HOME=/opt/maven/apache-maven-3.9.12
+        export PATH=$MAVEN_HOME/bin:$PATH
+      mode: '0755'
+
+  - name: Create Maven symlink
+    become: yes
+    become_user: root
+    file:
+      src: /opt/maven/apache-maven-3.9.12/bin/mvn
+      dest: /usr/bin/mvn
+      state: link
+
+  - name: Create hft-client directory
+    file:
+      path: /home/ec2-user/hft-client/src
+      state: directory
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy
+
+  - name: Copy Java source code
+    copy:
+      src: ../../hft_client/java_client/src/
+      dest: /home/ec2-user/hft-client/src
+      owner: ec2-user
+      group: ec2-user
+      mode: 0644
+    tags:
+      - deploy
+
+  - name: Copy pom.xml
+    copy:
+      src: ../../hft_client/java_client/pom.xml
+      dest: /home/ec2-user/hft-client/pom.xml
+      owner: ec2-user
+      group: ec2-user
+      mode: 0644
+    tags:
+      - deploy
+
+  - name: Build HFT Client
+    become: yes
+    become_user: ec2-user
+    shell: |
+      export MAVEN_HOME=/opt/maven/apache-maven-3.9.12
+      export PATH=$MAVEN_HOME/bin:$PATH
+      cd /home/ec2-user/hft-client
+      mvn clean install
+      cp ./target/ExchangeFlow-1.0-SNAPSHOT.jar /home/ec2-user/
+    tags:
+      - build
+
+  - name: Verify Java client JAR exists
+    stat:
+      path: /home/ec2-user/ExchangeFlow-1.0-SNAPSHOT.jar
+    register: java_jar
+
+  - name: Report build result
+    debug:
+      msg: "Java HFT client JAR: {{ 'BUILT (' + java_jar.stat.size|string + ' bytes)' if java_jar.stat.exists else 'BUILD FAILED' }}"
+
+  - name: Copy client config properties
+    copy:
+      src: ../../hft_client/java_client/src/main/resources/config.properties
+      dest: /home/ec2-user/config.properties
+      owner: ec2-user
+      group: ec2-user
+    tags:
+      - configure
+
+  - name: Configure trading server endpoint in config.properties
+    lineinfile:
+      path: /home/ec2-user/config.properties
+      regexp: '^HOST='
+      line: "HOST={{ trading_server_host }}"
+    when: trading_server_host is defined
+    tags:
+      - configure
+
+  - name: Configure test size in config.properties
+    lineinfile:
+      path: /home/ec2-user/config.properties
+      regexp: '^TEST_SIZE='
+      line: "TEST_SIZE={{ trading_test_size }}"
+    when: trading_test_size is defined
+    tags:
+      - configure

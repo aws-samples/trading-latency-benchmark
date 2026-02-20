@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT-0
 
 # Configuration variables
-INVENTORY="./ansible/inventory/virginia_inventory.aws_ec2.yml"
-SSH_KEY_FILE="~/.ssh/virginia_keypair.pem"
+INVENTORY="./ansible/inventory/inventory.aws_ec2.yml"
+SSH_KEY_FILE="${SSH_KEY_FILE:-$HOME/.ssh/virginia_keypair.pem}"
 OUTPUT_DIR="../histogram_logs"
 REPORT_SUMMARY_FILE="latency_report_summary.txt"
 
@@ -105,7 +105,7 @@ for log_file in $(find "$OUTPUT_DIR" -name "*.hlog" -type f); do
     
     # Run the Java program to analyze the log
     echo "Running analysis for $instance_name..."
-    REPORT_OUTPUT=$(java -jar ../target/ExchangeFlow-1.0-SNAPSHOT.jar latency-report "$log_file")
+    REPORT_OUTPUT=$(java -jar ../hft_client/java_client/target/ExchangeFlow-1.0-SNAPSHOT.jar latency-report "$log_file")
     
     if [ $? -ne 0 ]; then
         echo "Error: Failed to generate report for $log_file"

@@ -5,6 +5,7 @@
 [![AWS](https://img.shields.io/badge/AWS-%23FF9900.svg?style=flat&logo=amazon-aws&logoColor=white)](https://aws.amazon.com/)
 [![Java](https://img.shields.io/badge/Java-11+-blue.svg)](https://openjdk.java.net/)
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
+[![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
 
 This repository contains a comprehensive network latency benchmarking solution designed specifically for trading applications running on AWS EC2. The benchmark suite measures round-trip latency between trading clients and servers, providing valuable insights for latency-sensitive financial applications.
 
@@ -33,11 +34,13 @@ Financial markets operate at extremely high speeds, where being just a few micro
 The benchmark suite consists of:
 
 1. **Java Trading Client**: A high-performance client that sends limit and cancel orders and measures round-trip times
-2. **Rust Mock Trading Server**: A lightweight server that simulates a trading exchange by responding to client orders
-3. **CDK Infrastructure**: AWS CDK code to deploy the required EC2 instances and networking components
-4. **Ansible Playbooks**: Scripts to provision instances, run tests, and collect results
-5. **OS-Tuned AMI Builder**: Automated pipeline to create pre-optimized Amazon Machine Images with performance tuning baked in
-6. **Analysis Tools**: Utilities to process and visualize latency data using HDR Histograms
+2. **Rust Trading Client**: A native-binary alternative with nanosecond-precision latency tracking
+3. **C++ Trading Client**: A low-level client using WebSocket++ and HdrHistogram for minimal overhead
+4. **Rust Mock Trading Server**: A lightweight server that simulates a trading exchange by responding to client orders
+5. **CDK Infrastructure**: AWS CDK code to deploy the required EC2 instances and networking components
+6. **Ansible Playbooks**: Scripts to provision instances, run tests, and collect results
+7. **OS-Tuned AMI Builder**: Automated pipeline to create pre-optimized Amazon Machine Images with performance tuning baked in
+8. **Analysis Tools**: Utilities to process and visualize latency data using HDR Histograms
 
 ### Sequence Diagram
 The benchmark contains a simple HFT client and Matching Engine written in Java to simulate a basic order flow sequence for latency measurements, as per the following diagram:
@@ -51,7 +54,12 @@ Before using this benchmark suite, ensure you have the following prerequisites:
 - **AWS CLI**: Configured with appropriate credentials and default region
 - **AWS CDK**: Installed and bootstrapped in your AWS account
 - **Ansible**: Version 2.9+ installed on your local machine
-- **SSH Key Pair**: Generated and registered with AWS for EC2 instance access (e.g., `~/.ssh/virginia.pem`)
+- **SSH Key Pair**: Generated and registered with AWS for EC2 instance access
+
+Set the `SSH_KEY_FILE` environment variable to point to your key:
+```bash
+export SSH_KEY_FILE=~/.ssh/virginia.pem
+```
 
 ## Getting Started
 
@@ -61,7 +69,7 @@ For fastest deployment and optimal performance, build a pre-tuned AMI first:
 
 ```bash
 cd deployment
-./build-tuned-ami.sh --key-file ~/.ssh/virginia.pem
+./build-tuned-ami.sh --key-file $SSH_KEY_FILE
 ```
 
 This creates an AMI with all OS-level optimizations pre-applied (CPU isolation, network tuning, hugepages, etc.). The process takes ~20-30 minutes but eliminates the need to run OS tuning on every deployment.
@@ -136,7 +144,7 @@ Or use the automated build script (recommended):
 
 ```bash
 cd deployment
-./build-tuned-ami.sh --instance-type c7i.4xlarge --key-file ~/.ssh/virginia.pem
+./build-tuned-ami.sh --instance-type c7i.4xlarge --key-file $SSH_KEY_FILE
 ```
 
 
@@ -147,26 +155,35 @@ After deploying the infrastructure, use the following Ansible playbooks to run t
 ```bash
 cd ../ansible
 
-# Provision EC2 instances, and deploy both client and server applications
-ansible-playbook provision_ec2.yaml --key-file ~/.ssh/your-key.pem -i ./inventory/inventory.aws_ec2.yml
+# Provision EC2 base (system deps, mock trading server)
+ansible-playbook provision_ec2.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
 
-# Stop any existing tests
-ansible-playbook stop_latency_test.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
+# Provision HFT client (default: Java)
+ansible-playbook provision_java_client.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
+
+# Or provision the Rust client instead:
+# ansible-playbook provision_rust_client.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
+
+# Or provision the C++ client instead:
+# ansible-playbook provision_cpp_client.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
 
 # Apply OS-level performance tuning
-ansible-playbook tune_os.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
+ansible-playbook tune_os.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
 
 # Start the mock trading server
-ansible-playbook restart_mock_trading_server.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
+ansible-playbook restart_mock_trading_server.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
 
-# Start the HFT client
-ansible-playbook restart_hft_client.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
+# Start the latency test (default: Java client)
+ansible-playbook start_latency_test.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
 
-# Start the test run for desired duration
-ansible-playbook start_latency_test.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
+# Or start with Rust client:
+# ansible-playbook start_latency_test.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml -e client_type=rust
+
+# Or start with C++ client:
+# ansible-playbook start_latency_test.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml -e client_type=cpp
 
 # Let the test run for desired duration, then stop it
-ansible-playbook stop_latency_test.yaml --key-file ~/.ssh/virginia.pem -i ./inventory/inventory.aws_ec2.yml
+ansible-playbook stop_latency_test.yaml --key-file $SSH_KEY_FILE -i ./inventory/inventory.aws_ec2.yml
 ```
 
 ### 3. Collect and Analyze Results
@@ -175,13 +192,36 @@ After running the tests, collect and analyze the latency results:
 
 ```bash
 cd ..
-./show_latency_reports.sh --inventory $(PWD)/ansible/inventory/inventory.aws_ec2.yml --key ~/.ssh/virginia.pem
+./show_latency_reports.sh --inventory $(PWD)/ansible/inventory/inventory.aws_ec2.yml --key $SSH_KEY_FILE
 ```
 
 This script will:
 - Fetch histogram logs from the EC2 instances
 - Process the logs to generate latency reports
 - Create a summary report with key latency metrics
+### Option C: Automated E2E Test
+
+A single script that handles the full lifecycle — AMI build, CDK deploy, OS tuning, provisioning, test execution, and result collection:
+
+```bash
+cd test/e2e
+
+# Full run with Java client (default)
+./e2e_integration_test.sh --key-file $SSH_KEY_FILE
+
+# Use Rust or C++ client instead
+./e2e_integration_test.sh --key-file $SSH_KEY_FILE --client-type rust
+./e2e_integration_test.sh --key-file $SSH_KEY_FILE --client-type cpp
+
+# Skip AMI build by providing a pre-built AMI
+./e2e_integration_test.sh --key-file $SSH_KEY_FILE --base-ami ami-xxxxxxxxx
+
+# Re-run with a different client on an existing instance (skip infra + OS tuning)
+./e2e_integration_test.sh --key-file $SSH_KEY_FILE --base-ami ami-xxxxxxxxx --client-type rust --start-from-step 5
+```
+
+See [test/e2e/README.md](test/e2e/README.md) for all options and step details.
+
 ## Understanding the Results
 
 The latency reports include several important metrics:

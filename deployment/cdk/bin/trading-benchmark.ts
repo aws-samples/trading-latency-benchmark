@@ -26,6 +26,7 @@ const subnetId = app.node.tryGetContext('subnetId');
 const securityGroupId = app.node.tryGetContext('securityGroupId');
 const useExistingVpc = app.node.tryGetContext('useExistingVpc');
 const availabilityZone = app.node.tryGetContext('availabilityZone');
+const singleEc2Instance = app.node.tryGetContext('singleEc2Instance');
 const elasticIpsString = app.node.tryGetContext('elasticIps');
 
 // Parse elastic IPs from comma-separated string to array
@@ -53,6 +54,7 @@ switch (deploymentType.toLowerCase()) {
   case 'cluster':
   case 'placement-group':
   case 'cpg':
+    // TradingBenchmarkCluster refers to single AZ, two EC2 instance (Trading-Server, Trading-Client), within CPG
     console.log('Deploying Trading Benchmark Cluster Placement Group Stack');
     new TradingBenchmarkClusterPlacementGroupStack(app, 'TradingBenchmarkClusterPlacementGroupStack', {
       env,
@@ -62,6 +64,7 @@ switch (deploymentType.toLowerCase()) {
     break;
 
   case 'multi-az':
+    // TradingBenchmarkMultiAz refers to multiple AZ, two EC2 instance (Trading-Server, Trading-Client), no CPG
     console.log('Deploying Trading Benchmark Multi-AZ Stack');
     new TradingBenchmarkMultiAzStack(app, 'TradingBenchmarkMultiAzStack', {
       env,
@@ -107,6 +110,7 @@ switch (deploymentType.toLowerCase()) {
 
   case 'single':
   default:
+    // SingleInstance refers to single AZ, two EC2 instance (Trading-Server, Trading-Client), no CPG
     console.log('Deploying Trading Benchmark Single Instance Stack');
     new TradingBenchmarkSingleInstanceStack(app, 'TradingBenchmarkSingleInstanceStack', {
       env,
@@ -114,7 +118,9 @@ switch (deploymentType.toLowerCase()) {
       instanceType2,
       vpcCidr,
       keyPairName,
-      availabilityZone
+      availabilityZone,
+      singleEc2Instance: singleEc2Instance === 'true' || singleEc2Instance === true,
+      baseAmi
     });
     break;
 }

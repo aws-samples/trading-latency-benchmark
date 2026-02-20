@@ -1,0 +1,111 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: Provision EC2 for Rust HFT client
+  hosts: aws_ec2
+  collections:
+    - amazon.aws.ec2_instance
+  tasks:
+  - name: Install Rust-specific dependencies
+    become: yes
+    become_user: root
+    dnf:
+      name:
+        - pkg-config
+      state: present
+
+  - name: Download Rust installer
+    get_url:
+      url: https://sh.rustup.rs
+      dest: /tmp/sh.rustup.rs
+      mode: '0755'
+      force: 'yes'
+    tags:
+      - rust
+
+  - name: Install Rust for ec2-user
+    become: yes
+    become_user: ec2-user
+    shell: /tmp/sh.rustup.rs -y
+    args:
+      creates: /home/ec2-user/.cargo/bin/rustc
+    tags:
+      - rust
+
+  - name: Create rust-hft-client directory
+    file:
+      path: /home/ec2-user/rust-hft-client
+      state: directory
+      owner: ec2-user
+      group: ec2-user
+      mode: 0755
+    tags:
+      - deploy
+
+  - name: Copy Rust HFT client source
+    synchronize:
+      src: ../../hft_client/rust_client/
+      dest: /home/ec2-user/rust-hft-client/
+      rsync_opts:
+        - "--exclude=target"
+        - "--exclude=.kiro"
+        - "--exclude=hw_sequencer"
+    tags:
+      - deploy
+
+  - name: Fix Rust client ownership and permissions
+    become: yes
+    shell: |
+      chown -R ec2-user:ec2-user /home/ec2-user/rust-hft-client
+      find /home/ec2-user/rust-hft-client -type f -exec chmod 0644 {} +
+      find /home/ec2-user/rust-hft-client -type d -exec chmod 0755 {} +
+    tags:
+      - deploy
+
+  - name: Build Rust HFT client
+    become: yes
+    become_user: ec2-user
+    shell: |
+      source $HOME/.cargo/env
+      cd /home/ec2-user/rust-hft-client
+      cargo build --release
+    register: rust_build
+    tags:
+      - build
+
+  - name: Verify Rust client binary exists
+    stat:
+      path: /home/ec2-user/rust-hft-client/target/release/hft_client
+    register: rust_binary
+
+  - name: Report build result
+    debug:
+      msg: "Rust HFT client binary: {{ 'BUILT (' + rust_binary.stat.size|string + ' bytes)' if rust_binary.stat.exists else 'BUILD FAILED' }}"
+
+  - name: Copy client config properties
+    copy:
+      src: ../../hft_client/java_client/src/main/resources/config.properties
+      dest: /home/ec2-user/config.properties
+      owner: ec2-user
+      group: ec2-user
+    tags:
+      - configure
+
+  - name: Configure trading server endpoint in config.properties
+    lineinfile:
+      path: /home/ec2-user/config.properties
+      regexp: '^HOST='
+      line: "HOST={{ trading_server_host }}"
+    when: trading_server_host is defined
+    tags:
+      - configure
+
+  - name: Configure test size in config.properties
+    lineinfile:
+      path: /home/ec2-user/config.properties
+      regexp: '^TEST_SIZE='
+      line: "TEST_SIZE={{ trading_test_size }}"
+    when: trading_test_size is defined
+    tags:
+      - configure

@@ -60,6 +60,7 @@ private:
     mt19937 gen;
     struct hdr_histogram* histogram;
     void hdrPrint();
+    void saveHistogramToFile();
     template<typename T>
     void sendOrder(T* c, websocketpp::connection_hdl hdl);
     template<typename T>
