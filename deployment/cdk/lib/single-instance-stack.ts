@@ -1,5 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
-import { Vpc, SubnetType, Instance, InstanceType, InstanceClass, InstanceSize, MachineImage, SecurityGroup, Port, Peer, BlockDeviceVolume, KeyPair, CfnVPCEndpoint } from 'aws-cdk-lib/aws-ec2';
+import { Vpc, SubnetType, Instance, InstanceType, InstanceClass, InstanceSize, MachineImage, SecurityGroup, Port, Peer, BlockDeviceVolume, KeyPair } from 'aws-cdk-lib/aws-ec2';
 import { Tags, RemovalPolicy } from 'aws-cdk-lib';
 
 export interface TradingBenchmarkSingleInstanceStackProps extends cdk.StackProps {
@@ -8,6 +8,10 @@ export interface TradingBenchmarkSingleInstanceStackProps extends cdk.StackProps
     vpcCidr?: string;
     keyPairName?: string;
     availabilityZone?: string;
+    /** When true, deploy only a single EC2 instance (client+server on localhost) */
+    singleEc2Instance?: boolean;
+    /** Use a specific AMI (e.g. pre-tuned) instead of latest Amazon Linux 2023 */
+    baseAmi?: string;
 }
 
 export class TradingBenchmarkSingleInstanceStack extends cdk.Stack {
@@ -18,6 +22,8 @@ export class TradingBenchmarkSingleInstanceStack extends cdk.Stack {
         const instanceType1 = props?.instanceType1 || 'c7i.4xlarge';
         const instanceType2 = props?.instanceType2 || 'c6in.4xlarge';
         const vpcCidr = props?.vpcCidr || '10.50.0.0/16';  // Different default from hunting stack
+        const singleEc2Instance = props?.singleEc2Instance ??
+            (this.node.tryGetContext('singleEc2Instance') === 'true');
         
         // Get keypair name from props or context
         const keyPairName = props?.keyPairName || 
@@ -107,7 +113,9 @@ export class TradingBenchmarkSingleInstanceStack extends cdk.Stack {
             'Allow SSH access from the public internet'
         );
 
-        const ami = MachineImage.latestAmazonLinux2023();
+        const ami = props?.baseAmi
+            ? MachineImage.genericLinux({ [this.region]: props.baseAmi })
+            : MachineImage.latestAmazonLinux2023();
 
         // Import existing key pair
         const keyPair = KeyPair.fromKeyPairName(this, 'ImportedKeyPair', keyPairName);
@@ -145,49 +153,67 @@ export class TradingBenchmarkSingleInstanceStack extends cdk.Stack {
         
         // Apply removal policy to instance
         instance1.applyRemovalPolicy(RemovalPolicy.DESTROY);
-        
-        // Create second instance
-        const instance2 = new Instance(this, 'instance2', {
-            vpc: benchmarkVpc,
-            instanceType: instanceType2Obj,
-            machineImage: ami,
-            securityGroup,
-            keyPair,
-            blockDevices: [{
-                deviceName: "/dev/xvda",
-                volume: BlockDeviceVolume.ebs(512)
-            }]
-        });
-        
-        // Apply removal policy to instance
-        instance2.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
-        // Add tags to identify instances
-        Tags.of(instance1).add('Name', `Trading-Benchmark-${instanceType1}`);
-        Tags.of(instance2).add('Name', `Trading-Benchmark-${instanceType2}`);
-        Tags.of(instance1).add('Role', 'benchmark');
-        Tags.of(instance2).add('Role', 'benchmark');
-        
-        // Output the instance IDs and public IPs
-        new cdk.CfnOutput(this, 'Instance1Id', {
-            value: instance1.instanceId,
-            description: `Instance 1 (${instanceType1}) ID`
-        });
+        if (singleEc2Instance) {
+            // Single EC2 mode: one instance runs both client and server on localhost
+            Tags.of(instance1).add('Name', 'Trading-Client');
+            Tags.of(instance1).add('Role', 'client');
 
-        new cdk.CfnOutput(this, 'Instance1PublicIp', {
-            value: instance1.instancePublicIp,
-            description: `Instance 1 (${instanceType1}) Public IP`
-        });
-        
-        new cdk.CfnOutput(this, 'Instance2Id', {
-            value: instance2.instanceId,
-            description: `Instance 2 (${instanceType2}) ID`
-        });
+            new cdk.CfnOutput(this, 'Instance1Id', {
+                value: instance1.instanceId,
+                description: 'Single instance ID (client+server)'
+            });
 
-        new cdk.CfnOutput(this, 'Instance2PublicIp', {
-            value: instance2.instancePublicIp,
-            description: `Instance 2 (${instanceType2}) Public IP`
-        });
+            new cdk.CfnOutput(this, 'Instance1PublicIp', {
+                value: instance1.instancePublicIp,
+                description: 'Single instance Public IP'
+            });
+
+            new cdk.CfnOutput(this, 'SingleEc2Instance', {
+                value: 'true',
+                description: 'Indicates single EC2 instance mode'
+            });
+        } else {
+            // Two-instance mode (default): separate client and server
+            const instance2 = new Instance(this, 'instance2', {
+                vpc: benchmarkVpc,
+                instanceType: instanceType2Obj,
+                machineImage: ami,
+                securityGroup,
+                keyPair,
+                blockDevices: [{
+                    deviceName: "/dev/xvda",
+                    volume: BlockDeviceVolume.ebs(512)
+                }]
+            });
+            
+            instance2.applyRemovalPolicy(RemovalPolicy.DESTROY);
+
+            Tags.of(instance1).add('Name', `Trading-Benchmark-${instanceType1}`);
+            Tags.of(instance2).add('Name', `Trading-Benchmark-${instanceType2}`);
+            Tags.of(instance1).add('Role', 'benchmark');
+            Tags.of(instance2).add('Role', 'benchmark');
+            
+            new cdk.CfnOutput(this, 'Instance1Id', {
+                value: instance1.instanceId,
+                description: `Instance 1 (${instanceType1}) ID`
+            });
+
+            new cdk.CfnOutput(this, 'Instance1PublicIp', {
+                value: instance1.instancePublicIp,
+                description: `Instance 1 (${instanceType1}) Public IP`
+            });
+            
+            new cdk.CfnOutput(this, 'Instance2Id', {
+                value: instance2.instanceId,
+                description: `Instance 2 (${instanceType2}) ID`
+            });
+
+            new cdk.CfnOutput(this, 'Instance2PublicIp', {
+                value: instance2.instancePublicIp,
+                description: `Instance 2 (${instanceType2}) Public IP`
+            });
+        }
     }
     
     // Helper method to parse instance type string into InstanceType

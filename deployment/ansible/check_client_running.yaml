@@ -1,0 +1,22 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+---
+- name: Check if HFT client is still running
+  hosts: aws_ec2
+  gather_facts: false
+  tasks:
+  - name: Check for client process
+    # Bracket trick avoids matching the pgrep process itself.
+    # Default pattern matches all client types: Java (ExchangeFlow), Rust/C++ (hft_client)
+    shell: "pgrep -f '{{ client_process_pattern | default(\"[E]xchangeFlow|[h]ft_client\") }}' || true"
+    register: process_check
+    changed_when: false
+
+  - name: Report process status
+    debug:
+      msg: "HFT client is {{ 'RUNNING (pid: ' + process_check.stdout + ')' if process_check.stdout else 'STOPPED' }}"
+
+  - name: Set running fact
+    set_fact:
+      client_running: "{{ process_check.stdout | length > 0 }}"

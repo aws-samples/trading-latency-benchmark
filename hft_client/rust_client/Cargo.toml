@@ -1,0 +1,47 @@
+[package]
+name = "rust_hft_client"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance, low-latency HFT WebSocket client for latency testing"
+authors = ["HFT Team"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# WebSocket support
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+tokio-native-tls = "0.3"
+native-tls = "0.2"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Latency measurement
+hdrhistogram = "7.5"
+
+# UUID generation
+uuid = { version = "1.6", features = ["v4"] }
+
+# Error handling
+thiserror = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.10"
+
+# Async utilities
+futures-util = "0.3"
+
+[dev-dependencies]
+# Property-based testing
+proptest = "1.4"
+
+[lib]
+name = "rust_hft_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hft_client"
+path = "src/main.rs"

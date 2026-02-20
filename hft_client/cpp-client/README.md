@@ -39,6 +39,7 @@ cd build
 # Configure and build
 cmake ..
 cmake --build .
+```
 
 ## System Setup
 
@@ -113,11 +114,15 @@ rpm -q boost-devel         # On Amazon Linux
 ```
 
 ## Usage
+
+```bash
 ./hft_client [config_file]
+```
 
 ### Configuration
 Create a JSON configuration file with the following structure:
 
+```json
 {
     "server_uri": "ws://localhost:8080",
     "use_ssl": false,
@@ -126,20 +131,20 @@ Create a JSON configuration file with the following structure:
     "warmup_seconds": 5,
     "log_level": "info"
 }
+```
 
-Copy
+#### Configuration Parameters
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| server_uri | WebSocket server endpoint | ws://localhost:8080 |
+| use_ssl | Enable/disable SSL/TLS | false |
+| test_duration_seconds | Duration of the test in seconds | 60 |
+| requests_per_second | Target request rate | 100 |
+| warmup_seconds | Warm-up period before measurements | 5 |
+| log_level | Logging verbosity (debug/info/warn/error) | info |
 
-Insert at cursor
-json
-Configuration Parameters
-Parameter	Description	Default
-server_uri	WebSocket server endpoint	ws://localhost:8080
-use_ssl	Enable/disable SSL/TLS	false
-test_duration_seconds	Duration of the test in seconds	60
-requests_per_second	Target request rate	100
-warmup_seconds	Warm-up period before measurements	5
-log_level	Logging verbosity (debug/info/warn/error)	info
-Project Structure
+## Project Structure
+```bash
 cpp-client/
 ├── CMakeLists.txt
 ├── main.cpp
@@ -152,64 +157,44 @@ cpp-client/
 ├── ExchangeProtocol.cpp
 ├── ExchangeProtocol.h
 └── Logger.h
+```
 
-Copy
+## Performance Metrics
 
-Insert at cursor
-text
-Performance Metrics
 The client measures and reports the following metrics:
 
-Round-trip latency (microseconds)
+- Round-trip latency (microseconds)
+- Percentile distributions (50th, 90th, 99th, 99.9th)
+- Message rates (messages/second)
+- Error rates and types
 
-Percentile distributions (50th, 90th, 99th, 99.9th)
+## Contributing
 
-Message rates (messages/second)
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-Error rates and types
+### Development Guidelines
 
-Contributing
-Fork the repository
+- Follow C++17 standards
+- Use smart pointers for memory management
+- Include unit tests for new features
+- Document public APIs
+- Follow existing code style
 
-Create your feature branch ( git checkout -b feature/amazing-feature)
-
-Commit your changes ( git commit -m 'Add some amazing feature')
-
-Push to the branch ( git push origin feature/amazing-feature)
-
-Open a Pull Request
-
-Development Guidelines
-Follow C++17 standards
-
-Use smart pointers for memory management
-
-Include unit tests for new features
-
-Document public APIs
-
-Follow existing code style
-
-Testing
-# Build and run tests (if implemented)
+## Testing
+### Build and run tests (if implemented)
+```bash
 cd build
 cmake .. -DBUILD_TESTING=ON
 cmake --build .
 ctest
+```
 
-Copy
+## Acknowledgments
 
-Insert at cursor
-bash
-License
-Add your license here
-
-Authors
-Your name/organization
-
-Acknowledgments
-WebSocket++ team for the WebSocket implementation
-
-nlohmann/json for the JSON library
-
-HdrHistogram for the latency measurement tools
+- WebSocket++ team for the WebSocket implementation
+- nlohmann/json for the JSON library
+- HdrHistogram for the latency measurement tools

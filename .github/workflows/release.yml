@@ -12,6 +12,9 @@ jobs:
   build-java:
     name: Build Java Client
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hft_client/java_client
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -51,7 +54,7 @@ jobs:
           fi
           rm -rf META-INF
           
-          cp "$JAR_FILE" ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
+          cp "$JAR_FILE" ../../ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
       
       - name: Upload JAR
         uses: actions/upload-artifact@v4
@@ -186,6 +189,62 @@ jobs:
           name: rust-windows
           path: mock-trading-server-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe
 
+  build-rust-client-linux:
+    name: Build Rust HFT Client (Linux)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            cross: true
+          - target: aarch64-unknown-linux-gnu
+            cross: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+      
+      - name: Get version
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+      - name: Install cargo-zigbuild (for ARM64 cross-compilation)
+        if: matrix.cross == true
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+      
+      - name: Build
+        working-directory: hft_client/rust_client
+        run: |
+          if [ "${{ matrix.cross }}" == "true" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+      
+      - name: Prepare binary
+        run: |
+          ARCH=$(echo ${{ matrix.target }} | cut -d'-' -f1)
+          if [ "$ARCH" = "x86_64" ]; then
+            SUFFIX="linux-x86_64"
+          else
+            SUFFIX="linux-aarch64"
+          fi
+          cp hft_client/rust_client/target/${{ matrix.target }}/release/hft_client \
+             hft-client-rust-${{ steps.get_version.outputs.VERSION }}-${SUFFIX}
+          strip hft-client-rust-${{ steps.get_version.outputs.VERSION }}-${SUFFIX} || true
+      
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-client-${{ matrix.target }}
+          path: hft-client-rust-${{ steps.get_version.outputs.VERSION }}-*
+
   build-cpp-linux:
     name: Build C++ Client (Linux)
     runs-on: ubuntu-latest
@@ -224,11 +283,11 @@ jobs:
               yum install -y gcc-c++ make git tar gzip openssl-devel python3-pip zlib-devel
               pip3 install cmake --upgrade
               export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
-              cd cpp-client
+              cd hft_client/cpp-client
               cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
               cmake --build build --config Release
               cd build
-              tar -czf ../../cpp-client-${{ steps.get_version.outputs.VERSION }}-linux-${{ matrix.arch }}.tar.gz hft_client
+              tar -czf ../../../cpp-client-${{ steps.get_version.outputs.VERSION }}-linux-${{ matrix.arch }}.tar.gz hft_client
             '
       
       - name: Upload artifact
@@ -262,7 +321,7 @@ jobs:
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
       
       - name: Build
-        working-directory: cpp-client
+        working-directory: hft_client/cpp-client
         run: |
           export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
           cmake -B build \
@@ -272,8 +331,8 @@ jobs:
       
       - name: Create tarball
         run: |
-          cd cpp-client/build
-          tar -czf ../../cpp-client-${{ steps.get_version.outputs.VERSION }}-macos-${{ matrix.arch }}.tar.gz hft_client
+          cd hft_client/cpp-client/build
+          tar -czf ../../../cpp-client-${{ steps.get_version.outputs.VERSION }}-macos-${{ matrix.arch }}.tar.gz hft_client
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -309,27 +368,27 @@ jobs:
       
       - name: Build
         shell: bash
-        working-directory: cpp-client
+        working-directory: hft_client/cpp-client
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake
+            -DCMAKE_TOOLCHAIN_FILE=../../vcpkg/scripts/buildsystems/vcpkg.cmake
           cmake --build build --config Release
       
       - name: Copy DLLs
         shell: bash
         run: |
-          cp vcpkg/installed/x64-windows/bin/libssl-3-x64.dll cpp-client/build/Release/
-          cp vcpkg/installed/x64-windows/bin/libcrypto-3-x64.dll cpp-client/build/Release/
-          cp "C:/Windows/System32/msvcp140.dll" cpp-client/build/Release/ || true
-          cp "C:/Windows/System32/vcruntime140.dll" cpp-client/build/Release/ || true
-          cp "C:/Windows/System32/vcruntime140_1.dll" cpp-client/build/Release/ || true
+          cp vcpkg/installed/x64-windows/bin/libssl-3-x64.dll hft_client/cpp-client/build/Release/
+          cp vcpkg/installed/x64-windows/bin/libcrypto-3-x64.dll hft_client/cpp-client/build/Release/
+          cp "C:/Windows/System32/msvcp140.dll" hft_client/cpp-client/build/Release/ || true
+          cp "C:/Windows/System32/vcruntime140.dll" hft_client/cpp-client/build/Release/ || true
+          cp "C:/Windows/System32/vcruntime140_1.dll" hft_client/cpp-client/build/Release/ || true
       
       - name: Create archive
         shell: bash
         run: |
-          cd cpp-client/build/Release
-          7z a ../../../cpp-client-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.zip *.exe *.dll
+          cd hft_client/cpp-client/build/Release
+          7z a ../../../../cpp-client-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.zip *.exe *.dll
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -339,7 +398,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [build-java, build-rust-linux, build-rust-macos, build-rust-windows, build-cpp-linux, build-cpp-macos, build-cpp-windows]
+    needs: [build-java, build-rust-linux, build-rust-macos, build-rust-windows, build-rust-client-linux, build-cpp-linux, build-cpp-macos, build-cpp-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -393,6 +452,7 @@ jobs:
           ### 📦 Components
           
           - **Java Trading Client** - ✅ Cross-platform (all architectures)
+          - **Rust HFT Client** - ✅ Linux (x86_64 & ARM64/Graviton)
           - **Rust Mock Server** - ✅ Linux (x86_64 & ARM64/Graviton), macOS (Intel & Apple Silicon), Windows
           - **C++ Client** - ✅ Multi-platform: Linux (x86_64 & ARM64/Graviton), macOS (Intel & Apple Silicon), Windows
           - **Configuration Samples** - 📝 All config files with documentation
@@ -408,6 +468,18 @@ jobs:
           \`\`\`bash
           java -jar ExchangeFlow-${{ steps.get_version.outputs.VERSION }}.jar
           \`\`\`
+          
+          **Rust HFT Client (Linux only):**
+          - **Linux x86_64:**
+            \`\`\`bash
+            chmod +x hft-client-rust-${{ steps.get_version.outputs.VERSION }}-linux-x86_64
+            ./hft-client-rust-${{ steps.get_version.outputs.VERSION }}-linux-x86_64
+            \`\`\`
+          - **Linux ARM64 (Graviton):**
+            \`\`\`bash
+            chmod +x hft-client-rust-${{ steps.get_version.outputs.VERSION }}-linux-aarch64
+            ./hft-client-rust-${{ steps.get_version.outputs.VERSION }}-linux-aarch64
+            \`\`\`
           
           **C++ Client (choose your platform):**
           - **Linux x86_64:** 

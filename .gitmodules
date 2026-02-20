@@ -1,3 +1,3 @@
-[submodule "cpp-client/libs/HdrHistogram_c"]
-	path = cpp-client/libs/HdrHistogram_c
+[submodule "hft_client/cpp-client/libs/HdrHistogram_c"]
+	path = hft_client/cpp-client/libs/HdrHistogram_c
 	url = https://github.com/HdrHistogram/HdrHistogram.git
