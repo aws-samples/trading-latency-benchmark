@@ -73,10 +73,15 @@ echo "SSH key file: $SSH_KEY_FILE"
 echo "Output directory: $OUTPUT_DIR"
 echo "========================================================"
 
+# Convert paths to absolute before changing directory
+INVENTORY_ABS=$(cd "$(dirname "$INVENTORY")" && pwd)/$(basename "$INVENTORY")
+SSH_KEY_ABS=$(eval echo "$SSH_KEY_FILE")
+SSH_KEY_ABS=$(cd "$(dirname "$SSH_KEY_ABS")" && pwd)/$(basename "$SSH_KEY_ABS")
+
 # Run Ansible playbook to fetch logs
 echo "Fetching histogram logs from EC2 instances..."
 cd ansible
-ansible-playbook fetch_histogram_logs.yaml --key-file "$SSH_KEY_FILE" -i "$INVENTORY"
+ansible-playbook fetch_histogram_logs.yaml --key-file "$SSH_KEY_ABS" -i "$INVENTORY_ABS"
 ANSIBLE_EXIT_CODE=$?
 cd ..
 
