@@ -87,6 +87,19 @@ fi
 
 echo "Logs fetched successfully"
 echo "========================================================"
+
+# Check if the Java jar file exists, build if needed
+JAR_FILE="../hft_client/java_client/target/ExchangeFlow-1.0-SNAPSHOT.jar"
+if [ ! -f "$JAR_FILE" ]; then
+    echo "Jar file not found at $JAR_FILE, building with Maven..."
+    (cd ../hft_client/java_client && mvn clean install -q -DskipTests)
+    if [ $? -ne 0 ]; then
+        echo "Error: Maven build failed"
+        exit 1
+    fi
+    echo "Build successful"
+fi
+
 echo "Generating latency reports..."
 
 # Initialize summary file
@@ -100,12 +113,16 @@ for log_file in $(find "$OUTPUT_DIR" -name "*.hlog" -type f); do
     FOUND_FILES=1
     echo "Processing: $log_file"
     
-    # Extract instance name from file path
-    instance_name=$(basename "$log_file" .hlog)
+    # Extract instance name from parent directory (e.g. Latency-Hunting-Probe-arm-c8g-9)
+    instance_name=$(basename "$(dirname "$log_file")")
+    # If the file is directly in OUTPUT_DIR (no subdirectory), fall back to filename
+    if [ "$instance_name" = "$(basename "$OUTPUT_DIR")" ]; then
+        instance_name=$(basename "$log_file" .hlog)
+    fi
     
     # Run the Java program to analyze the log
     echo "Running analysis for $instance_name..."
-    REPORT_OUTPUT=$(java -jar ../hft_client/java_client/target/ExchangeFlow-1.0-SNAPSHOT.jar latency-report "$log_file")
+    REPORT_OUTPUT=$(java -jar "$JAR_FILE" latency-report "$log_file")
     
     if [ $? -ne 0 ]; then
         echo "Error: Failed to generate report for $log_file"
