@@ -17,7 +17,7 @@ jobs:
         working-directory: hft_client/java_client
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       
       - name: Set up JDK 11
         uses: actions/setup-java@v5
@@ -74,7 +74,7 @@ jobs:
             cross: true
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -126,7 +126,7 @@ jobs:
         target: [x86_64-apple-darwin, aarch64-apple-darwin]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -163,7 +163,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -265,7 +265,7 @@ jobs:
           platforms: arm64
       
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
       
@@ -308,7 +308,7 @@ jobs:
             arch: arm64
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
       
@@ -345,7 +345,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
       
@@ -402,7 +402,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
       
