@@ -32,7 +32,7 @@ jobs:
         run: mvn test
       
       - name: Upload JAR artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: java-client-jar
           path: hft_client/java_client/target/*.jar
@@ -68,7 +68,7 @@ jobs:
         run: cargo test
       
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rust-server-binary
           path: mock-trading-server/target/release/mock-trading-server
@@ -104,7 +104,7 @@ jobs:
         run: cargo test
       
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rust-client-binary
           path: hft_client/rust_client/target/release/hft_client
@@ -137,7 +137,7 @@ jobs:
         run: cmake --build build --config Release
       
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cpp-client-linux-binary
           path: hft_client/cpp-client/build/*
@@ -187,7 +187,7 @@ jobs:
           cp "C:/Windows/System32/vcruntime140_1.dll" build/Release/ || true
       
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cpp-client-windows-binary
           path: hft_client/cpp-client/build/Release/*.dll hft_client/cpp-client/build/Release/*.exe
@@ -224,7 +224,7 @@ jobs:
         run: npx cdk synth
       
       - name: Upload CDK template
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cdk-template
           path: deployment/cdk/cdk.out
