@@ -34,6 +34,7 @@
         - hwloc
         - util-linux-core
         - sysstat
+        - rsync
       state: present
 
   - name: Generate self-signed certificates
