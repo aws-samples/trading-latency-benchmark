@@ -1,5 +1,10 @@
 ---
-# ultra_low_latency_trading.yml - Amazon Linux 2023 compatible (x86 & Graviton)
+# tune_os_v2.yaml - Amazon Linux 2023 compatible (x86 & Graviton)
+#
+#   IRQ spreading to use all housekeeping cores (was hardcoded to CPU 0-1)
+#   TX queue pinning to stay within housekeeping cores (was unbounded)
+#   Fully disabled (was kept running with banned CPUs, conflicting with manual IRQ pinning)
+#
 - name: Configure Ultra-Low Latency Trading System
   hosts: aws_ec2
   become: yes
@@ -209,6 +214,7 @@
           fi
         done
       changed_when: true
+      ignore_errors: yes
 
     - name: Create CPU performance governor service
       ansible.builtin.copy:
@@ -916,7 +922,7 @@
 
           [Service]
           Type=oneshot
-          ExecStart=/bin/bash -c 'if [ -d /proc/irq ]; then IRQS=($(grep eth0 /proc/interrupts | awk "{print $1}" | tr -d :)); for i in ${!IRQS[@]}; do echo $((i % 2)) > /proc/irq/${IRQS[i]}/smp_affinity_list || true; done; fi'
+          ExecStart=/bin/bash -c 'if [ -d /proc/irq ]; then IRQS=($(grep eth0 /proc/interrupts | awk "{print $1}" | tr -d :)); HK={{ housekeeping_core_count }}; for i in ${!IRQS[@]}; do echo $((i % HK)) > /proc/irq/${IRQS[i]}/smp_affinity_list || true; done; fi'
           RemainAfterExit=yes
 
           [Install]
@@ -941,7 +947,7 @@
 
           [Service]
           Type=oneshot
-          ExecStart=/bin/bash -c 'TXQUEUES=($(ls -1qdv /sys/class/net/eth0/queues/tx-* 2>/dev/null || echo "")); if [ ! -z "$TXQUEUES" ]; then for i in ${!TXQUEUES[@]}; do printf "%%x" $((2**i)) > ${TXQUEUES[i]}/xps_cpus || true; done; fi'
+          ExecStart=/bin/bash -c 'TXQUEUES=($(ls -1qdv /sys/class/net/eth0/queues/tx-* 2>/dev/null || echo "")); HK={{ housekeeping_core_count }}; if [ ! -z "$TXQUEUES" ]; then for i in ${!TXQUEUES[@]}; do printf "%%x" $((1 << (i % HK))) > ${TXQUEUES[i]}/xps_cpus || true; done; fi'
           RemainAfterExit=yes
 
           [Install]
@@ -1155,22 +1161,11 @@
     - name: Gather service facts
       ansible.builtin.service_facts:
 
-    - name: Configure irqbalance to avoid isolated cores (ENA best practice)
-      ansible.builtin.copy:
-        dest: /etc/sysconfig/irqbalance
-        content: |
-          # ENA best practice: Keep irqbalance enabled for CPU load-aware IRQ distribution
-          # But ban isolated cores from IRQ handling
-          IRQBALANCE_BANNED_CPUS={{ '%x' | format((2 ** (effective_cores|int)) - 1 - ((2 ** (housekeeping_core_count|int)) - 1)) }}
-        mode: '0644'
-      register: irqbalance_config
-
-    - name: Restart irqbalance service with new configuration
+    - name: Stop and disable irqbalance (v2 - manual IRQ pinning makes irqbalance counterproductive)
       ansible.builtin.systemd:
         name: irqbalance
-        state: restarted
-        enabled: yes
-      when: irqbalance_config.changed
+        state: stopped
+        enabled: no
       ignore_errors: yes
 
     - name: Stop and disable amazon-ssm-agent service
