@@ -414,7 +414,7 @@
     # First apply the setting immediately for the current session
     - name: Move kernel workqueues to housekeeping CPUs (immediate)
       ansible.builtin.shell: |
-        find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo {{ housekeeping_bitmask }} > {}' ';'
+        HK_HEX=$(printf '%x' {{ housekeeping_bitmask }}); find /sys/devices/virtual/workqueue -name cpumask -exec sh -c "echo $HK_HEX > {}" ';'
       changed_when: true
       ignore_errors: yes
 
@@ -432,7 +432,7 @@
           
           [Service]
           Type=oneshot
-          ExecStart=/bin/bash -c "find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo {{ housekeeping_bitmask }} > {}' ';'"
+          ExecStart=/bin/bash -c "HK_HEX=$(printf '%%x' {{ housekeeping_bitmask }}); find /sys/devices/virtual/workqueue -name cpumask -exec sh -c \"echo $HK_HEX > {}\" ';'"
           RemainAfterExit=yes
           
           [Install]
@@ -859,9 +859,9 @@
         dest: /etc/udev/rules.d/99-trading-network.rules
         content: |
           # Set network adapter optimizations for trading
-          SUBSYSTEM=="net", ACTION=="add", KERNEL=="eth*", RUN+="/usr/bin/ethtool -K $name rx off tx off sg off gso off gro off"
-          SUBSYSTEM=="net", ACTION=="add", KERNEL=="eth*", RUN+="/usr/bin/ethtool -C $name adaptive-rx off rx-usecs 0 tx-usecs 0"
-          SUBSYSTEM=="net", ACTION=="add", KERNEL=="eth*", RUN+="/usr/bin/ethtool -G $name rx 4096 tx 4096"
+          SUBSYSTEM=="net", ACTION=="add", KERNEL=="eth*|ens*|ena*", RUN+="/usr/bin/ethtool -K $name rx off tx off sg off gso off gro off"
+          SUBSYSTEM=="net", ACTION=="add", KERNEL=="eth*|ens*|ena*", RUN+="/usr/bin/ethtool -C $name adaptive-rx off rx-usecs 0 tx-usecs 0"
+          SUBSYSTEM=="net", ACTION=="add", KERNEL=="eth*|ens*|ena*", RUN+="/usr/bin/ethtool -G $name rx 4096 tx 4096"
         mode: '0644'
 
     - name: Configure network interfaces
@@ -895,8 +895,8 @@
 
     - name: Apply network optimizations immediately
       ansible.builtin.shell: |
-        for IFACE in $(ip -o link show | grep -v "lo" | awk '{print $2}' | cut -d':' -f1); do
-          # Disable offloading features
+        for IFACE in $(ls -1 /sys/class/net/ | grep -vE '^lo$|^docker|^br-|^veth|^virbr'); do
+          [ -L "/sys/class/net/$IFACE/device/driver" ] || continue
           ethtool -K $IFACE rx off tx off sg off gso off gro off || true
 
           ethtool -C $IFACE adaptive-rx off
@@ -1296,7 +1296,8 @@
           # Ultra-low latency trading system boot optimizations (x86 with SMT)
           
           # Apply workqueue CPU affinity (highest priority)
-          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo {{ housekeeping_bitmask }} > {}' ';' || true
+          HK_HEX=$(printf '%x' {{ housekeeping_bitmask }})
+          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c "echo $HK_HEX > {}" ';' || true
           
           # Set writeback NUMA 
           if [ -f /sys/bus/workqueue/devices/writeback/numa ]; then
@@ -1336,7 +1337,8 @@
           # Ultra-low latency trading system boot optimizations (x86 without SMT - e.g., C7a)
           
           # Apply workqueue CPU affinity (highest priority)
-          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo {{ housekeeping_bitmask }} > {}' ';' || true
+          HK_HEX=$(printf '%x' {{ housekeeping_bitmask }})
+          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c "echo $HK_HEX > {}" ';' || true
           
           # Set writeback NUMA 
           if [ -f /sys/bus/workqueue/devices/writeback/numa ]; then
@@ -1373,7 +1375,8 @@
           # Ultra-low latency trading system boot optimizations (Graviton/ARM)
           
           # Apply workqueue CPU affinity (highest priority)
-          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c 'echo {{ housekeeping_bitmask }} > {}' ';' || true
+          HK_HEX=$(printf '%x' {{ housekeeping_bitmask }})
+          find /sys/devices/virtual/workqueue -name cpumask -exec sh -c "echo $HK_HEX > {}" ';' || true
           
           # Set writeback NUMA 
           if [ -f /sys/bus/workqueue/devices/writeback/numa ]; then
