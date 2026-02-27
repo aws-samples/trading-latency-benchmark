@@ -1,10 +1,5 @@
 ---
-# tune_os_v2.yaml - Amazon Linux 2023 compatible (x86 & Graviton)
-#
-#   IRQ spreading to use all housekeeping cores (was hardcoded to CPU 0-1)
-#   TX queue pinning to stay within housekeeping cores (was unbounded)
-#   Fully disabled (was kept running with banned CPUs, conflicting with manual IRQ pinning)
-#
+# Amazon Linux 2023 compatible (x86 & Graviton)
 - name: Configure Ultra-Low Latency Trading System
   hosts: aws_ec2
   become: yes
@@ -425,18 +420,18 @@
         content: |
           [Unit]
           Description=Set workqueue CPU affinity to housekeeping cores
-          DefaultDependencies=no
-          Conflicts=shutdown.target
-          After=local-fs.target
-          Before=basic.target
+          After=multi-user.target
           
           [Service]
           Type=oneshot
+          # Apply once after all drivers (incl. NVMe) have created their workqueues
           ExecStart=/bin/bash -c "HK_HEX=$(printf '%%x' {{ housekeeping_bitmask }}); find /sys/devices/virtual/workqueue -name cpumask -exec sh -c \"echo $HK_HEX > {}\" ';'"
+          # Re-apply after short delay to catch any late-initializing workqueues
+          ExecStartPost=/bin/bash -c "sleep 5; HK_HEX=$(printf '%%x' {{ housekeeping_bitmask }}); find /sys/devices/virtual/workqueue -name cpumask -exec sh -c \"echo $HK_HEX > {}\" ';'"
           RemainAfterExit=yes
           
           [Install]
-          WantedBy=basic.target
+          WantedBy=multi-user.target
         mode: '0644'
 
     # Enable the service to run at boot
