@@ -18,7 +18,6 @@ The following two tables contain the raw data for the OS tuning benchmark result
 | c8g.metal | 18.8µs | 20.5µs | 21.4µs | 22.1µs | 23.4µs |
 
 
-
 ## After OS Tuning
 
 | Instance | Min | p50 | p90 | p99 | p99.9 |
@@ -31,4 +30,23 @@ The following two tables contain the raw data for the OS tuning benchmark result
 | c7i.24xlarge | 19.8µs | 21.7µs | 22.3µs | 26.2µs | 30.9µs |
 | c6in.metal | 18.8µs | 20.9µs | 21.5µs | 21.8µs | 22.7µs |
 | c7a.48xlarge | 24.8µs | 28.2µs | 28.8µs | 32.3µs | 38.9µs |
+| c8g.metal | 19.8µs | 21.4µs | 22.0µs | 22.7µs | 23.4µs |
+
+
+## Tuning Impact
+
+The OS tuning delivers substantial improvements, particularly for instances that were furthest 
+from their optimal default configuration:
+
+| Instance | p50 Improvement | p99 Improvement | p99.9 Improvement |
+|---|---|---|---|
+| m5zn.metal | 33% | 36% | 41% |
+| m5zn.12xlarge | 32% | 33% | 31% |
+| c7i.metal | 28% | 29% | 34% |
+| c7i.24xlarge | 27% | 29% | 26% |
+| m8a.zn.12xlarge | 3% | 11% | 10% |
+| c7a.48xlarge | — | — | 11% |
+| m8a.zn.metal | 1% | 3% | 4% |
+| c6in.metal | 6% | 6% | 14% |
+| c8g.metal | — | — | — |
 | c8g.metal | 19.8µs | 21.4µs | 22.0µs | 22.7µs | 23.4µs |
