@@ -49,3 +49,4 @@ from their optimal default configuration:
 | m8a.zn.metal | 1% | 3% | 4% |
 | c6in.metal | 6% | 6% | 14% |
 | c8g.metal | — | — | — |
+| c8g.metal | 19.8µs | 21.4µs | 22.0µs | 22.7µs | 23.4µs |
