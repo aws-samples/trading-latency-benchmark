@@ -31,8 +31,8 @@ export class LatencyHuntingStack extends BaseLatencyHuntingStack {
     const vpcCidr = props?.vpcCidr || '10.100.0.0/16';  // Default non-standard CIDR
     const vpcId = props?.vpcId;
 
-    // Get instances from overridden method
-    const instances = this.getDefaultInstances();
+    // Get instances from base class and apply cap (e.g., 7 for spread placement)
+    const instances = this.applyInstanceCap(this.getDefaultInstances());
 
     // Use existing VPC or create new one
     let vpc: cdk.aws_ec2.IVpc;
@@ -155,7 +155,7 @@ export class LatencyHuntingStack extends BaseLatencyHuntingStack {
       this.elasticIps
     );
 
-    // Add outputs using base class method
+    // Add outputs using base class method (uses same capped list)
     this.addCommonOutputs(
       instances.map(i => i.instanceType),
       vpc.vpcId,
