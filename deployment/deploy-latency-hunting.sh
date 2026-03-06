@@ -3,6 +3,7 @@
 # Latency Hunting Deployment Script
 # This script deploys diverse EC2 instance types with placement groups
 # to find optimal network placement for latency-sensitive applications
+# Supports cluster and spread placement group strategies via --placement flag.
 
 set -e
 
@@ -22,6 +23,7 @@ SECURITY_GROUP_ID=""  # Optional for BYOVPC mode
 USE_EXISTING_VPC="false"  # Set to true to use BYOVPC stack
 ELASTIC_IPS=""  # Optional: comma-separated list of Elastic IP allocation IDs
 STACK_NAME="LatencyHuntingStack"
+PLACEMENT_STRATEGY="cluster"  # Default: cluster placement group
 
 # Function to print colored output
 print_info() {
@@ -52,30 +54,40 @@ OPTIONS:
     -g, --security-group-id SG_ID Security group ID (optional, creates one if not provided)
     -e, --elastic-ips EIP_LIST   Comma-separated Elastic IP allocation IDs (optional)
     --use-existing-vpc           Use BYOVPC stack (never creates/manages VPC)
+    -p, --placement STRATEGY     Placement group strategy: 'cluster' or 'spread' (default: cluster)
+                                   cluster - packs instances close together in a single AZ
+                                             for lowest inter-node latency
+                                   spread  - distributes instances across distinct hardware
+                                             for maximum fault isolation (max 7 instances
+                                             per AZ per group)
     -h, --help                   Show this help message
 
 EXAMPLES:
-    # Deploy with CDK-managed VPC (creates new VPC)
-    $0 --region ap-northeast-1 --key-pair my-keypair
+    # Deploy with cluster placement (default, lowest latency)
+    $0 --region ap-northeast-1 --key-pair my-keypair --placement cluster
 
-    # Use existing VPC (RECOMMENDED - never manages VPC)
-    $0 --use-existing-vpc \
-      --region ap-northeast-1 \
-      --vpc-id vpc-02393b8e30c6e3e5d \
-      --subnet-id subnet-xxxxx \
-      --key-pair tokyo_keypair
+    # Deploy with spread placement (fault isolation)
+    $0 --region ap-northeast-1 --key-pair my-keypair --placement spread
+
+    # Use existing VPC with spread placement
+    $0 --use-existing-vpc \\
+      --region ap-northeast-1 \\
+      --vpc-id vpc-02393b8e30c6e3e5d \\
+      --subnet-id subnet-xxxxx \\
+      --key-pair tokyo_keypair \\
+      --placement spread
 
     # With existing security group
-    $0 --use-existing-vpc \
-      --region ap-northeast-1 \
-      --vpc-id vpc-02393b8e30c6e3e5d \
-      --subnet-id subnet-xxxxx \
-      --security-group-id sg-xxxxx \
+    $0 --use-existing-vpc \\
+      --region ap-northeast-1 \\
+      --vpc-id vpc-02393b8e30c6e3e5d \\
+      --subnet-id subnet-xxxxx \\
+      --security-group-id sg-xxxxx \\
       --key-pair my-keypair
 
     # With Elastic IPs (first N instances get EIPs, rest get regular public IPs)
-    $0 --region eu-central-1 \
-      --key-pair frankfurt \
+    $0 --region eu-central-1 \\
+      --key-pair frankfurt \\
       --elastic-ips eipalloc-12345678,eipalloc-87654321,eipalloc-abcdef01
 
 EOF
@@ -117,6 +129,10 @@ while [[ $# -gt 0 ]]; do
             USE_EXISTING_VPC="true"
             shift
             ;;
+        -p|--placement)
+            PLACEMENT_STRATEGY="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             ;;
@@ -127,8 +143,32 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Validate placement strategy
+case "$PLACEMENT_STRATEGY" in
+    cluster|spread)
+        ;;
+    *)
+        print_error "Invalid placement strategy: '$PLACEMENT_STRATEGY'. Must be 'cluster' or 'spread'."
+        exit 1
+        ;;
+esac
+
+# Warn about spread placement group limitations and enforce instance cap
+if [ "$PLACEMENT_STRATEGY" = "spread" ]; then
+    print_warning "Spread placement selected. Note the following constraints:"
+    print_warning "  - Maximum of 7 running instances per AZ per placement group"
+    print_warning "  - Instances are placed on distinct underlying hardware (racks)"
+    print_warning "  - Inter-instance latency may be higher than cluster placement"
+    print_warning "  - Deployment will be capped at 7 instances to stay within the limit"
+    print_warning ""
+    MAX_INSTANCES=7
+else
+    MAX_INSTANCES=0  # 0 = no limit
+fi
+
 print_info "Starting Latency Hunting Deployment"
 print_info "================================"
+print_info "Placement Strategy: $PLACEMENT_STRATEGY"
 
 if [ "$USE_EXISTING_VPC" = "true" ]; then
     print_info "Mode: BYOVPC (Bring Your Own VPC)"
@@ -145,7 +185,7 @@ if [ "$USE_EXISTING_VPC" = "true" ]; then
         print_info "Elastic IPs: $ELASTIC_IPS"
     fi
     STACK_NAME="LatencyHuntingBYOVPCStack"
-    
+
     # Validate required parameters
     if [ -z "$VPC_ID" ]; then
         print_error "VPC ID is required when using --use-existing-vpc"
@@ -206,6 +246,11 @@ fi
 CDK_CONTEXT="--context deploymentType=latency-hunting"
 CDK_CONTEXT="$CDK_CONTEXT --context region=$REGION"
 CDK_CONTEXT="$CDK_CONTEXT --context keyPairName=$KEY_PAIR_NAME"
+CDK_CONTEXT="$CDK_CONTEXT --context placementStrategy=$PLACEMENT_STRATEGY"
+if [ "$MAX_INSTANCES" -gt 0 ]; then
+    CDK_CONTEXT="$CDK_CONTEXT --context maxInstances=$MAX_INSTANCES"
+    print_info "Instance cap: $MAX_INSTANCES (spread placement limit)"
+fi
 
 # Add Elastic IPs if provided
 if [ -n "$ELASTIC_IPS" ]; then
@@ -230,16 +275,20 @@ else
 fi
 
 # Deploy the stack
-print_info "Deploying Latency Hunting Stack..."
-print_info "This will launch multiple instance types with placement groups"
+print_info "Deploying Latency Hunting Stack (placement: $PLACEMENT_STRATEGY)..."
+if [ "$PLACEMENT_STRATEGY" = "spread" ]; then
+    print_info "Instances will be distributed across distinct hardware for fault isolation"
+else
+    print_info "Instances will be packed together in a single AZ for lowest latency"
+fi
 print_info "Some instance types may fail due to capacity constraints - this is expected"
 print_info ""
 
 if cdk deploy $STACK_NAME $CDK_CONTEXT --require-approval never; then
     print_info ""
-    print_info "✅ Deployment successful!"
+    print_info "✅ Deployment successful! (placement: $PLACEMENT_STRATEGY)"
     print_info ""
-    
+
     # Get stack outputs
     print_info "Fetching stack outputs..."
     OUTPUTS=$(aws cloudformation describe-stacks \
@@ -247,16 +296,16 @@ if cdk deploy $STACK_NAME $CDK_CONTEXT --require-approval never; then
         --region "$REGION" \
         --query 'Stacks[0].Outputs' \
         --output json)
-    
+
     # Create output directory and save outputs to file
     mkdir -p "$SCRIPT_DIR/latency-hunting"
     OUTPUT_FILE="$SCRIPT_DIR/latency-hunting/deployment-outputs.json"
     echo "$OUTPUTS" > "$OUTPUT_FILE"
     print_info "Stack outputs saved to: $OUTPUT_FILE"
-    
+
     # Get total instance types attempted
     TOTAL_TYPES=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="TotalInstanceTypes") | .OutputValue')
-    
+
     # Query actual instances via EC2 API using tags
     print_info ""
     print_info "Querying deployed instances..."
@@ -265,29 +314,36 @@ if cdk deploy $STACK_NAME $CDK_CONTEXT --require-approval never; then
         --filters "Name=tag:Architecture,Values=latency-hunting" "Name=instance-state-name,Values=pending,running" \
         --query 'Reservations[].Instances[].[InstanceId,InstanceType,State.Name,PublicIpAddress]' \
         --output json)
-    
+
     SUCCESS_COUNT=$(echo "$INSTANCES" | jq '. | length')
-    
+
     print_info ""
     print_info "Summary:"
+    print_info "  Placement strategy: $PLACEMENT_STRATEGY"
     print_info "  Total instance types attempted: $TOTAL_TYPES"
     print_info "  Successfully launched: $SUCCESS_COUNT"
     print_info "  Failed (capacity/compatibility issues): $((TOTAL_TYPES - SUCCESS_COUNT))"
+    if [ "$PLACEMENT_STRATEGY" = "spread" ]; then
+        print_info "  (capped at 7 for spread placement)"
+    fi
     print_info ""
-    
+
     # Show successful instances
     print_info "Successfully launched instances:"
     echo "$INSTANCES" | jq -r '.[] | "\(.[1]) (\(.[2])): \(.[0]) - \(.[3] // "pending")"' | while read line; do
         print_info "  $line"
     done
-    
+
     print_info ""
     print_info "Next steps:"
     print_info "  1. Wait for instances to fully initialize (2-3 minutes)"
     print_info "  2. Run latency tests: ./latency-hunting/run-hunting-tests.sh"
     print_info "  3. Analyze results: ./latency-hunting/analyze-hunting-results.sh"
-    
+
 else
     print_error "Deployment failed. Check the error messages above."
+    if [ "$PLACEMENT_STRATEGY" = "spread" ]; then
+        print_warning "If you hit the 7-instance-per-AZ limit, try reducing instance types or using multiple AZs."
+    fi
     exit 1
 fi
