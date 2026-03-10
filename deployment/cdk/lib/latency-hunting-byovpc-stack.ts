@@ -39,8 +39,8 @@ export class LatencyHuntingBYOVPCStack extends BaseLatencyHuntingStack {
       throw new Error('keyPairName is required for BYOVPC stack');
     }
 
-    // Use default instances from base class
-    const instances = this.getDefaultInstances();
+    // Get instances from base class and apply cap (e.g., 7 for spread placement)
+    const instances = this.applyInstanceCap(this.getDefaultInstances());
 
     // Import existing VPC
     const vpc = Vpc.fromLookup(this, 'ExistingVpc', {
@@ -95,7 +95,7 @@ export class LatencyHuntingBYOVPCStack extends BaseLatencyHuntingStack {
       this.elasticIps
     );
 
-    // Add outputs using base class method
+    // Add outputs using base class method (uses same capped list)
     this.addCommonOutputs(
       instances.map(i => i.instanceType),
       props.vpcId,

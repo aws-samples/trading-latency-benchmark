@@ -35,12 +35,19 @@ export interface BaseLatencyHuntingStackProps extends cdk.StackProps {
  * Base class for latency hunting stacks.
  * Implements the correct approach for creating instances across diverse instance types
  * with proper state tracking, resilient Lambda-based provisioning, and cleanup.
+ *
+ * Supports CDK context parameters:
+ *   placementStrategy - 'cluster' (default) or 'spread'
+ *   maxInstances      - cap on number of instances to deploy (0 = no limit)
+ *                       Automatically set to 7 for spread placement by the deploy script.
  */
 export abstract class BaseLatencyHuntingStack extends cdk.Stack {
     protected readonly stateTable: dynamodb.Table;
     protected readonly instanceCreatorLambda: lambda.Function;
     protected readonly provider: Provider;
     protected readonly elasticIps?: string[];
+    protected readonly placementStrategy: string;
+    protected readonly maxInstances: number;
 
     constructor(scope: cdk.App, id: string, props: BaseLatencyHuntingStackProps) {
         super(scope, id, props);
@@ -48,6 +55,15 @@ export abstract class BaseLatencyHuntingStack extends cdk.Stack {
         const maxInstancesPerType = props.maxInstancesPerType || 1;
         const managedByTag = props.managedByTag || 'CDK-LatencyHunting';
         this.elasticIps = props.elasticIps;
+
+        // Read placement strategy from CDK context (passed by deploy script --placement flag)
+        // Valid values: 'cluster' (default) or 'spread'
+        this.placementStrategy = this.node.tryGetContext('placementStrategy') || 'cluster';
+
+        // Read max instances cap from CDK context
+        // When spread placement is selected, the deploy script sets this to 7
+        // to respect the AWS limit of 7 instances per AZ per spread placement group
+        this.maxInstances = parseInt(this.node.tryGetContext('maxInstances') || '0', 10);
 
         // Create DynamoDB table for instance state tracking
         this.stateTable = new dynamodb.Table(this, 'InstanceStateTable', {
@@ -423,7 +439,7 @@ def handler(event, context):
             ami_id = sorted_images[0]['ImageId']
             print(f"Auto-detected AMI: {ami_id}")
         
-        user_data_script = '''#!/bin/bash
+        user_data_script = """#!/bin/bash
 set -e
 exec > >(tee /var/log/user-data.log)
 exec 2>&1
@@ -443,7 +459,7 @@ fi
 chown -R ec2-user:ec2-user /home/ec2-user/benchmark
 touch /home/ec2-user/benchmark/setup_complete
 echo "EC2 Hunting setup completed at $(date)"
-'''
+"""
         
         run_params = {
             'ImageId': ami_id,
@@ -614,8 +630,33 @@ echo "EC2 Hunting setup completed at $(date)"
     }
 
     /**
-     * Create instances for the provided instance configurations
-     * @param instances Array of instance configurations with unique IDs
+     * Apply the maxInstances cap to an instance list.
+     * When spread placement is selected, the deploy script sets maxInstances=7
+     * to respect the AWS limit of 7 instances per AZ per spread placement group.
+     *
+     * Call this BEFORE passing instances to createInstances() and addCommonOutputs()
+     * so both methods operate on the same capped list.
+     *
+     * @param instances Full array of instance configurations
+     * @returns Capped array (or the original if no cap is set)
+     */
+    protected applyInstanceCap(instances: InstanceConfig[]): InstanceConfig[] {
+        if (this.maxInstances > 0 && instances.length > this.maxInstances) {
+            console.log(
+                `Capping instance count from ${instances.length} to ${this.maxInstances} ` +
+                `(placement strategy: ${this.placementStrategy})`
+            );
+            return instances.slice(0, this.maxInstances);
+        }
+        return instances;
+    }
+
+    /**
+     * Create instances for the provided instance configurations.
+     * 
+     * The placement group strategy is read from CDK context ('cluster' or 'spread').
+     *
+     * @param instances Array of instance configurations with unique IDs (should already be capped via applyInstanceCap)
      * @param vpc VPC to deploy instances in
      * @param securityGroup Security group for instances
      * @param keyPair Key pair for SSH access
@@ -650,12 +691,12 @@ echo "EC2 Hunting setup completed at $(date)"
 
         // Create instances using explicit IDs
         instances.forEach((instance, index) => {
-            // Create unique placement group for this instance
+            // Create unique placement group for this instance using the configured strategy
             const placementGroup = new CfnPlacementGroup(
                 this,
                 `PlacementGroup-${instance.id}`,
                 {
-                    strategy: 'cluster'
+                    strategy: this.placementStrategy
                 }
             );
             placementGroup.applyRemovalPolicy(RemovalPolicy.DESTROY);
@@ -800,23 +841,6 @@ echo "EC2 Hunting setup completed at $(date)"
             { id: 'arm-c8g-8', instanceType: 'c8g.48xlarge' },
             { id: 'arm-c8g-9', instanceType: 'c8g.metal-24xl' },
             { id: 'arm-c8g-10', instanceType: 'c8g.metal-48xl' },
-            
-            // // Current generation - Intel (auto-detected AMI)
-            // { id: 'intel-c7i-1', instanceType: 'c7i.xlarge' },
-            // { id: 'intel-c7i-2', instanceType: 'c7i.xlarge' },
-            // { id: 'intel-c7i-3', instanceType: 'c7i.xlarge' },
-            // { id: 'intel-c6i-1', instanceType: 'c6i.xlarge' },
-            // { id: 'intel-c6i-2', instanceType: 'c6i.xlarge' },
-            // { id: 'intel-c6i-3', instanceType: 'c6i.xlarge' },
-            
-            // // Current generation - Graviton ARM (auto-detected AMI)
-            // { id: 'arm-c8g-1', instanceType: 'c8g.xlarge' },
-            // { id: 'arm-c8g-2', instanceType: 'c8g.xlarge' },
-            // { id: 'arm-c8g-3', instanceType: 'c8g.xlarge' },
-            // { id: 'arm-c8g-4', instanceType: 'c8g.xlarge' },
-            // { id: 'arm-c8g-5', instanceType: 'c8g.xlarge' },
-            // { id: 'arm-c8g-6', instanceType: 'c8g.xlarge' },
-            // { id: 'arm-c8g-7', instanceType: 'c8g.xlarge' },
         ];
     }
 }
