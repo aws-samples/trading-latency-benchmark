@@ -17,7 +17,7 @@ OBJECTS = $(SOURCES:.cpp=.o)
 
 # Executables and XDP programs
 TARGETS = packet_replicator control_client test_client market_data_provider_client
-XDP_PROGRAMS = unicast_filter.o
+XDP_PROGRAMS = unicast_filter.o multicast_filter.o
 
 # Default target
 all: $(TARGETS) $(XDP_PROGRAMS)
@@ -42,8 +42,11 @@ test_client: TestClient.o
 market_data_provider_client: MarketDataProviderClient.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
-# XDP Program (BPF bytecode)
+# XDP Programs (BPF bytecode)
 unicast_filter.o: unicast_filter.c
+	clang -O2 -g -Wall -target bpf -c $< -o $@
+
+multicast_filter.o: multicast_filter.c
 	clang -O2 -g -Wall -target bpf -c $< -o $@
 
 # Clean

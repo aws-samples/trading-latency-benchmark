@@ -77,7 +77,8 @@ bool PacketReplicator::Destination::operator<(const Destination& other) const {
 // PacketReplicator implementation
 PacketReplicator::PacketReplicator(const std::string& interface, const std::string& listenIp, uint16_t listenPort)
     : listen_interface_(interface), listen_ip_(listenIp), listen_port_(listenPort),
-      num_queues_(4), output_xdp_socket_(nullptr), control_socket_(-1), output_socket_(-1), running_(false),
+      num_queues_(4), multicast_socket_(-1), output_xdp_socket_(nullptr),
+      control_socket_(-1), output_socket_(-1), running_(false),
       packets_received_(0), packets_sent_(0), bytes_received_(0), bytes_sent_(0) {
     
     // Initialize per-queue statistics
@@ -102,7 +103,11 @@ PacketReplicator::PacketReplicator(const std::string& interface, const std::stri
 
 PacketReplicator::~PacketReplicator() {
     stop();
-    
+
+    if (multicast_socket_ >= 0) {
+        ::close(multicast_socket_);
+        multicast_socket_ = -1;
+    }
     if (control_socket_ >= 0) {
         ::close(control_socket_);
     }
@@ -181,12 +186,20 @@ void PacketReplicator::initialize(bool useZeroCopy) {
     // Create AF_XDP sockets for all queues
     xdp_sockets_.resize(num_queues_);
     
-    // Load XDP program once
-    std::string xdp_program_path = "./unicast_filter.o";
+    // Load XDP program — multicast groups use multicast_filter.o, unicast uses unicast_filter.o
+    std::string xdp_program_path = isMulticastAddress(listen_ip_)
+        ? "./multicast_filter.o"
+        : "./unicast_filter.o";
+    std::cout << "Loading XDP program: " << xdp_program_path << std::endl;
     AFXDPSocket::loadXdpProgram(listen_interface_, xdp_program_path, useZeroCopy);
     
     // Configure XDP program with our target IP and port
     configureXdpProgram();
+
+    // For multicast listen addresses, join the group so the NIC delivers frames
+    if (isMulticastAddress(listen_ip_)) {
+        joinMulticastGroup();
+    }
     
     // Create and configure AF_XDP socket for each queue
     int xdp_flags = useZeroCopy ? AFXDPSocket::XDP_FLAGS_ZERO_COPY : AFXDPSocket::XDP_FLAGS_DRV_MODE;
@@ -287,6 +300,72 @@ void PacketReplicator::configureXdpProgram() {
     }
 }
 
+bool PacketReplicator::isMulticastAddress(const std::string& ip) {
+    struct in_addr addr;
+    if (inet_aton(ip.c_str(), &addr) == 0)
+        return false;
+    // First octet 224–239 (0xE0–0xEF) — multicast range 224.0.0.0/4
+    uint8_t first_octet = ntohl(addr.s_addr) >> 24;
+    return first_octet >= 224 && first_octet <= 239;
+}
+
+void PacketReplicator::joinMulticastGroup() {
+    multicast_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
+    if (multicast_socket_ < 0) {
+        throw std::runtime_error("Failed to create multicast socket: " + std::string(strerror(errno)));
+    }
+
+    // Bind to the port so the socket is valid for membership tracking
+    struct sockaddr_in bind_addr = {};
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_port = htons(listen_port_);
+    bind_addr.sin_addr.s_addr = INADDR_ANY;
+    if (bind(multicast_socket_, (struct sockaddr*)&bind_addr, sizeof(bind_addr)) < 0) {
+        // Non-fatal: another socket may already be bound; membership join still works
+        std::cerr << "Warning: multicast socket bind failed (port " << listen_port_
+                  << "): " << strerror(errno) << " — continuing" << std::endl;
+    }
+
+    struct ip_mreqn mreq = {};
+    if (inet_aton(listen_ip_.c_str(), &mreq.imr_multiaddr) == 0) {
+        ::close(multicast_socket_);
+        multicast_socket_ = -1;
+        throw std::runtime_error("Invalid multicast group address: " + listen_ip_);
+    }
+    mreq.imr_address.s_addr = INADDR_ANY;
+    mreq.imr_ifindex = static_cast<int>(if_nametoindex(listen_interface_.c_str()));
+    if (mreq.imr_ifindex == 0) {
+        ::close(multicast_socket_);
+        multicast_socket_ = -1;
+        throw std::runtime_error("Unknown interface: " + listen_interface_);
+    }
+
+    if (setsockopt(multicast_socket_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+        ::close(multicast_socket_);
+        multicast_socket_ = -1;
+        throw std::runtime_error("Failed to join multicast group " + listen_ip_ +
+                                 ": " + strerror(errno));
+    }
+
+    std::cout << "Joined multicast group " << listen_ip_
+              << " on interface " << listen_interface_ << std::endl;
+}
+
+void PacketReplicator::leaveMulticastGroup() {
+    if (multicast_socket_ < 0)
+        return;
+
+    struct ip_mreqn mreq = {};
+    inet_aton(listen_ip_.c_str(), &mreq.imr_multiaddr);
+    mreq.imr_address.s_addr = INADDR_ANY;
+    mreq.imr_ifindex = static_cast<int>(if_nametoindex(listen_interface_.c_str()));
+
+    setsockopt(multicast_socket_, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+    ::close(multicast_socket_);
+    multicast_socket_ = -1;
+    std::cout << "Left multicast group " << listen_ip_ << std::endl;
+}
+
 void PacketReplicator::addDestination(const std::string& ipAddress, uint16_t port) {
     std::lock_guard<std::mutex> lock(destinations_mutex_);
     
@@ -358,6 +437,11 @@ void PacketReplicator::stop() {
             control_thread_.reset();
         }
         
+        // Drop multicast membership if applicable
+        if (isMulticastAddress(listen_ip_)) {
+            leaveMulticastGroup();
+        }
+
         // Unload XDP program
         AFXDPSocket::unloadXdpProgram(listen_interface_, true);
         

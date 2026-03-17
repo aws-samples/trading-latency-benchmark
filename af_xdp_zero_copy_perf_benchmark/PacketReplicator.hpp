@@ -66,6 +66,7 @@ private:
     std::string listen_ip_;
     uint16_t listen_port_;
     int num_queues_;
+    int multicast_socket_;  // Holds IGMP membership so NIC receives the multicast group
     
     std::vector<std::unique_ptr<AFXDPSocket>> xdp_sockets_;
     std::unique_ptr<AFXDPSocket> output_xdp_socket_;  // Zero-copy output socket
@@ -139,11 +140,16 @@ public:
 
     /**
      * Initialize AF_XDP socket and XDP program
-     * 
+     *
      * @param useZeroCopy Whether to use zero-copy mode (requires driver support)
      * @throws std::runtime_error If initialization fails
      */
     void initialize(bool useZeroCopy = true);
+
+    /**
+     * Returns true if the given IP string is in the multicast range 224.0.0.0/4
+     */
+    static bool isMulticastAddress(const std::string& ip);
 
     /**
      * Add a destination EC2 instance
@@ -211,6 +217,17 @@ private:
      * Configure the XDP program with target IP and port
      */
     void configureXdpProgram();
+
+    /**
+     * Join the multicast group specified by listen_ip_ so the NIC delivers
+     * multicast frames to this host.  Stores the socket in multicast_socket_.
+     */
+    void joinMulticastGroup();
+
+    /**
+     * Drop multicast group membership and close multicast_socket_.
+     */
+    void leaveMulticastGroup();
 
     /**
      * Packet processing loop for a specific queue
