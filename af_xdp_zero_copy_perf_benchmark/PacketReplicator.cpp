@@ -57,7 +57,7 @@
     } while(0)
 
 // Destination implementation
-PacketReplicator::Destination::Destination(const std::string& ip, uint16_t p) 
+PacketReplicator::Destination::Destination(const std::string& ip, uint16_t p)
     : ip_address(ip), port(p) {
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -65,6 +65,7 @@ PacketReplicator::Destination::Destination(const std::string& ip, uint16_t p)
     if (inet_aton(ip_address.c_str(), &addr.sin_addr) == 0) {
         throw std::invalid_argument("Invalid IP address: " + ip_address);
     }
+    memset(mac, 0xFF, sizeof(mac));  // Default: broadcast; replaced after ARP resolution
 }
 
 bool PacketReplicator::Destination::operator<(const Destination& other) const {
@@ -77,8 +78,11 @@ bool PacketReplicator::Destination::operator<(const Destination& other) const {
 // PacketReplicator implementation
 PacketReplicator::PacketReplicator(const std::string& interface, const std::string& listenIp, uint16_t listenPort)
     : listen_interface_(interface), listen_ip_(listenIp), listen_port_(listenPort),
-      num_queues_(4), multicast_socket_(-1), output_xdp_socket_(nullptr),
-      control_socket_(-1), output_socket_(-1), running_(false),
+      num_queues_(4), multicast_socket_(-1), gre_mode_(false), output_xdp_socket_(nullptr),
+      control_socket_(-1), output_socket_(-1),
+      ctrl_multicast_port_(0), producer_port_(0),
+      ctrl_multicast_socket_(-1), ctrl_forward_socket_(-1),
+      running_(false),
       packets_received_(0), packets_sent_(0), bytes_received_(0), bytes_sent_(0) {
     
     // Initialize per-queue statistics
@@ -186,18 +190,27 @@ void PacketReplicator::initialize(bool useZeroCopy) {
     // Create AF_XDP sockets for all queues
     xdp_sockets_.resize(num_queues_);
     
-    // Load XDP program — multicast groups use multicast_filter.o, unicast uses unicast_filter.o
-    std::string xdp_program_path = isMulticastAddress(listen_ip_)
-        ? "./multicast_filter.o"
-        : "./unicast_filter.o";
-    std::cout << "Loading XDP program: " << xdp_program_path << std::endl;
+    // Select XDP program:
+    //   gre_mode_       → gre_filter.o   (outer unicast GRE carries inner multicast)
+    //   multicast IP    → multicast_filter.o (native multicast on NIC, e.g. TGW)
+    //   unicast IP      → unicast_filter.o   (direct unicast feed)
+    std::string xdp_program_path;
+    if (gre_mode_) {
+        xdp_program_path = "./gre_filter.o";
+    } else if (isMulticastAddress(listen_ip_)) {
+        xdp_program_path = "./multicast_filter.o";
+    } else {
+        xdp_program_path = "./unicast_filter.o";
+    }
+    std::cout << "Loading XDP program: " << xdp_program_path
+              << (gre_mode_ ? " (GRE tunnel mode)" : "") << std::endl;
     AFXDPSocket::loadXdpProgram(listen_interface_, xdp_program_path, useZeroCopy);
-    
-    // Configure XDP program with our target IP and port
+
+    // Configure XDP program with target IP (inner multicast group) and port
     configureXdpProgram();
 
-    // For multicast listen addresses, join the group so the NIC delivers frames
-    if (isMulticastAddress(listen_ip_)) {
+    // IGMP join only for native multicast — GRE outer packet is unicast so no join needed
+    if (!gre_mode_ && isMulticastAddress(listen_ip_)) {
         joinMulticastGroup();
     }
     
@@ -249,7 +262,26 @@ void PacketReplicator::initialize(bool useZeroCopy) {
     if (output_socket_ < 0) {
         throw std::runtime_error("Failed to create output socket: " + std::string(strerror(errno)));
     }
-    
+
+    // Cache interface IP and MAC once — createUdpPacket() reads these on every TX packet
+    if (!getInterfaceIp(listen_interface_, cached_iface_ip_))
+        throw std::runtime_error("Failed to get IP for interface " + listen_interface_);
+    if (!getInterfaceMac(listen_interface_, cached_iface_mac_))
+        throw std::runtime_error("Failed to get MAC for interface " + listen_interface_);
+    std::cout << "Interface " << listen_interface_
+              << " IP=" << cached_iface_ip_ << std::endl;
+
+    // Upstream control: join control multicast group and prepare forward socket
+    if (!ctrl_multicast_group_.empty()) {
+        joinControlMulticastGroup();
+        ctrl_forward_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if (ctrl_forward_socket_ < 0) {
+            throw std::runtime_error("Failed to create ctrl forward socket: " + std::string(strerror(errno)));
+        }
+        std::cout << "Upstream control configured: " << ctrl_multicast_group_ << ":"
+                  << ctrl_multicast_port_ << " → " << producer_ip_ << ":" << producer_port_ << std::endl;
+    }
+
     std::cout << "PacketReplicator initialized successfully with " << num_queues_ << " queues" << std::endl;
 }
 
@@ -366,16 +398,108 @@ void PacketReplicator::leaveMulticastGroup() {
     std::cout << "Left multicast group " << listen_ip_ << std::endl;
 }
 
+void PacketReplicator::setUpstreamControl(const std::string& ctrlGroup, uint16_t ctrlPort,
+                                          const std::string& producerIp, uint16_t producerPort) {
+    ctrl_multicast_group_ = ctrlGroup;
+    ctrl_multicast_port_  = ctrlPort;
+    producer_ip_          = producerIp;
+    producer_port_        = producerPort;
+}
+
+void PacketReplicator::joinControlMulticastGroup() {
+    ctrl_multicast_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
+    if (ctrl_multicast_socket_ < 0)
+        throw std::runtime_error("Failed to create ctrl multicast socket: " + std::string(strerror(errno)));
+
+    int reuse = 1;
+    setsockopt(ctrl_multicast_socket_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    struct sockaddr_in bind_addr{};
+    bind_addr.sin_family      = AF_INET;
+    bind_addr.sin_port        = htons(ctrl_multicast_port_);
+    bind_addr.sin_addr.s_addr = INADDR_ANY;
+    if (bind(ctrl_multicast_socket_, (struct sockaddr*)&bind_addr, sizeof(bind_addr)) < 0) {
+        std::cerr << "Warning: ctrl multicast socket bind failed: " << strerror(errno) << " — continuing" << std::endl;
+    }
+
+    struct ip_mreqn mreq{};
+    if (inet_aton(ctrl_multicast_group_.c_str(), &mreq.imr_multiaddr) == 0) {
+        ::close(ctrl_multicast_socket_);
+        ctrl_multicast_socket_ = -1;
+        throw std::runtime_error("Invalid ctrl multicast group: " + ctrl_multicast_group_);
+    }
+    mreq.imr_address.s_addr = INADDR_ANY;
+    mreq.imr_ifindex = static_cast<int>(if_nametoindex(listen_interface_.c_str()));
+    if (mreq.imr_ifindex == 0) {
+        ::close(ctrl_multicast_socket_);
+        ctrl_multicast_socket_ = -1;
+        throw std::runtime_error("Unknown interface: " + listen_interface_);
+    }
+    if (setsockopt(ctrl_multicast_socket_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+        ::close(ctrl_multicast_socket_);
+        ctrl_multicast_socket_ = -1;
+        throw std::runtime_error("Failed to join ctrl multicast group " + ctrl_multicast_group_ +
+                                 ": " + strerror(errno));
+    }
+    std::cout << "Joined ctrl multicast group " << ctrl_multicast_group_
+              << " on interface " << listen_interface_ << std::endl;
+}
+
+void PacketReplicator::handleUpstreamControl() {
+    std::cout << "Upstream control thread started: " << ctrl_multicast_group_ << ":"
+              << ctrl_multicast_port_ << " → " << producer_ip_ << ":" << producer_port_ << std::endl;
+
+    struct sockaddr_in producer_addr{};
+    producer_addr.sin_family = AF_INET;
+    producer_addr.sin_port   = htons(producer_port_);
+    inet_aton(producer_ip_.c_str(), &producer_addr.sin_addr);
+
+    // 1-second recv timeout so the loop checks running_ regularly
+    struct timeval tv{1, 0};
+    setsockopt(ctrl_multicast_socket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    std::vector<uint8_t> buf(65535);
+    struct sockaddr_in sender{};
+    socklen_t sender_len = sizeof(sender);
+
+    while (running_) {
+        ssize_t n = recvfrom(ctrl_multicast_socket_, buf.data(), buf.size(), 0,
+                             (struct sockaddr*)&sender, &sender_len);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                continue;
+            if (running_)
+                std::cerr << "Upstream control recv error: " << strerror(errno) << std::endl;
+            continue;
+        }
+        if (n == 0)
+            continue;
+
+        ssize_t sent = sendto(ctrl_forward_socket_, buf.data(), static_cast<size_t>(n), 0,
+                              (struct sockaddr*)&producer_addr, sizeof(producer_addr));
+        if (sent < 0 && running_)
+            std::cerr << "Upstream control forward error: " << strerror(errno) << std::endl;
+    }
+
+    std::cout << "Upstream control thread stopped" << std::endl;
+}
+
 void PacketReplicator::addDestination(const std::string& ipAddress, uint16_t port) {
-    std::lock_guard<std::mutex> lock(destinations_mutex_);
-    
-    Destination dest(ipAddress, port);
-    destinations_.insert(dest);
-    
-    std::cout << "Added destination: " << ipAddress << ":" << port << std::endl;
-    
-    // Trigger ARP resolution to ensure MAC address is available
+    // ARP trigger and MAC lookup happen outside the lock: triggerArpResolution sleeps
+    // 100ms and getDestinationMac reads /proc/net/arp — both unacceptable inside the
+    // mutex that the packet-processing hot path acquires via getCachedDestinations().
     triggerArpResolution(ipAddress);
+
+    Destination dest(ipAddress, port);
+    if (!getDestinationMac(ipAddress, dest.mac)) {
+        std::cerr << "Warning: ARP not resolved for " << ipAddress
+                  << " — using broadcast MAC until next addDestination call" << std::endl;
+        // dest.mac already set to 0xFF:FF:FF:FF:FF:FF in constructor
+    }
+
+    std::lock_guard<std::mutex> lock(destinations_mutex_);
+    destinations_.insert(dest);
+    std::cout << "Added destination: " << ipAddress << ":" << port << std::endl;
 }
 
 void PacketReplicator::removeDestination(const std::string& ipAddress, uint16_t port) {
@@ -413,7 +537,13 @@ void PacketReplicator::start() {
         
         // Start control protocol thread (don't bind to specific core to avoid interference)
         control_thread_ = std::make_unique<std::thread>(&PacketReplicator::handleControlProtocol, this);
-        
+
+        // Start upstream control forwarding thread if configured
+        if (!ctrl_multicast_group_.empty()) {
+            ctrl_upstream_thread_ = std::make_unique<std::thread>(&PacketReplicator::handleUpstreamControl, this);
+            std::cout << "Started upstream control thread" << std::endl;
+        }
+
         std::cout << "HFT-optimized PacketReplicator started with " << num_queues_ << " processing threads" << std::endl;
         std::cout << "CPU affinity applied, busy polling enabled, lock-free operations active" << std::endl;
     }
@@ -436,9 +566,30 @@ void PacketReplicator::stop() {
             control_thread_->join();
             control_thread_.reset();
         }
-        
-        // Drop multicast membership if applicable
-        if (isMulticastAddress(listen_ip_)) {
+
+        // Wait for upstream control thread to finish
+        if (ctrl_upstream_thread_ && ctrl_upstream_thread_->joinable()) {
+            ctrl_upstream_thread_->join();
+            ctrl_upstream_thread_.reset();
+        }
+
+        // Leave control multicast group
+        if (ctrl_multicast_socket_ >= 0) {
+            struct ip_mreqn mreq{};
+            inet_aton(ctrl_multicast_group_.c_str(), &mreq.imr_multiaddr);
+            mreq.imr_address.s_addr = INADDR_ANY;
+            mreq.imr_ifindex = static_cast<int>(if_nametoindex(listen_interface_.c_str()));
+            setsockopt(ctrl_multicast_socket_, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+            ::close(ctrl_multicast_socket_);
+            ctrl_multicast_socket_ = -1;
+        }
+        if (ctrl_forward_socket_ >= 0) {
+            ::close(ctrl_forward_socket_);
+            ctrl_forward_socket_ = -1;
+        }
+
+        // Drop multicast membership — only for native multicast mode (GRE never joined)
+        if (!gre_mode_ && isMulticastAddress(listen_ip_)) {
             leaveMulticastGroup();
         }
 
@@ -601,15 +752,10 @@ int PacketReplicator::replicatePacket(const uint8_t* packetData, size_t packetLe
         return 0; // Not a valid UDP packet
     }
     
-    // Get current destinations
-    std::vector<Destination> current_destinations;
-    {
-        std::lock_guard<std::mutex> lock(destinations_mutex_);
-        current_destinations = std::vector<Destination>(destinations_.begin(), destinations_.end());
-    }
-    
+    // Const ref to thread-local cache — no copy, no lock on hot path
+    const std::vector<Destination>& current_destinations = getCachedDestinations();
     if (current_destinations.empty()) {
-        return 0; // No destinations to send to
+        return 0;
     }
     
     // Send to all destinations using the same queue's socket to avoid race conditions
@@ -625,8 +771,84 @@ int PacketReplicator::replicatePacket(const uint8_t* packetData, size_t packetLe
     return sent_count;
 }
 
+bool PacketReplicator::extractUdpPayloadGre(const uint8_t* packetData, size_t packetLen,
+                                             const uint8_t*& payloadData, size_t& payloadLen) {
+    // Minimum: Eth(14) + outerIP(20) + GRE(4) + innerIP(20) + UDP(8) = 66 bytes
+    static constexpr size_t MIN_GRE_PKT = 14 + 20 + 4 + 20 + 8;
+    if (packetLen < MIN_GRE_PKT)
+        return false;
+
+    const struct ethhdr* eth = reinterpret_cast<const struct ethhdr*>(packetData);
+    if (ntohs(eth->h_proto) != ETH_P_IP)
+        return false;
+
+    const struct iphdr* outer_ip = reinterpret_cast<const struct iphdr*>(
+        packetData + sizeof(struct ethhdr));
+    if (outer_ip->protocol != IPPROTO_GRE)
+        return false;
+
+    size_t outer_ip_len = outer_ip->ihl * 4;
+    if (outer_ip_len < 20 || outer_ip_len > 60)
+        return false;
+
+    // GRE fixed header: 2-byte flags + 2-byte protocol
+    size_t gre_offset = sizeof(struct ethhdr) + outer_ip_len;
+    if (packetLen < gre_offset + 4)
+        return false;
+
+    const uint8_t* gre = packetData + gre_offset;
+    uint16_t gre_flags = static_cast<uint16_t>((gre[0] << 8) | gre[1]);
+    uint16_t gre_proto = static_cast<uint16_t>((gre[2] << 8) | gre[3]);
+
+    if (gre_proto != ETH_P_IP)  // inner must be IPv4
+        return false;
+
+    // Variable GRE header size: base 4 bytes + optional fields
+    size_t gre_len = 4;
+    if (gre_flags & 0x8000) gre_len += 4;  // checksum + reserved
+    if (gre_flags & 0x2000) gre_len += 4;  // key
+    if (gre_flags & 0x1000) gre_len += 4;  // sequence number
+
+    // Inner IPv4
+    size_t inner_ip_offset = gre_offset + gre_len;
+    if (packetLen < inner_ip_offset + sizeof(struct iphdr))
+        return false;
+
+    const struct iphdr* inner_ip = reinterpret_cast<const struct iphdr*>(
+        packetData + inner_ip_offset);
+    if (inner_ip->protocol != IPPROTO_UDP)
+        return false;
+
+    size_t inner_ip_len = inner_ip->ihl * 4;
+    if (inner_ip_len < 20 || inner_ip_len > 60)
+        return false;
+
+    // Inner UDP
+    size_t udp_offset = inner_ip_offset + inner_ip_len;
+    if (packetLen < udp_offset + sizeof(struct udphdr))
+        return false;
+
+    const struct udphdr* udp = reinterpret_cast<const struct udphdr*>(
+        packetData + udp_offset);
+
+    size_t udp_payload_len = ntohs(udp->len);
+    if (udp_payload_len < sizeof(struct udphdr))
+        return false;
+    udp_payload_len -= sizeof(struct udphdr);
+
+    if (packetLen < udp_offset + sizeof(struct udphdr) + udp_payload_len)
+        return false;
+
+    payloadData = packetData + udp_offset + sizeof(struct udphdr);
+    payloadLen  = udp_payload_len;
+    return true;
+}
+
 bool PacketReplicator::extractUdpPayload(const uint8_t* packetData, size_t packetLen,
                                          const uint8_t*& payloadData, size_t& payloadLen) {
+    if (gre_mode_)
+        return extractUdpPayloadGre(packetData, packetLen, payloadData, payloadLen);
+
     // Minimum packet size check
     if (packetLen < sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr)) {
         return false;
@@ -734,15 +956,24 @@ bool PacketReplicator::sendToDestinationFallback(const Destination& destination,
 }
 
 bool PacketReplicator::sendToDestinationWithQueue(const Destination& destination, const uint8_t* data, size_t length, int queueId) {
-    // Use the specific queue's socket to avoid race conditions between threads
+    // If ARP has not yet resolved for this destination, the cached MAC is all-broadcast.
+    // ENA/VPC drops frames with broadcast dst MAC, so route through the kernel socket
+    // which handles ARP internally.  updateDestinationCache() will re-resolve the MAC on
+    // the next 100ms cache refresh and automatically restore the AF_XDP fast path.
+    static constexpr uint8_t BROADCAST_MAC[ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    if (__builtin_expect(memcmp(destination.mac, BROADCAST_MAC, ETH_ALEN) == 0, 0)) {
+        return sendToDestinationFallback(destination, data, length);
+    }
+
     if (queueId < 0 || queueId >= num_queues_ || !xdp_sockets_[queueId]) {
         return sendToDestinationFallback(destination, data, length);
     }
-    
+
     try {
         return sendSinglePacketDirect(destination, data, length, queueId);
     } catch (const std::exception& e) {
-        std::cerr << "Direct AF_XDP send failed on queue " << queueId << ": " << e.what() << ", falling back to regular socket" << std::endl;
+        std::cerr << "Direct AF_XDP send failed on queue " << queueId << ": " << e.what()
+                  << ", falling back to regular socket" << std::endl;
         return sendToDestinationFallback(destination, data, length);
     }
 }
@@ -820,65 +1051,28 @@ size_t PacketReplicator::createUdpPacket(const Destination& destination, const u
         std::cerr << "Packet too large for buffer: " << total_len << " > " << bufferSize << std::endl;
         return 0;
     }
-    
-    // Zero the buffer
-    memset(buffer, 0, total_len);
-    
-    // Create Ethernet header
+
+    // Ethernet header — MACs cached at initialize()/addDestination(); zero syscalls on hot path.
+    // Broadcast dst MAC (0xFF * 6) signals unresolved ARP; sendToDestinationWithQueue() routes
+    // those packets to sendToDestinationFallback() before createUdpPacket() is ever called.
     struct ethhdr* eth = (struct ethhdr*)buffer;
-    // CRITICAL FIX: Use proper destination MAC (following ena-xdp exactly)
-    uint8_t dst_mac[ETH_ALEN];
-    if (getDestinationMac(destination.ip_address, dst_mac)) {
-        memcpy(eth->h_dest, dst_mac, ETH_ALEN);
-        DEBUG_PACKET_PRINT("DEBUG: Using destination MAC: " << std::hex << dst_mac[0] << ":" << dst_mac[1] << ":" << dst_mac[2] << ":" << dst_mac[3] << ":" << dst_mac[4] << ":" << dst_mac[5] << std::dec);
-    } else {
-        // Fallback to broadcast MAC if ARP resolution fails
-        memset(eth->h_dest, 0xFF, ETH_ALEN);
-        DEBUG_PACKET_PRINT("DEBUG: Using broadcast MAC (ARP resolution failed)");
-    }
-    
-    // Try to get interface MAC address
-    uint8_t src_mac[ETH_ALEN];
-    if (getInterfaceMac(listen_interface_, src_mac)) {
-        memcpy(eth->h_source, src_mac, ETH_ALEN);
-        DEBUG_PACKET_PRINT("DEBUG: Using interface MAC: " << std::hex << src_mac[0] << ":" << src_mac[1] << ":" << src_mac[2] << ":" << src_mac[3] << ":" << src_mac[4] << ":" << src_mac[5] << std::dec);
-    } else {
-        // Fallback to a default MAC
-        uint8_t default_mac[ETH_ALEN] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
-        memcpy(eth->h_source, default_mac, ETH_ALEN);
-        DEBUG_PACKET_PRINT("DEBUG: Using default MAC (interface MAC not found)");
-    }
+    memcpy(eth->h_dest,   destination.mac,  ETH_ALEN);
+    memcpy(eth->h_source, cached_iface_mac_, ETH_ALEN);
     eth->h_proto = htons(ETH_P_IP);
-    
-    // Create IP header
+
+    // IP header
     struct iphdr* ip = (struct iphdr*)(buffer + eth_hdr_len);
-    ip->version = 4;
-    ip->ihl = 5;  // 20 bytes
-    ip->tos = 0;
-    ip->tot_len = htons(ip_hdr_len + udp_hdr_len + payloadLen);
-    ip->id = htons(12345);  // Simple ID for demo
-    ip->frag_off = 0;
-    ip->ttl = 64;
+    ip->version  = 4;
+    ip->ihl      = 5;
+    ip->tos      = 0;
+    ip->tot_len  = htons(ip_hdr_len + udp_hdr_len + payloadLen);
+    ip->id       = 0;             // Atomic datagram: ID=0 per RFC 6864 when DF is set
+    ip->frag_off = htons(IP_DF);  // Don't Fragment — market data always fits within MTU
+    ip->ttl      = 64;
     ip->protocol = IPPROTO_UDP;
-    ip->check = 0;  // Will calculate later
-    
-    // CRITICAL FIX: Use proper source IP - this is likely the main issue!
-    std::string interface_ip;
-    if (getInterfaceIp(listen_interface_, interface_ip)) {
-        inet_aton(interface_ip.c_str(), (struct in_addr*)&ip->saddr);
-        DEBUG_PACKET_PRINT("DEBUG: Using interface IP as source: " << interface_ip);
-    } else {
-        // Fallback to listen IP
-        inet_aton(listen_ip_.c_str(), (struct in_addr*)&ip->saddr);
-        DEBUG_PACKET_PRINT("DEBUG: Using listen IP as source: " << listen_ip_);
-    }
-    ip->daddr = destination.addr.sin_addr.s_addr;
-    
-    // Debug IP addresses
-    struct in_addr src_addr, dst_addr;
-    src_addr.s_addr = ip->saddr;
-    dst_addr.s_addr = ip->daddr;
-    DEBUG_PACKET_PRINT("DEBUG: IP packet: " << inet_ntoa(src_addr) << " -> " << inet_ntoa(dst_addr));
+    ip->check    = 0;
+    inet_aton(cached_iface_ip_.c_str(), (struct in_addr*)&ip->saddr);
+    ip->daddr    = destination.addr.sin_addr.s_addr;
     
     // Calculate IP checksum (following ena-xdp approach)
     ip->check = 0;  // Reset checksum field
@@ -1231,21 +1425,29 @@ void PacketReplicator::triggerArpResolution(const std::string& ip_address) {
     if (sent < 0) {
         std::cerr << "Failed to send ARP trigger packet to " << ip_address << ": " << strerror(errno) << std::endl;
     } else {
-        std::cout << "Sent ARP trigger packet to " << ip_address << std::endl;
-        
-        // Give some time for ARP resolution to complete
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        
-        // Check if MAC address is now available
+        // Poll /proc/net/arp at 1ms intervals instead of a fixed sleep.
+        // AWS VPC same-AZ ARP resolves in ~3-5ms; cross-AZ up to ~15ms.
+        // Cap at 50ms — if unresolved by then, addDestination() stores broadcast MAC
+        // and the self-healing path in updateDestinationCache() retries every 100ms.
+        static constexpr int POLL_INTERVAL_MS = 1;
+        static constexpr int MAX_WAIT_MS      = 50;
         uint8_t mac[6];
-        if (getDestinationMac(ip_address, mac)) {
-            std::cout << "ARP resolution successful for " << ip_address << ", MAC: " << std::hex;
-            for (int i = 0; i < 6; i++) {
-                std::cout << (int)mac[i] << ":";
+        bool resolved = false;
+        for (int elapsed = 0; elapsed < MAX_WAIT_MS; elapsed += POLL_INTERVAL_MS) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(POLL_INTERVAL_MS));
+            if (getDestinationMac(ip_address, mac)) {
+                resolved = true;
+                break;
             }
-            std::cout << std::dec << std::endl;
+        }
+        if (resolved) {
+            std::cout << "ARP resolved for " << ip_address << " MAC: " << std::hex
+                      << (int)mac[0] << ":" << (int)mac[1] << ":" << (int)mac[2] << ":"
+                      << (int)mac[3] << ":" << (int)mac[4] << ":" << (int)mac[5]
+                      << std::dec << std::endl;
         } else {
-            std::cout << "ARP resolution may still be in progress for " << ip_address << std::endl;
+            std::cout << "ARP not resolved within " << MAX_WAIT_MS << "ms for " << ip_address
+                      << " — broadcast MAC used until cache refresh" << std::endl;
         }
     }
     
@@ -1332,30 +1534,36 @@ void PacketReplicator::initializeCpuCores() {
     std::cout << std::endl;
 }
 
-std::vector<PacketReplicator::Destination> PacketReplicator::getCachedDestinations() {
-    // HFT OPTIMIZATION: Use thread-local cache to avoid lock contention
+const std::vector<PacketReplicator::Destination>& PacketReplicator::getCachedDestinations() {
     auto now = std::chrono::steady_clock::now();
-    
-    if (dest_cache_.cached_destinations.empty() || 
+    if (dest_cache_.cached_destinations.empty() ||
         (now - dest_cache_.last_update) > ThreadLocalDestCache::CACHE_TIMEOUT) {
         updateDestinationCache();
     }
-    
-    return dest_cache_.cached_destinations;
+    return dest_cache_.cached_destinations;  // const ref — zero copy on hot path
 }
 
 void PacketReplicator::updateDestinationCache() {
-    // HFT OPTIMIZATION: Update thread-local destination cache
     {
         std::lock_guard<std::mutex> lock(destinations_mutex_);
         dest_cache_.cached_destinations.clear();
         dest_cache_.cached_destinations.reserve(destinations_.size());
-        
         for (const auto& dest : destinations_) {
             dest_cache_.cached_destinations.push_back(dest);
         }
     }
-    
+
+    // Re-resolve any broadcast MACs in the thread-local copy.  The authoritative
+    // std::set keeps the broadcast MAC (immutable keys), but once ARP resolves,
+    // the thread-local cache gets the real MAC and the AF_XDP fast path resumes
+    // on the next packet — without requiring a removeDestination/addDestination cycle.
+    static constexpr uint8_t BROADCAST_MAC[ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    for (auto& dest : dest_cache_.cached_destinations) {
+        if (memcmp(dest.mac, BROADCAST_MAC, ETH_ALEN) == 0) {
+            getDestinationMac(dest.ip_address, dest.mac);  // updates thread-local copy only
+        }
+    }
+
     dest_cache_.last_update = std::chrono::steady_clock::now();
 }
 
