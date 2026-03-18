@@ -513,16 +513,29 @@ The payload is clean (no tunnel header), the source IP is preserved, and the mul
 
 ## Latency Benchmarks
 
-All tests: 1000 iterations, 64-byte packets, warmed up (100-iteration warmup pass). Full OS tuning applied (see [OS Tuning](#os-tuning-for-low-latency) below).
+All benchmarks: 1000 iterations, 200-iteration warmup pass, 0% packet loss. Full OS tuning applied via `tune_os.sh --grub` (see [OS Tuning](#os-tuning-for-low-latency)).
+
+**Test methodology**: DPDK lcores pinned to CPUs 0-2 (isolated via `isolcpus`, `nohz_full`, `idle=poll`). NIC IRQs pinned to CPUs 3-7. Benchmark processes pinned to CPU 10 (dedicated, no DPDK or IRQ contention). RCU threads, kernel workqueues, and all housekeeping confined to CPUs 3-7. `irqbalance` disabled. Best of 3 consecutive runs reported.
 
 ### Metal Instances + Cluster Placement Group (Recommended)
 
 Measured on `m8a.metal-24xl` (96 cores, AMD EPYC) in a cluster placement group, same AZ. Instances are physically co-located on the same rack with no hypervisor overhead.
 
-| Setup | P0 | P50 | P90 | P99 | Notes |
-|-------|-----|-----|-----|-----|-------|
-| **Standard UDP sockets** | 15.9µs | 17.0µs | 17.6µs | 18.7µs | Kernel sendto/recvfrom |
-| **mcast2ucast e2e (1 pub → 2 sub)** | 18.7µs | 19.7µs | 20.5µs | 22.2µs | ENA bypass, zero-copy fan-out |
+**64-byte payload (1 publisher → 2 subscribers):**
+
+| Setup | P0 | P50 | P90 | P99 | P99.9 | Notes |
+|-------|-----|-----|-----|-----|-------|-------|
+| **Standard UDP sockets** | 19.5µs | 20.7µs | 21.7µs | 24.1µs | 25.1µs | Kernel sendto/recvfrom |
+| **mcast2ucast e2e** | 24.6µs | 25.6µs | 26.4µs | 28.2µs | 29.2µs | ENA bypass, zero-copy fan-out |
+
+**Payload size scaling (mcast2ucast e2e):**
+
+| Payload | P0 | P50 | P90 | P99 | P99.9 |
+|---------|-----|-----|-----|-----|-------|
+| 64B | 24.6µs | 25.6µs | 26.4µs | 28.2µs | 29.2µs |
+| 256B | 24.7µs | 26.1µs | 26.8µs | 28.6µs | 29.1µs |
+| 512B | 25.0µs | 26.1µs | 26.9µs | 28.8µs | 30.0µs |
+| 1024B | 25.4µs | 26.6µs | 27.4µs | 29.4µs | 53.1µs |
 
 ### Virtual Instances (No Placement Group)
 
@@ -537,13 +550,14 @@ Measured on `m8a.2xlarge` (8 vCPUs) in the same AZ, no placement group.
 
 ### Analysis
 
-- **Metal + CPG is ~40% faster** than virtual instances (19.7µs vs 33.7µs P50 for mcast2ucast e2e). Two factors: no hypervisor overhead on metal, and cluster placement group eliminates network hops between instances.
-- **mcast2ucast overhead is ~2.7µs** above raw kernel UDP (19.7µs vs 17.0µs on metal). This is the cost of the TAP→DPDK→ENA path on the TX side.
+- **mcast2ucast overhead is ~5µs** above raw kernel UDP on metal (25.6µs vs 20.7µs P50). This is the cost of the TAP→DPDK→ENA rewrite path.
+- **Metal + CPG is ~24% faster** than virtual instances for mcast2ucast e2e (25.6µs vs 33.7µs P50). No hypervisor overhead on metal, and cluster placement group minimizes network hops.
 - **Fan-out to 2 subscribers adds negligible latency** — zero-copy mbuf clones mean per-subscriber cost is just a header allocation (50 bytes), no payload copy.
-- **Excellent tail latency**: P99 of 22.2µs on metal (only 2.5µs above P50). DPDK's deterministic poll-mode avoids kernel scheduling jitter.
+- **Payload size barely matters**: 64B→1024B adds only ~1µs P50. The latency is dominated by TAP traversal and wire RTT, not data copy.
+- **Excellent tail latency**: P99 of 28.2µs on metal (only 2.6µs above P50). DPDK's deterministic poll-mode avoids kernel scheduling jitter.
 - **Standard UDP sockets** benefit most from OS tuning — `busy_poll`/`busy_read` sysctl makes the kernel spin-poll NIC queues instead of interrupt-driven wakeup, and kernel boot params eliminate timer tick jitter.
 
-**Note**: The first run after mcast2ucast restart shows ~2× higher latency due to cold caches (ENA interrupt coalescing, CPU caches). Results above are from warmed-up runs (preceded by a 100-iteration warmup pass).
+**Note**: The first run after mcast2ucast restart shows ~2× higher latency due to cold caches (ENA interrupt coalescing, CPU caches). Results above are from warmed-up runs (preceded by a 200-iteration warmup pass).
 
 ### Metal Instance Notes
 
