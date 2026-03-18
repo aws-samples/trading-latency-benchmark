@@ -573,7 +573,7 @@ sudo ./tune_os.sh                        # runtime tuning
 
 ### OS Tuning for Low Latency
 
-The `tune_os.sh` script applies comprehensive OS-level tuning inspired by [aws-samples/trading-latency-benchmark](https://github.com/aws-samples/trading-latency-benchmark). It reduced mcast2ucast e2e P50 from 38.7µs to 33.7µs and kernel UDP P99 from 75.2µs to 32.4µs.
+The `tune_os.sh` script applies comprehensive OS-level tuning inspired by the [tune_os.yaml](../deployment/ansible/playbooks/tune_os.yaml) playbook in this repo. It reduced mcast2ucast e2e P50 from 38.7µs to 33.7µs and kernel UDP P99 from 75.2µs to 32.4µs.
 
 ```bash
 # Apply runtime tuning only (no reboot needed):
