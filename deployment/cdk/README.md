@@ -7,8 +7,9 @@ This directory contains the AWS CDK code for deploying the infrastructure requir
 The CDK code supports multiple deployment architectures:
 
 1. **Single Instance Stack** (default): Deploys two EC2 instances in a single availability zone (AZ) but **not within a Cluster Placement Group** for benchmarking different instance types
-2. **Cluster Placement Group Stack**: Deploys tow EC2 instances (client and server) in a single AZ **within** a Cluster Placement Group (CPG) for optimal network performance
+2. **Cluster Placement Group Stack**: Deploys two EC2 instances (client and server) in a single AZ **within** a Cluster Placement Group (CPG) for optimal network performance
 3. **Multi-AZ Stack**: Deploys instances across multiple AZs to measure cross-AZ latency
+4. **HFT Feeder Stack**: Deploys a full feed-handler POC topology — mock exchange, feeder, and N subscribers — using AF_XDP zero-copy with GRE tunnel to simulate exchange multicast within AWS VPC
 
 ## Prerequisites
 
@@ -70,20 +71,72 @@ You can specify the instance type for all AZ instances:
 cdk deploy --context deploymentType=multi-az --context instanceType=r4.xlarge
 ```
 
+### Feed Handler POC Deployment
+
+Deploys the full GRE-tunnel feed handler topology: mock exchange + feeder + N subscribers.
+
+```bash
+# Minimal — defaults: c7i.xlarge feeder, c7i.xlarge exchange, 2× c6in.xlarge subscribers
+cdk deploy --context deploymentType=feeder --context keyPairName=my-keypair
+
+# Custom instance types and subscriber count
+cdk deploy --context deploymentType=feeder \
+  --context keyPairName=my-keypair \
+  --context feederInstanceType=c7i.4xlarge \
+  --context exchangeInstanceType=c7i.4xlarge \
+  --context subscriberInstanceType=c6in.xlarge \
+  --context subscriberCount=2 \
+  --context availabilityZone=us-east-1a
+```
+
+After `cdk deploy` completes, the stack outputs include:
+- Public/private IPs for every instance
+- Ready-to-run commands for each operational step (start feeder, register subscribers, send traffic)
+
+**What happens automatically on first boot:**
+- Build dependencies and xdp-tools are installed
+- The benchmark binaries and eBPF programs are compiled (`make all`)
+- On the exchange instance: the GRE tunnel to the feeder is configured (`ip tunnel add gre_feed`, `ip route add 224.0.0.0/4 dev gre_feed`)
+
+**What requires manual steps after deploy:**
+1. SSH to feeder, run `packet_replicator` (command in `Step1_StartFeeder` output)
+2. Register each subscriber via `control_client` (command in `Step2_RegisterSubscribers` output)
+3. SSH to exchange, run `test_client` or `market_data_provider_client` (commands in `Step3_*` outputs)
+4. Optionally run Ansible tuning playbooks for production-grade performance (command in `OptionalTuning` output)
+
 ## Context Parameters
 
-| Parameter | Description | Default Value | Example Values |
-|-----------|-------------|---------------|---------------|
-| `deploymentType` | Type of deployment architecture | `single` | `single`, `cluster`, `multi-az` |
-| `instanceType1` | EC2 instance type for first instance in single mode | `c7i.4xlarge` | `c7i.4xlarge`, `c6i.8xlarge` |
-| `instanceType2` | EC2 instance type for second instance in single mode | `c6in.4xlarge` | `c6in.4xlarge`, `r6i.4xlarge` |
-| `clientInstanceType` | EC2 instance type for client in cluster mode | `c7i.4xlarge` | `c7i.4xlarge`, `c6i.8xlarge` |
-| `serverInstanceType` | EC2 instance type for server in cluster mode | `c6in.4xlarge` | `c6in.4xlarge`, `r6i.4xlarge` |
-| `instanceType` | EC2 instance type for all instances in multi-az mode | `r4.xlarge` | `r4.xlarge`, `c5.4xlarge` |
-| `keyPairName` | EC2 key pair name for SSH access (single instance stack) | `frankfurt` | `my-keypair`, `virginia` |
-| `availabilityZone` | Specific availability zone for deployment (single instance stack) | First AZ in region | `eu-central-1a`, `us-east-1a` |
-| `vpcCidr` | CIDR block for VPC | `10.50.0.0/16` | `10.50.0.0/16`, `10.100.0.0/16` |
-| `region` | AWS region for deployment | `us-east-1` | `eu-central-1`, `us-west-2` |
+### Common
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `deploymentType` | Deployment architecture | `single` — `single`, `cluster`, `multi-az`, `feeder` |
+| `keyPairName` | EC2 key pair name for SSH | `virginia` |
+| `availabilityZone` | Specific AZ | First AZ in region |
+| `vpcCidr` | VPC CIDR block | `10.50.0.0/16` |
+| `region` | AWS region | `us-east-1` |
+
+### Single / Cluster / Multi-AZ stacks
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `instanceType1` | First instance type (single mode) | `c7i.4xlarge` |
+| `instanceType2` | Second instance type (single mode) | `c6in.4xlarge` |
+| `clientInstanceType` | Client instance type (cluster mode) | `c7i.4xlarge` |
+| `serverInstanceType` | Server instance type (cluster mode) | `c6in.4xlarge` |
+| `instanceType` | Instance type for all instances (multi-az mode) | `r4.xlarge` |
+
+### Feeder stack (`deploymentType=feeder`)
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `feederInstanceType` | Feeder EC2 instance type | `c7i.4xlarge` |
+| `exchangeInstanceType` | Mock exchange instance type | `c7i.4xlarge` |
+| `subscriberInstanceType` | Subscriber instance type | `c6in.4xlarge` |
+| `subscriberCount` | Number of subscriber instances | `2` |
+| `multicastGroup` | Inner multicast group address (listen_ip on feeder) | `224.0.31.50` |
+| `dataPort` | UDP data port | `5000` |
+| `ctrlPort` | UDP upstream control port | `5001` |
 
 ## Useful Commands
 

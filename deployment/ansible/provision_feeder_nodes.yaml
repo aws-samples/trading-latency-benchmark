@@ -1,0 +1,113 @@
+---
+# Build xdp-tools and the trading-latency-benchmark on feeder + subscriber nodes.
+#
+# Targets: [feeder_nodes] group (remote_feeder + remote_subscribers).
+# Idempotent: skips xdp-tools build if libxdp is already installed,
+#             skips benchmark build if packet_replicator already exists.
+#
+# Usage (called by deploy-feeder.sh):
+#   ansible-playbook -i <inventory> provision_feeder_nodes.yaml
+
+- name: Provision feeder nodes — build xdp-tools and trading benchmark
+  hosts: feeder_nodes   # [feeder] + [subscribers] — see deploy-feeder.sh inventory
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+    # ── Build dependencies ─────────────────────────────────────────────────
+    - name: Install build dependencies
+      ansible.builtin.dnf:
+        name:
+          - git
+          - clang
+          - llvm
+          - libbpf-devel
+          - elfutils-libelf-devel
+          - kernel-headers
+          - kernel-devel
+          - iproute
+          - ethtool
+          - make
+          - gcc
+          - pkgconfig
+          - m4
+          - libpcap-devel
+          - rsync
+        state: present
+
+    # ── xdp-tools ─────────────────────────────────────────────────────────
+    # Provides libxdp and xdp-loader required by the AF_XDP socket code.
+    - name: Check if libxdp is already installed
+      ansible.builtin.stat:
+        path: /usr/local/lib/libxdp.so
+      register: libxdp_stat
+
+    - name: Clone xdp-tools
+      ansible.builtin.git:
+        repo: https://github.com/xdp-project/xdp-tools.git
+        dest: /opt/xdp-tools
+        depth: 1
+        version: HEAD
+      when: not libxdp_stat.stat.exists
+
+    - name: Build and install xdp-tools
+      ansible.builtin.shell: |
+        set -e
+        cd /opt/xdp-tools
+        ./configure
+        make -j$(nproc)
+        make install
+        ldconfig
+      when: not libxdp_stat.stat.exists
+
+    # ── trading-latency-benchmark ──────────────────────────────────────────
+    - name: Check if benchmark is already built
+      ansible.builtin.stat:
+        path: /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark/packet_replicator
+      register: bench_stat
+
+    - name: Sync trading-latency-benchmark from local repo
+      become: false
+      ansible.builtin.synchronize:
+        src: "{{ playbook_dir }}/../../"
+        dest: /home/ec2-user/trading-latency-benchmark/
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=deployment"
+      when: not bench_stat.stat.exists
+
+    - name: Build benchmark binaries and eBPF objects
+      ansible.builtin.shell: |
+        cd /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark
+        make all
+        chown -R ec2-user:ec2-user /home/ec2-user/trading-latency-benchmark
+      when: not bench_stat.stat.exists
+
+    # ── Verify ────────────────────────────────────────────────────────────
+    - name: Confirm binaries exist
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: bin_check
+      loop:
+        - /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark/packet_replicator
+        - /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark/gre_filter.o
+        - /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark/unicast_filter.o
+        - /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark/multicast_filter.o
+
+    - name: Fail if expected binaries are missing
+      ansible.builtin.fail:
+        msg: "Expected binary not found: {{ item.item }}"
+      when: not item.stat.exists
+      loop: "{{ bin_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Display provisioning summary
+      ansible.builtin.debug:
+        msg:
+          - "=== Feeder node provisioning complete ==="
+          - "Host: {{ inventory_hostname }}"
+          - "libxdp: /usr/local/lib/libxdp.so"
+          - "packet_replicator: /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark/packet_replicator"
+          - "eBPF objects: unicast_filter.o  multicast_filter.o  gre_filter.o"
