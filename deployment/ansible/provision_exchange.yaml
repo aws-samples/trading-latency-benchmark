@@ -1,0 +1,174 @@
+---
+# Build benchmark on the mock exchange and configure the GRE tunnel to the feeder.
+#
+# Targets: [exchange] inventory group (single MockExchange instance).
+#
+# Required variable (pass via --extra-vars or inventory host_vars):
+#   feeder_private_ip   — private IP of the source feeder (GRE tunnel remote endpoint)
+#
+# Usage (called manually or from a source-region deploy script):
+#   ansible-playbook -i <inventory> provision_exchange.yaml \
+#       --extra-vars "feeder_private_ip=10.60.0.x"
+#
+# Idempotent: build steps skip if binaries already exist; GRE tunnel setup
+# checks whether gre_feed interface is already present before re-creating it.
+
+- name: Provision mock exchange — build benchmark and configure GRE tunnel
+  hosts: exchange
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+    # ── Build dependencies ─────────────────────────────────────────────────
+    - name: Install build dependencies
+      ansible.builtin.dnf:
+        name:
+          - git
+          - clang
+          - llvm
+          - libbpf-devel
+          - elfutils-libelf-devel
+          - kernel-headers
+          - kernel-devel
+          - iproute
+          - ethtool
+          - make
+          - gcc
+          - pkgconfig
+          - m4
+          - libpcap-devel
+          - rsync
+        state: present
+
+    # ── xdp-tools ─────────────────────────────────────────────────────────
+    - name: Check if libxdp is already installed
+      ansible.builtin.stat:
+        path: /usr/local/lib/libxdp.so
+      register: libxdp_stat
+
+    - name: Clone xdp-tools
+      ansible.builtin.git:
+        repo: https://github.com/xdp-project/xdp-tools.git
+        dest: /opt/xdp-tools
+        depth: 1
+        version: HEAD
+      when: not libxdp_stat.stat.exists
+
+    - name: Build and install xdp-tools
+      ansible.builtin.shell: |
+        set -e
+        cd /opt/xdp-tools
+        ./configure
+        make -j$(nproc)
+        make install
+        ldconfig
+      when: not libxdp_stat.stat.exists
+
+    # ── trading-latency-benchmark ──────────────────────────────────────────
+    - name: Check if benchmark is already built
+      ansible.builtin.stat:
+        path: /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark/test_client
+      register: bench_stat
+
+    - name: Sync trading-latency-benchmark from local repo
+      become: false
+      ansible.builtin.synchronize:
+        src: "{{ playbook_dir }}/../../"
+        dest: /home/ec2-user/trading-latency-benchmark/
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=deployment"
+      when: not bench_stat.stat.exists
+
+    - name: Build benchmark binaries
+      ansible.builtin.shell: |
+        cd /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark
+        make all
+        chown -R ec2-user:ec2-user /home/ec2-user/trading-latency-benchmark
+      when: not bench_stat.stat.exists
+
+    # ── Verify ────────────────────────────────────────────────────────────
+    - name: Confirm binaries exist
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: bin_check
+      loop:
+        - /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark/test_client
+        - /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark/market_data_provider_client
+
+    - name: Fail if expected binaries are missing
+      ansible.builtin.fail:
+        msg: "Expected binary not found: {{ item.item }}"
+      when: not item.stat.exists
+      loop: "{{ bin_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # ── GRE tunnel ─────────────────────────────────────────────────────────
+    # The exchange wraps inner multicast UDP (224.0.31.50:5000) in a GRE
+    # unicast packet sent to the feeder's private IP.  The feeder's
+    # gre_filter.o XDP program intercepts it and fans out the payload.
+    - name: Validate feeder_private_ip variable is provided
+      ansible.builtin.assert:
+        that:
+          - feeder_private_ip is defined
+          - feeder_private_ip | length > 0
+        fail_msg: "feeder_private_ip must be provided via --extra-vars"
+
+    - name: Check if GRE tunnel gre_feed already exists
+      ansible.builtin.shell: ip tunnel show gre_feed
+      register: gre_check
+      changed_when: false
+      failed_when: false
+
+    - name: Configure GRE tunnel to feeder
+      ansible.builtin.shell: |
+        IFACE=$(ip route show default | awk '/default/ {print $5}' | head -1)
+        LOCAL_IP=$(ip -4 addr show "$IFACE" | awk '/inet / {print $2}' | cut -d/ -f1)
+        ip tunnel add gre_feed mode gre remote {{ feeder_private_ip }} local "$LOCAL_IP" ttl 64
+        ip link set gre_feed up
+        ip route add 224.0.0.0/4 dev gre_feed
+      when: gre_check.rc != 0
+
+    - name: Persist GRE tunnel via NetworkManager dispatcher
+      ansible.builtin.copy:
+        dest: /etc/NetworkManager/dispatcher.d/99-gre-feed
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Restore GRE tunnel to feeder on interface up events
+          IFACE="$1"
+          EVENT="$2"
+          [ "$EVENT" != "up" ] && exit 0
+          ip route show default | grep -q "$IFACE" || exit 0
+
+          LOCAL_IP=$(ip -4 addr show "$IFACE" | awk '/inet / {print $2}' | cut -d/ -f1)
+          ip tunnel show gre_feed >/dev/null 2>&1 && exit 0
+
+          ip tunnel add gre_feed mode gre remote {{ feeder_private_ip }} local "$LOCAL_IP" ttl 64
+          ip link set gre_feed up
+          ip route add 224.0.0.0/4 dev gre_feed
+
+    # ── Verify ────────────────────────────────────────────────────────────
+    - name: Confirm GRE tunnel is up
+      ansible.builtin.shell: ip tunnel show gre_feed
+      register: gre_verify
+      changed_when: false
+
+    - name: Confirm multicast route via tunnel
+      ansible.builtin.shell: ip route show 224.0.0.0/4
+      register: route_verify
+      changed_when: false
+
+    - name: Display exchange provisioning summary
+      ansible.builtin.debug:
+        msg:
+          - "=== Mock exchange provisioning complete ==="
+          - "Host: {{ inventory_hostname }}"
+          - "GRE tunnel: {{ gre_verify.stdout }}"
+          - "Multicast route: {{ route_verify.stdout }}"
+          - ""
+          - "Send test traffic:"
+          - "  cd ~/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark"
+          - "  ./test_client 224.0.31.50 5000 10 'trade' --iface eth0"

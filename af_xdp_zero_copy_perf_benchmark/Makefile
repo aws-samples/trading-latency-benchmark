@@ -6,10 +6,14 @@ CXXFLAGS += -DNDEBUG -ffast-math -funroll-loops
 CXXFLAGS += -msse4.2 -mavx2 -mfma  # Enable SIMD instructions for maximum performance
 CXXFLAGS += -fno-stack-protector  # Remove stack protection overhead for HFT
 CXXFLAGS += -fomit-frame-pointer  # Optimize register usage
-INCLUDES = -I. 
-LDFLAGS = -L/usr/local/lib -Wl,-rpath,/usr/local/lib
-LDFLAGS += -Wl,--no-as-needed -Wl,-O1  # Optimized linking
-LDLIBS = -lxdp -lbpf -lelf -lpthread
+# xdp-tools installs to /usr/local by default; pkg-config discovers the actual location.
+PKG_CONFIG_PATH := /usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:$(PKG_CONFIG_PATH)
+export PKG_CONFIG_PATH
+
+INCLUDES = -I. $(shell pkg-config --cflags libxdp libbpf 2>/dev/null)
+LDFLAGS  = -L/usr/local/lib -Wl,-rpath,/usr/local/lib
+LDFLAGS += -Wl,--no-as-needed -Wl,-O1
+LDLIBS   = $(shell pkg-config --libs-only-l libxdp libbpf 2>/dev/null || echo -lxdp -lbpf) -lelf -lpthread
 
 # Source files  
 SOURCES = AFXDPSocket.cpp NetworkInterfaceConfigurator.cpp PacketReplicator.cpp
