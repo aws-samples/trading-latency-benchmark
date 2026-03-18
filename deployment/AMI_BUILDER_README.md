@@ -251,7 +251,7 @@ cat /root/trading_system_tuning_report.txt
 
 **"Instance not found in dynamic inventory" error:**
 - The instance must have the tag `Name: Trading-Benchmark-AMI-Builder-Instance`
-- This tag must be in `deployment/ansible/inventory/inventory.aws_ec2.yml`
+- This tag must be in `deployment/ansible/inventory/ami-builder-inventory.aws_ec2.yml`
 - Check the inventory file includes:
   ```yaml
   include_filters:

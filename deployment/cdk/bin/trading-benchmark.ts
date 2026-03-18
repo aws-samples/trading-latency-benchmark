@@ -7,6 +7,7 @@ import { TradingBenchmarkClusterPlacementGroupStack } from "../lib/cluster-place
 import { TradingBenchmarkAmiBuilderStack } from "../lib/ami-builder-stack";
 import { LatencyHuntingStack } from "../lib/latency-hunting-stack";
 import { LatencyHuntingBYOVPCStack } from "../lib/latency-hunting-byovpc-stack";
+import { FeederStack, SubscriberStack, PeeringStack } from "../lib/feeder-stack";
 
 const app = new cdk.App();
 
@@ -107,6 +108,64 @@ switch (deploymentType.toLowerCase()) {
       });
     }
     break;
+
+  case 'feeder':
+  case 'remote-feeder': {
+    console.log('Deploying Feed Handler POC Stacks (feeder region: London, subscriber region: Frankfurt)');
+    if (!keyPairName) {
+      throw new Error('keyPairName is required for feeder stack. Provide --context keyPairName=<name>');
+    }
+    const feederRegion          = app.node.tryGetContext('feederRegion')          || region || 'eu-west-2';
+    const subscriberRegion      = app.node.tryGetContext('subscriberRegion')      || 'eu-central-1';
+    const subscriberKeyPairName = app.node.tryGetContext('subscriberKeyPairName') || keyPairName;
+    const feederAmiId           = app.node.tryGetContext('feederAmiId');
+    const subscriberAmiId       = app.node.tryGetContext('subscriberAmiId');
+    const subscriberCount       = app.node.tryGetContext('subscriberCount');
+    const multicastGroup        = app.node.tryGetContext('multicastGroup');
+    const dataPort              = app.node.tryGetContext('dataPort');
+    const ctrlPort              = app.node.tryGetContext('ctrlPort');
+    const sourceFeederCidr      = app.node.tryGetContext('sourceFeederCidr');
+    const feederCidr            = app.node.tryGetContext('feederCidr');
+    const feederVpcCidr         = app.node.tryGetContext('feederVpcCidr')         || vpcCidr;
+    const subscriberVpcCidr     = app.node.tryGetContext('subscriberVpcCidr');
+    const dataPortNum           = dataPort ? parseInt(dataPort, 10) : undefined;
+
+    const feederStack = new FeederStack(app, 'FeederStack', {
+      env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: feederRegion },
+      keyPairName,
+      amiId:                feederAmiId,
+      feederInstanceType:   app.node.tryGetContext('feederInstanceType'),
+      exchangeInstanceType: app.node.tryGetContext('exchangeInstanceType'),
+      vpcCidr:              feederVpcCidr,
+      multicastGroup:       multicastGroup || undefined,
+      dataPort:             dataPortNum,
+      ctrlPort:             ctrlPort ? parseInt(ctrlPort, 10) : undefined,
+      sourceFeederCidr:     sourceFeederCidr || undefined,
+    });
+
+    new SubscriberStack(app, 'SubscriberStack', {
+      env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: subscriberRegion },
+      keyPairName:            subscriberKeyPairName,
+      amiId:                  subscriberAmiId,
+      subscriberInstanceType: app.node.tryGetContext('subscriberInstanceType'),
+      subscriberCount:        subscriberCount ? parseInt(subscriberCount, 10) : undefined,
+      vpcCidr:                subscriberVpcCidr,
+      dataPort:               dataPortNum,
+      feederCidr:             feederCidr || undefined,
+    });
+
+    new PeeringStack(app, 'PeeringStack', {
+      env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: feederRegion },
+      feederVpc:          feederStack.vpc,
+      feederVpcCidr:      feederStack.vpcCidr,
+      feederSg:           feederStack.sg,
+      subscriberStackName: 'SubscriberStack',
+      subscriberRegion,
+      subscriberVpcCidr:  subscriberVpcCidr || '10.62.0.0/16',
+      dataPort:           dataPortNum ?? 5000,
+    });
+    break;
+  }
 
   case 'single':
   default:
