@@ -12,8 +12,8 @@
 #   5. tune_os.yaml + tune_feeder.yaml (OS + BPF/XDP tuning on feeder)
 #
 # Cross-region fan-out:
-#   Feeder (London) fans unicast UDP to Subscriber public IPs (Frankfurt).
-#   Register after deploy: ./control_client <FeederPrivateIp> add <SubscriberPublicIp> <data-port>
+#   Feeder (London) fans unicast UDP to Subscriber private IPs (Frankfurt) via VPC peering.
+#   Register after deploy: ./control_client <FeederPrivateIp> add <SubscriberPrivateIp> <data-port>
 
 set -e
 
@@ -36,6 +36,8 @@ FEEDER_KEY_PAIR="london"
 SUBSCRIBER_KEY_PAIR=""           # defaults to FEEDER_KEY_PAIR
 FEEDER_SSH_KEY=""                # defaults to ~/.ssh/<FEEDER_KEY_PAIR>.pem
 SUBSCRIBER_SSH_KEY=""            # defaults to ~/.ssh/<SUBSCRIBER_KEY_PAIR>.pem
+FEEDER_AMI=""
+SUBSCRIBER_AMI=""
 FEEDER_INSTANCE_TYPE=""
 EXCHANGE_INSTANCE_TYPE=""
 SUBSCRIBER_INSTANCE_TYPE=""
@@ -73,6 +75,10 @@ KEY PAIRS / SSH:
     --subscriber-ssh-key PATH         Path to subscriber SSH private key (default: ~/.ssh/<SUBSCRIBER_KEY_PAIR>.pem)
     -k, --key-pair KEY_NAME           Alias for --feeder-key-pair
     -i, --ssh-key PATH                Alias for --feeder-ssh-key
+
+AMI IDs (required):
+        --feeder-ami AMI_ID           AMI ID for feeder region instances (use build-tuned-ami.sh)
+        --subscriber-ami AMI_ID       AMI ID for subscriber region instances (use build-tuned-ami.sh)
 
 INSTANCE TYPES:
     -f, --feeder-type INSTANCE_TYPE   Feeder instance type (default: c7i.4xlarge)
@@ -122,6 +128,8 @@ while [[ $# -gt 0 ]]; do
         --feeder-ssh-key)         FEEDER_SSH_KEY="$2";           shift 2 ;;
         --subscriber-ssh-key)     SUBSCRIBER_SSH_KEY="$2";       shift 2 ;;
         -i|--ssh-key)             FEEDER_SSH_KEY="$2";           shift 2 ;;
+        --feeder-ami)             FEEDER_AMI="$2";               shift 2 ;;
+        --subscriber-ami)         SUBSCRIBER_AMI="$2";           shift 2 ;;
         -f|--feeder-type)         FEEDER_INSTANCE_TYPE="$2";     shift 2 ;;
         -e|--exchange-type)       EXCHANGE_INSTANCE_TYPE="$2";   shift 2 ;;
         -s|--subscriber-type)     SUBSCRIBER_INSTANCE_TYPE="$2"; shift 2 ;;
@@ -140,6 +148,15 @@ while [[ $# -gt 0 ]]; do
         *) error "Unknown option: $1"; usage ;;
     esac
 done
+
+if [ -z "$FEEDER_AMI" ]; then
+    error "--feeder-ami is required. Build one with: deployment/build-tuned-ami.sh --region $FEEDER_REGION"
+    exit 1
+fi
+if [ -z "$SUBSCRIBER_AMI" ]; then
+    error "--subscriber-ami is required. Build one with: deployment/build-tuned-ami.sh --region $SUBSCRIBER_REGION"
+    exit 1
+fi
 
 FEEDER_KEY_PAIR="${FEEDER_KEY_PAIR:-"london"}"
 SUBSCRIBER_KEY_PAIR="${SUBSCRIBER_KEY_PAIR:-"frankfurt"}"
@@ -186,6 +203,8 @@ info "Feeder key pair:   $FEEDER_KEY_PAIR"
 info "Subscriber key:    $SUBSCRIBER_KEY_PAIR"
 info "Feeder SSH key:    $FEEDER_SSH_KEY"
 info "Subscriber SSH:    $SUBSCRIBER_SSH_KEY"
+info "Feeder AMI:        $FEEDER_AMI"
+info "Subscriber AMI:    $SUBSCRIBER_AMI"
 [ -n "$EXCHANGE_INSTANCE_TYPE"   ] && info "Exchange type:     $EXCHANGE_INSTANCE_TYPE"
 [ -n "$FEEDER_INSTANCE_TYPE"     ] && info "Feeder type:       $FEEDER_INSTANCE_TYPE"
 [ -n "$SUBSCRIBER_INSTANCE_TYPE" ] && info "Subscriber type:   $SUBSCRIBER_INSTANCE_TYPE"
@@ -218,6 +237,8 @@ CTX="$CTX --context feederRegion=$FEEDER_REGION"
 CTX="$CTX --context subscriberRegion=$SUBSCRIBER_REGION"
 CTX="$CTX --context keyPairName=$FEEDER_KEY_PAIR"
 CTX="$CTX --context subscriberKeyPairName=$SUBSCRIBER_KEY_PAIR"
+CTX="$CTX --context feederAmiId=$FEEDER_AMI"
+CTX="$CTX --context subscriberAmiId=$SUBSCRIBER_AMI"
 [ -n "$FEEDER_INSTANCE_TYPE"     ] && CTX="$CTX --context feederInstanceType=$FEEDER_INSTANCE_TYPE"
 [ -n "$EXCHANGE_INSTANCE_TYPE"   ] && CTX="$CTX --context exchangeInstanceType=$EXCHANGE_INSTANCE_TYPE"
 [ -n "$SUBSCRIBER_INSTANCE_TYPE" ] && CTX="$CTX --context subscriberInstanceType=$SUBSCRIBER_INSTANCE_TYPE"
@@ -233,11 +254,14 @@ CTX="$CTX --context subscriberKeyPairName=$SUBSCRIBER_KEY_PAIR"
 [ -n "$FEEDER_CIDR"              ] && CTX="$CTX --context feederCidr=$FEEDER_CIDR"
 
 # ── CDK deploy ────────────────────────────────────────────────────────────────
-# step "Deploying $FEEDER_STACK_NAME to $FEEDER_REGION..."
-# cdk deploy "$FEEDER_STACK_NAME" $CTX --require-approval never
+step "Deploying $FEEDER_STACK_NAME to $FEEDER_REGION..."
+cdk deploy "$FEEDER_STACK_NAME" $CTX --require-approval never
 
 step "Deploying $SUBSCRIBER_STACK_NAME to $SUBSCRIBER_REGION..."
 cdk deploy "$SUBSCRIBER_STACK_NAME" $CTX --require-approval never
+
+step "Deploying PeeringStack (VPC peering feeder ↔ subscribers)..."
+cdk deploy "PeeringStack" $CTX --require-approval never
 
 # ── Fetch FeederStack outputs ─────────────────────────────────────────────────
 step "Fetching $FEEDER_STACK_NAME outputs from $FEEDER_REGION..."
@@ -276,6 +300,11 @@ while IFS= read -r ip; do
     [ -n "$ip" ] && SUBSCRIBER_PUBLIC_IPS+=("$ip")
 done < <(echo "$SUBSCRIBER_OUTPUTS" | jq -r '.[] | select(.OutputKey | test("^Subscriber[0-9]+PublicIp$")) | .OutputValue' | sort)
 
+SUBSCRIBER_PRIVATE_IPS=()
+while IFS= read -r ip; do
+    [ -n "$ip" ] && SUBSCRIBER_PRIVATE_IPS+=("$ip")
+done < <(echo "$SUBSCRIBER_OUTPUTS" | jq -r '.[] | select(.OutputKey | test("^Subscriber[0-9]+PrivateIp$")) | .OutputValue' | sort)
+
 if [ ${#SUBSCRIBER_PUBLIC_IPS[@]} -eq 0 ]; then
     error "No subscriber IPs found in $SUBSCRIBER_STACK_NAME ($SUBSCRIBER_REGION)."
     error "Run: aws cloudformation describe-stacks --stack-name $SUBSCRIBER_STACK_NAME --region $SUBSCRIBER_REGION"
@@ -285,7 +314,10 @@ fi
 info ""
 info "Exchange  ($FEEDER_REGION):      $EXCHANGE_PUBLIC_IP (public) / $EXCHANGE_PRIVATE_IP (private)"
 info "Feeder    ($FEEDER_REGION):      $FEEDER_PUBLIC_IP (public) / $FEEDER_PRIVATE_IP (private)"
-info "Subscribers ($SUBSCRIBER_REGION): ${SUBSCRIBER_PUBLIC_IPS[*]}"
+info "Subscribers ($SUBSCRIBER_REGION):"
+for i in "${!SUBSCRIBER_PUBLIC_IPS[@]}"; do
+    info "  ${SUBSCRIBER_PUBLIC_IPS[$i]} (public) / ${SUBSCRIBER_PRIVATE_IPS[$i]:-unknown} (private)"
+done
 
 # Save outputs for reference
 echo "$FEEDER_OUTPUTS"     > "$SCRIPT_DIR/feeder-outputs.json"
@@ -356,8 +388,8 @@ info ""
 info "Exchange  ($FEEDER_REGION):      $EXCHANGE_PUBLIC_IP (public)  /  $EXCHANGE_PRIVATE_IP (private)"
 info "Feeder    ($FEEDER_REGION):      $FEEDER_PUBLIC_IP (public)    /  $FEEDER_PRIVATE_IP (private)"
 info "Subscribers ($SUBSCRIBER_REGION):"
-for ip in "${SUBSCRIBER_PUBLIC_IPS[@]}"; do
-    info "  $ip"
+for i in "${!SUBSCRIBER_PUBLIC_IPS[@]}"; do
+    info "  ${SUBSCRIBER_PUBLIC_IPS[$i]} (public) / ${SUBSCRIBER_PRIVATE_IPS[$i]:-unknown} (private)"
 done
 info ""
 info "Next steps (run manually after deploy):"
@@ -366,8 +398,8 @@ info "  1. Start feeder (GRE mode) in $FEEDER_REGION:"
 info "     ssh ec2-user@$FEEDER_PUBLIC_IP"
 info "     sudo ./packet_replicator eth0 ${MULTICAST_GROUP:-224.0.31.50} ${DATA_PORT:-5000} true --gre"
 info ""
-info "  2. Register subscribers on feeder (cross-region, public IPs):"
-for ip in "${SUBSCRIBER_PUBLIC_IPS[@]}"; do
+info "  2. Register subscribers on feeder (private IPs via VPC peering):"
+for ip in "${SUBSCRIBER_PRIVATE_IPS[@]}"; do
     info "     ./control_client $FEEDER_PRIVATE_IP add $ip ${DATA_PORT:-5000}"
 done
 info ""
@@ -378,6 +410,6 @@ info "     ssh ec2-user@$EXCHANGE_PUBLIC_IP"
 info "     ./test_client ${MULTICAST_GROUP:-224.0.31.50} ${DATA_PORT:-5000} 10 'trade' --iface eth0"
 info ""
 info "  Cross-region: to fan-out to this feeder from another region's source feeder:"
-info "     ./control_client <source-feeder-private-ip> add $FEEDER_PUBLIC_IP ${DATA_PORT:-5000}"
+info "     ./control_client <source-feeder-private-ip> add $FEEDER_PRIVATE_IP ${DATA_PORT:-5000}"
 [ -z "$SOURCE_FEEDER_CIDR" ] && \
     info "     Then redeploy with --source-feeder-cidr <source-feeder-public-ip>/32 to restrict SG."

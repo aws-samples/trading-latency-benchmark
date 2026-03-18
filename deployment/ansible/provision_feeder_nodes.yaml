@@ -75,14 +75,15 @@
         rsync_opts:
           - "--exclude=.git"
           - "--exclude=deployment"
-      when: not bench_stat.stat.exists
+          - "--checksum"
+      #when: not bench_stat.stat.exists
 
     - name: Build benchmark binaries and eBPF objects
       ansible.builtin.shell: |
         cd /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark
         make all
         chown -R ec2-user:ec2-user /home/ec2-user/trading-latency-benchmark
-      when: not bench_stat.stat.exists
+      #when: not bench_stat.stat.exists
 
     # ── Verify ────────────────────────────────────────────────────────────
     - name: Confirm binaries exist
