@@ -56,7 +56,8 @@ public:
         std::string ip_address;
         uint16_t port;
         struct sockaddr_in addr;
-        
+        uint8_t mac[6];  // Destination MAC resolved via ARP at addDestination() time
+
         Destination(const std::string& ip, uint16_t p);
         bool operator<(const Destination& other) const;
     };
@@ -65,8 +66,21 @@ private:
     std::string listen_interface_;
     std::string listen_ip_;
     uint16_t listen_port_;
+
+    // Interface IP and MAC cached once at initialize() — never re-queried on hot path
+    std::string cached_iface_ip_;
+    uint8_t     cached_iface_mac_[6]{};
     int num_queues_;
     int multicast_socket_;  // Holds IGMP membership so NIC receives the multicast group
+    bool gre_mode_;         // GRE tunnel mode: outer unicast GRE carries inner multicast UDP
+
+    // Upstream control: subscriber multicast → feeder → producer forwarding
+    std::string ctrl_multicast_group_;  // Multicast group subscribers send control messages to
+    uint16_t    ctrl_multicast_port_{0};
+    std::string producer_ip_;           // Unicast IP of upstream producer to forward control to
+    uint16_t    producer_port_{0};
+    int ctrl_multicast_socket_{-1};     // Receives control multicast; holds IGMP membership
+    int ctrl_forward_socket_{-1};       // Sends forwarded control messages to producer
     
     std::vector<std::unique_ptr<AFXDPSocket>> xdp_sockets_;
     std::unique_ptr<AFXDPSocket> output_xdp_socket_;  // Zero-copy output socket
@@ -76,6 +90,7 @@ private:
     std::atomic<bool> running_;
     std::vector<std::unique_ptr<std::thread>> packet_processor_threads_;
     std::unique_ptr<std::thread> control_thread_;
+    std::unique_ptr<std::thread> ctrl_upstream_thread_;
     
     mutable std::mutex destinations_mutex_;
     std::set<Destination> destinations_;
@@ -150,6 +165,25 @@ public:
      * Returns true if the given IP string is in the multicast range 224.0.0.0/4
      */
     static bool isMulticastAddress(const std::string& ip);
+
+    /**
+     * Enable GRE tunnel mode.
+     * Must be called before initialize().
+     * In GRE mode: gre_filter.o is loaded; the outer unicast GRE frame arrives on
+     * eth0 (preserving XDP_ZEROCOPY on ENA) and PacketReplicator strips the GRE
+     * headers in userspace.  listen_ip_ still holds the inner multicast group
+     * address used for config_map; no IGMP join is performed.
+     */
+    void setGREMode(bool enable) { gre_mode_ = enable; }
+
+    /**
+     * Configure upstream control forwarding.
+     * Subscribers send control messages to ctrlGroup:ctrlPort (multicast).
+     * The feeder receives them and forwards to producerIp:producerPort (unicast).
+     * Must be called before initialize().
+     */
+    void setUpstreamControl(const std::string& ctrlGroup, uint16_t ctrlPort,
+                            const std::string& producerIp, uint16_t producerPort);
 
     /**
      * Add a destination EC2 instance
@@ -230,6 +264,17 @@ private:
     void leaveMulticastGroup();
 
     /**
+     * Join the control multicast group so the feeder receives subscriber control messages.
+     */
+    void joinControlMulticastGroup();
+
+    /**
+     * Receive loop: reads from ctrl_multicast_socket_ and forwards each datagram
+     * verbatim to producer_ip_:producer_port_ via ctrl_forward_socket_.
+     */
+    void handleUpstreamControl();
+
+    /**
      * Packet processing loop for a specific queue
      * 
      * @param queueId Queue ID to process packets for
@@ -252,16 +297,18 @@ private:
     int replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId);
 
     /**
-     * Extract UDP payload from a packet
-     * 
-     * @param packetData Pointer to packet data
-     * @param packetLen  Length of the packet
-     * @param payloadData Output pointer to payload data
-     * @param payloadLen  Output length of payload
-     * @return True if UDP payload was successfully extracted
+     * Extract UDP payload from a packet (dispatches to GRE or plain path)
      */
     bool extractUdpPayload(const uint8_t* packetData, size_t packetLen,
                           const uint8_t*& payloadData, size_t& payloadLen);
+
+    /**
+     * GRE-specific payload extraction.
+     * Strips: Eth + outer IPv4 + GRE (variable 4-16 bytes) + inner IPv4 + UDP.
+     * Called by extractUdpPayload() when gre_mode_ is true.
+     */
+    bool extractUdpPayloadGre(const uint8_t* packetData, size_t packetLen,
+                              const uint8_t*& payloadData, size_t& payloadLen);
 
     /**
      * Send UDP packet to a destination
@@ -454,11 +501,10 @@ private:
     void initializeCpuCores();
     
     /**
-     * Get cached destinations for current thread (lock-free)
-     * 
-     * @return Vector of cached destinations
+     * Get cached destinations for current thread (lock-free after first call per 100ms window).
+     * Returns a const reference to the thread-local cache — no copy on the hot path.
      */
-    std::vector<Destination> getCachedDestinations();
+    const std::vector<Destination>& getCachedDestinations();
     
     /**
      * Update thread-local destination cache

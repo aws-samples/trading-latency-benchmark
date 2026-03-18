@@ -35,20 +35,33 @@ void signalHandler(int signum) {
 }
 
 void printUsage(const char* progName) {
-    std::cout << "Usage: " << progName << " <interface> <listen_ip> <listen_port> [zero_copy]" << std::endl;
-    std::cout << "  interface:   Network interface to bind to (e.g., eth0)" << std::endl;
-    std::cout << "  listen_ip:   IP address to listen on" << std::endl;
-    std::cout << "  listen_port: Port to listen on" << std::endl;
-    std::cout << "  zero_copy:   'true' to enable zero-copy mode (default: true)" << std::endl;
+    std::cout << "Usage: " << progName
+              << " <interface> <listen_ip> <listen_port> [zero_copy] [--gre]"
+              << " [--ctrl <group>:<port>] [--producer <ip>:<port>]" << std::endl;
+    std::cout << "  interface:    Network interface to bind to (e.g., eth0)" << std::endl;
+    std::cout << "  listen_ip:    Multicast group IP to intercept (e.g., 224.0.31.50)" << std::endl;
+    std::cout << "  listen_port:  UDP destination port to intercept" << std::endl;
+    std::cout << "  zero_copy:    'true' to enable zero-copy mode (default: true)" << std::endl;
+    std::cout << "  --gre:        GRE tunnel mode — outer unicast GRE carries inner multicast." << std::endl;
+    std::cout << "                Loads gre_filter.o; no IGMP join performed." << std::endl;
+    std::cout << "                listen_ip is the INNER multicast group address." << std::endl;
+    std::cout << "  --ctrl <g:p>  Multicast group:port where subscribers send control messages." << std::endl;
+    std::cout << "                Feeder joins this group and listens for control datagrams." << std::endl;
+    std::cout << "                Requires --producer." << std::endl;
+    std::cout << "  --producer <ip:port>" << std::endl;
+    std::cout << "                Unicast endpoint of the upstream producer." << std::endl;
+    std::cout << "                Control messages received from subscribers are forwarded here." << std::endl;
     std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
-    std::cout << "  sudo " << progName << " eth0 192.168.1.100 8080" << std::endl;
-    std::cout << "  sudo " << progName << " enp0s3 10.0.0.10 9000 false" << std::endl;
+    std::cout << "  # GRE + upstream control forwarding (full POC scenario):" << std::endl;
+    std::cout << "  sudo " << progName
+              << " eth0 224.0.31.50 5000 true --gre --ctrl 224.0.31.51:5001 --producer 10.0.1.10:6000" << std::endl;
     std::cout << std::endl;
-    std::cout << "The replicator will:" << std::endl;
-    std::cout << "  1. Listen for UDP packets to the specified IP:PORT using AF_XDP" << std::endl;
-    std::cout << "  2. Accept control commands on port 12345 to manage destinations" << std::endl;
-    std::cout << "  3. Replicate received packets to all configured destinations" << std::endl;
+    std::cout << "  # Native multicast (TGW multicast domain or real co-location):" << std::endl;
+    std::cout << "  sudo " << progName << " eth0 224.0.31.50 5000" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  # GRE only (no control forwarding):" << std::endl;
+    std::cout << "  sudo " << progName << " eth0 224.0.31.50 5000 true --gre" << std::endl;
     std::cout << std::endl;
     std::cout << "Control Protocol (port 12345):" << std::endl;
     std::cout << "  Add destination:    [1][4-byte IP][2-byte port]" << std::endl;
@@ -66,7 +79,7 @@ void printStatisticsLoop() {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 4 || argc > 5) {
+    if (argc < 4) {
         printUsage(argv[0]);
         return 1;
     }
@@ -81,18 +94,58 @@ int main(int argc, char* argv[]) {
     std::string interface = argv[1];
     std::string listen_ip = argv[2];
     uint16_t listen_port = static_cast<uint16_t>(std::stoi(argv[3]));
-    
+
     bool use_zero_copy = true;
-    if (argc >= 5) {
-        std::string zero_copy_str = argv[4];
-        use_zero_copy = (zero_copy_str == "true" || zero_copy_str == "1");
+    bool use_gre = false;
+    std::string ctrl_group;
+    uint16_t    ctrl_port = 0;
+    std::string producer_ip;
+    uint16_t    producer_port = 0;
+
+    for (int i = 4; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--gre") {
+            use_gre = true;
+        } else if (arg == "--ctrl" && i + 1 < argc) {
+            // Format: <group>:<port>
+            std::string val = argv[++i];
+            auto colon = val.rfind(':');
+            if (colon == std::string::npos) {
+                std::cerr << "Error: --ctrl expects <group>:<port>" << std::endl;
+                return 1;
+            }
+            ctrl_group = val.substr(0, colon);
+            ctrl_port  = static_cast<uint16_t>(std::stoi(val.substr(colon + 1)));
+        } else if (arg == "--producer" && i + 1 < argc) {
+            // Format: <ip>:<port>
+            std::string val = argv[++i];
+            auto colon = val.rfind(':');
+            if (colon == std::string::npos) {
+                std::cerr << "Error: --producer expects <ip>:<port>" << std::endl;
+                return 1;
+            }
+            producer_ip   = val.substr(0, colon);
+            producer_port = static_cast<uint16_t>(std::stoi(val.substr(colon + 1)));
+        } else {
+            use_zero_copy = (arg == "true" || arg == "1");
+        }
+    }
+
+    if ((!ctrl_group.empty()) != (!producer_ip.empty())) {
+        std::cerr << "Error: --ctrl and --producer must be used together" << std::endl;
+        return 1;
     }
 
     std::cout << "=== AF_XDP Packet Replicator ===" << std::endl;
-    std::cout << "Interface: " << interface << std::endl;
-    std::cout << "Listen IP: " << listen_ip << std::endl;
-    std::cout << "Listen Port: " << listen_port << std::endl;
-    std::cout << "Zero Copy: " << (use_zero_copy ? "Enabled" : "Disabled") << std::endl;
+    std::cout << "Interface:    " << interface << std::endl;
+    std::cout << "Listen IP:    " << listen_ip << std::endl;
+    std::cout << "Listen Port:  " << listen_port << std::endl;
+    std::cout << "Zero Copy:    " << (use_zero_copy ? "Enabled" : "Disabled") << std::endl;
+    std::cout << "Mode:         " << (use_gre ? "GRE tunnel" : (PacketReplicator::isMulticastAddress(listen_ip) ? "Native multicast" : "Unicast")) << std::endl;
+    if (!ctrl_group.empty()) {
+        std::cout << "Ctrl group:   " << ctrl_group << ":" << ctrl_port << std::endl;
+        std::cout << "Producer:     " << producer_ip << ":" << producer_port << std::endl;
+    }
     std::cout << "Control Port: " << PacketReplicator::CONTROL_PORT << std::endl;
     std::cout << "=================================" << std::endl;
 
@@ -103,7 +156,15 @@ int main(int argc, char* argv[]) {
     try {
         // Create and initialize the replicator
         g_replicator = std::make_unique<PacketReplicator>(interface, listen_ip, listen_port);
-        
+
+        if (use_gre) {
+            g_replicator->setGREMode(true);
+        }
+
+        if (!ctrl_group.empty()) {
+            g_replicator->setUpstreamControl(ctrl_group, ctrl_port, producer_ip, producer_port);
+        }
+
         std::cout << "Initializing AF_XDP socket..." << std::endl;
         g_replicator->initialize(use_zero_copy);
         
