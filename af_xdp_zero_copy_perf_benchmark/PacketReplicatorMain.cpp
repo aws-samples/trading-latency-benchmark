@@ -53,7 +53,7 @@ void printUsage(const char* progName) {
     std::cout << "                Control messages received from subscribers are forwarded here." << std::endl;
     std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
-    std::cout << "  # GRE + upstream control forwarding (full POC scenario):" << std::endl;
+    std::cout << "  # GRE + upstream control forwarding:" << std::endl;
     std::cout << "  sudo " << progName
               << " eth0 224.0.31.50 5000 true --gre --ctrl 224.0.31.51:5001 --producer 10.0.1.10:6000" << std::endl;
     std::cout << std::endl;
