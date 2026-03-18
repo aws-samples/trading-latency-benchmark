@@ -62,11 +62,18 @@ if [ "$DO_GRUB" -eq 1 ]; then
     BOOT_PARAMS+=" rcu_nocb_poll"
     BOOT_PARAMS+=" kthread_cpus=$HOUSEKEEPING_CORES"
 
+    # Metal instances have real AMD-Vi IOMMU which causes IO_PAGE_FAULT with igb_uio
+    if grep -q "metal" /sys/devices/virtual/dmi/id/chassis_asset_tag 2>/dev/null || \
+       [ "$(nproc)" -ge 48 ]; then
+        BOOT_PARAMS+=" iommu=off"
+        echo "  [+] Metal instance detected: adding iommu=off for igb_uio compatibility"
+    fi
+
     # Remove first (idempotent), then add all at once
     for key in isolcpus nohz_full rcu_nocbs nohz nosoftlockup nmi_watchdog \
                audit mce cpuidle.off processor.max_cstate idle skew_tick \
                clocksource tsc transparent_hugepage rcupdate.rcu_cpu_stall_suppress \
-               rcu_nocb_poll kthread_cpus; do
+               rcu_nocb_poll kthread_cpus iommu; do
         grubby --update-kernel=ALL --remove-args="$key" 2>/dev/null || true
     done
     grubby --update-kernel=ALL --args="$BOOT_PARAMS"

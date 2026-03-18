@@ -513,29 +513,63 @@ The payload is clean (no tunnel header), the source IP is preserved, and the mul
 
 ## Latency Benchmarks
 
-Measured on AWS EC2 `m8a.2xlarge` instances in the same AZ, 1000 iterations, 64-byte packets.
+All tests: 1000 iterations, 64-byte packets, warmed up (100-iteration warmup pass). Full OS tuning applied (see [OS Tuning](#os-tuning-for-low-latency) below).
 
-### Comparison
+### Metal Instances + Cluster Placement Group (Recommended)
+
+Measured on `m8a.metal-24xl` (96 cores, AMD EPYC) in a cluster placement group, same AZ. Instances are physically co-located on the same rack with no hypervisor overhead.
+
+| Setup | P0 | P50 | P90 | P99 | Notes |
+|-------|-----|-----|-----|-----|-------|
+| **Standard UDP sockets** | 15.9µs | 17.0µs | 17.6µs | 18.7µs | Kernel sendto/recvfrom |
+| **mcast2ucast e2e (1 pub → 2 sub)** | 18.7µs | 19.7µs | 20.5µs | 22.2µs | ENA bypass, zero-copy fan-out |
+
+### Virtual Instances (No Placement Group)
+
+Measured on `m8a.2xlarge` (8 vCPUs) in the same AZ, no placement group.
 
 | Setup | P0 | P50 | P90 | P99 | Notes |
 |-------|-----|-----|-----|-----|-------|
 | **DPDK kernel bypass** | 25.2µs | 26.8µs | 28.1µs | 29.9µs | igb_uio + ENA LLQ, dpdk_latency |
 | **Standard UDP sockets** | 28.3µs | 29.9µs | 31.1µs | 32.4µs | Linux sendto/recvfrom, latency_test |
-| **mcast2ucast e2e (ENA bypass)** | 31.7µs | 33.7µs | 34.9µs | 36.4µs | TAP RX → ENA TX, immediate flush |
+| **mcast2ucast e2e (ENA bypass)** | 31.7µs | 33.7µs | 34.9µs | 36.4µs | TAP RX → ENA TX, 1 pub → 1 sub |
 | **mcast2ucast e2e (TAP only)** | 89.9µs | 100.0µs | 102.9µs | 105.2µs | TAP RX + TAP TX, no kernel bypass |
-| **DPDK AF_PACKET** | 60.9µs | 130.6µs | 132.1µs | 263.0µs | dpdk_latency via AF_PACKET PMD |
-
-All benchmarks run with full OS tuning (see [OS Tuning](#os-tuning-for-low-latency) below): kernel boot params (`isolcpus`, `nohz_full`, `idle=poll`), NIC IRQ isolation, workqueue affinity, THP disabled, and sysctl tuning.
 
 ### Analysis
 
-- **DPDK kernel bypass** (26.8µs P50) is the raw floor — packets never touch the kernel, going directly from userspace to NIC hardware via igb_uio and ENA's Low Latency Queue mode.
-- **Standard UDP sockets** (29.9µs P50) with full OS tuning is remarkably fast. Kernel boot params (`isolcpus`, `nohz_full`, `idle=poll`) eliminate timer ticks and scheduling jitter on DPDK cores, while `busy_poll`/`busy_read` sysctl makes the kernel spin-poll NIC queues instead of interrupt-driven wakeup. Tail latency improved dramatically (P99: 32.4µs vs 75.2µs before tuning).
-- **mcast2ucast e2e with ENA bypass** (33.7µs P50) is only ~7µs above raw DPDK and ~4µs above kernel UDP. The overhead comes from the TAP→DPDK→ENA hop on the TX side. P99 of 36.4µs shows excellent tail consistency from DPDK's deterministic poll-mode. Key optimizations: (1) wire-facing NIC bound to igb_uio for kernel-bypass TX/RX, (2) immediate `flush_tx()` after packet production, (3) full OS tuning with CPU isolation and C-state elimination.
-- **mcast2ucast e2e TAP-only** (100.0µs P50) uses AF_PACKET or TAP for the wire-facing path, adding kernel overhead on both TX and RX.
-- **DPDK AF_PACKET** (130.6µs P50) is the slowest — the MMAP ring buffer synchronization adds more overhead than native kernel sockets.
+- **Metal + CPG is ~40% faster** than virtual instances (19.7µs vs 33.7µs P50 for mcast2ucast e2e). Two factors: no hypervisor overhead on metal, and cluster placement group eliminates network hops between instances.
+- **mcast2ucast overhead is ~2.7µs** above raw kernel UDP (19.7µs vs 17.0µs on metal). This is the cost of the TAP→DPDK→ENA path on the TX side.
+- **Fan-out to 2 subscribers adds negligible latency** — zero-copy mbuf clones mean per-subscriber cost is just a header allocation (50 bytes), no payload copy.
+- **Excellent tail latency**: P99 of 22.2µs on metal (only 2.5µs above P50). DPDK's deterministic poll-mode avoids kernel scheduling jitter.
+- **Standard UDP sockets** benefit most from OS tuning — `busy_poll`/`busy_read` sysctl makes the kernel spin-poll NIC queues instead of interrupt-driven wakeup, and kernel boot params eliminate timer tick jitter.
 
 **Note**: The first run after mcast2ucast restart shows ~2× higher latency due to cold caches (ENA interrupt coalescing, CPU caches). Results above are from warmed-up runs (preceded by a 100-iteration warmup pass).
+
+### Metal Instance Notes
+
+Metal instances (`m8a.metal-24xl`, etc.) provide bare-metal access with no hypervisor, but require extra configuration:
+
+| Difference | Virtual (`m8a.2xlarge`) | Metal (`m8a.metal-24xl`) |
+|------------|------------------------|--------------------------|
+| **IOMMU** | None (Nitro) | AMD-Vi hardware IOMMU |
+| **igb_uio** | Works out of the box | Requires `iommu=off` kernel param |
+| **Primary NIC** | `enp39s0` | `ens67` or `ens68` |
+| **Secondary ENI PCI** | `0000:28:00.0` | `0000:47:00.0` |
+
+**IOMMU fix**: Metal instances have a real AMD-Vi IOMMU which causes `IO_PAGE_FAULT` errors with igb_uio. The `tune_os.sh` script auto-detects metal instances and adds `iommu=off` to the kernel boot params when `--grub` is used. If configuring manually:
+
+```bash
+sudo grubby --update-kernel=ALL --args="iommu=off"
+sudo reboot
+```
+
+**Post-reboot**: igb_uio is not persistent across reboots. After every reboot on metal, re-run:
+
+```bash
+cd ~/mcast2ucast
+sudo ./setup_ena_bypass.sh <pci-addr>   # e.g. 47:00.0 on metal
+sudo ./tune_os.sh                        # runtime tuning
+```
 
 ### OS Tuning for Low Latency
 
