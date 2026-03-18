@@ -1,0 +1,19 @@
+# mcast2ucast configuration file
+#
+# Lines starting with # are comments. Blank lines are ignored.
+#
+# Producer map: which producer to notify when a subscriber joins a group.
+# Format: producer <multicast_group_ip> <producer_ip> <producer_ctrl_port>
+#
+producer 224.0.0.101 10.0.1.5 9000
+producer 224.0.0.102 10.0.1.5 9000
+producer 224.0.1.1   10.0.2.10 9000
+
+# Static subscribers: pre-configured unicast destinations for multicast groups.
+# These are always active (no IGMP needed). Useful for testing or fixed topologies.
+# Format: subscriber <multicast_group_ip> <unicast_dst_ip> <unicast_dst_port> [dst_mac]
+# If dst_mac is omitted, the default gateway MAC or a zero MAC is used.
+#
+subscriber 224.0.0.101 10.0.0.50 5001
+subscriber 224.0.0.101 10.0.0.51 5001
+subscriber 224.0.0.102 10.0.0.50 5002
