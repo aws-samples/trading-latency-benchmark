@@ -41,6 +41,13 @@ public:
         if (socket_fd_ < 0) {
             throw std::runtime_error("Failed to create socket: " + std::string(strerror(errno)));
         }
+        struct timeval tv{};
+        tv.tv_sec  = 5;
+        tv.tv_usec = 0;
+        if (setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+            close(socket_fd_);
+            throw std::runtime_error("Failed to set socket timeout: " + std::string(strerror(errno)));
+        }
     }
 
     ~ControlClient() {

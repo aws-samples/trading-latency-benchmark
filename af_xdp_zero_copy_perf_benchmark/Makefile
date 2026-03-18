@@ -1,14 +1,14 @@
 CXX = g++
 # HFT OPTIMIZED COMPILATION FLAGS
 CXXFLAGS = -std=c++17 -Wall -Wextra -O3 -march=native -mtune=native
-CXXFLAGS += -flto -fno-omit-frame-pointer -g
+CXXFLAGS += -flto -g
 CXXFLAGS += -DNDEBUG -ffast-math -funroll-loops
 CXXFLAGS += -msse4.2 -mavx2 -mfma  # Enable SIMD instructions for maximum performance
 CXXFLAGS += -fno-stack-protector  # Remove stack protection overhead for HFT
 CXXFLAGS += -fomit-frame-pointer  # Optimize register usage
-INCLUDES = -I. 
+INCLUDES = -I. -I/usr/local/include
 LDFLAGS = -L/usr/local/lib -Wl,-rpath,/usr/local/lib
-LDFLAGS += -Wl,--no-as-needed -Wl,-O1  # Optimized linking
+LDFLAGS += -Wl,--no-as-needed -Wl,-O1
 LDLIBS = -lxdp -lbpf -lelf -lpthread
 
 # Source files  
@@ -17,7 +17,7 @@ OBJECTS = $(SOURCES:.cpp=.o)
 
 # Executables and XDP programs
 TARGETS = packet_replicator control_client test_client market_data_provider_client
-XDP_PROGRAMS = unicast_filter.o
+XDP_PROGRAMS = unicast_filter.o multicast_filter.o gre_filter.o
 
 # Default target
 all: $(TARGETS) $(XDP_PROGRAMS)
@@ -42,8 +42,14 @@ test_client: TestClient.o
 market_data_provider_client: MarketDataProviderClient.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
-# XDP Program (BPF bytecode)
+# XDP Programs (BPF bytecode)
 unicast_filter.o: unicast_filter.c
+	clang -O2 -g -Wall -target bpf -c $< -o $@
+
+multicast_filter.o: multicast_filter.c
+	clang -O2 -g -Wall -target bpf -c $< -o $@
+
+gre_filter.o: gre_filter.c
 	clang -O2 -g -Wall -target bpf -c $< -o $@
 
 # Clean

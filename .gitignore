@@ -384,6 +384,7 @@ package-lock.json
 yarn.lock
 .cdk.staging
 cdk.out
+*outputs.json
 
 ### Java/Maven ###
 *.class

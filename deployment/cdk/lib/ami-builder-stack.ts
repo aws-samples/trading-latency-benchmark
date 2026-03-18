@@ -26,7 +26,7 @@ export class TradingBenchmarkAmiBuilderStack extends cdk.Stack {
         // Create a minimal VPC for AMI building
         const vpc = new Vpc(this, 'AmiBuilderVPC', {
             natGateways: 0, // No NAT gateway needed - use public subnet
-            maxAzs: 1, // Use only first AZ in the region
+            maxAzs: 3, // Securing against insuffcient capacity events
             subnetConfiguration: [
                 {
                     cidrMask: 24,

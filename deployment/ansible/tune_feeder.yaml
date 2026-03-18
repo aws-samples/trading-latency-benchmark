@@ -1,0 +1,116 @@
+---
+# Feeder-node supplemental tuning — run AFTER tune_os.yaml
+# Targets hosts in the [feeder] inventory group (source hosts running multicast ingress)
+#
+# Adds settings that are either:
+#   1. Universal gaps in tune_os.yaml (BPF JIT, netdev backlog) — safe everywhere but
+#      placed here to keep tune_os.yaml unmodified for the existing benchmark setup
+#   2. Feeder-specific (rp_filter=0) — must NOT be applied to consumer nodes
+#
+# Usage:
+#   ansible-playbook tune_feeder.yaml -i inventory/
+#   (run on feeder hosts only — scope via --limit feeder or inventory group)
+
+- name: Configure feed handler supplemental tuning
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+    # ==========================================
+    # BPF / XDP JIT  (applies to all XDP nodes,
+    # but critical for feeder hot path)
+    # ==========================================
+    - name: Configure BPF JIT sysctl
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-bpf-xdp.conf
+        content: |
+          # BPF JIT: without this the eBPF program runs interpreted (~200ns overhead per packet)
+          net.core.bpf_jit_enable = 1
+
+          # Disable JIT hardening — it inserts per-instruction branches that negate the JIT speedup
+          net.core.bpf_jit_harden = 0
+
+          # Allow perf/bpftool to resolve JIT-compiled BPF symbols
+          net.core.bpf_jit_kallsyms = 1
+        mode: '0644'
+
+    # ==========================================
+    # MULTICAST INGRESS TUNING
+    # ==========================================
+    - name: Configure multicast and network sysctl for feed handler
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-feeder-network.conf
+        content: |
+          # Disable kernel multicast routing table lookup.
+          # With XDP intercepting multicast frames, the kernel IP stack never
+          # sees data packets.  mc_forwarding=0 (the default) ensures the
+          # ip_mr_input path is not accidentally activated by loading ipmr/ip6_mr
+          # modules, which would add a routing table lookup before XDP on some kernels.
+          net.ipv4.conf.all.mc_forwarding = 0
+          net.ipv4.conf.default.mc_forwarding = 0
+
+          # Reduce IGMP robustness variable: 2 (default) means the kernel retransmits
+          # IGMP Join/Leave twice.  1 is sufficient in a controlled VPC environment
+          # and halves IGMP signalling latency during subscription changes.
+          net.ipv4.igmp_qrv = 1
+
+          # Reverse-path filter OFF on feeder.
+          # Multicast data arrives from exchange source IPs that may have asymmetric
+          # routing (VPC peering, TGW).  RPF=2 (strict default) would drop them at
+          # the kernel IP layer.  Note: XDP intercepts BEFORE the IP layer so data
+          # packets are unaffected, but this protects the IGMP control socket path
+          # and any fallback XDP_PASS traffic.
+          net.ipv4.conf.all.rp_filter = 0
+          net.ipv4.conf.default.rp_filter = 0
+
+          # Per-interface setting takes precedence over "all" — set explicitly
+          # for eth0 (ENA primary interface).  Ansible fact gives us the default
+          # interface name; hardcode eth0 here as ENA always presents as eth0 on AL2023.
+          net.ipv4.conf.eth0.rp_filter = 0
+
+          # Increase per-CPU packet backlog for the control protocol socket (port 12345).
+          # AF_XDP bypasses this entirely; this covers the UDP control path.
+          net.core.netdev_max_backlog = 10000
+        mode: '0644'
+
+    - name: Apply feeder sysctl settings
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+
+    - name: Verify BPF JIT is enabled
+      ansible.builtin.command: sysctl net.core.bpf_jit_enable
+      register: bpf_jit_check
+      changed_when: false
+
+    - name: Verify rp_filter is disabled
+      ansible.builtin.command: sysctl net.ipv4.conf.all.rp_filter
+      register: rpf_check
+      changed_when: false
+
+    - name: Verify mc_forwarding is off
+      ansible.builtin.command: sysctl net.ipv4.conf.all.mc_forwarding
+      register: mcfwd_check
+      changed_when: false
+
+    - name: Verify igmp_qrv
+      ansible.builtin.command: sysctl net.ipv4.igmp_qrv
+      register: igmp_qrv_check
+      changed_when: false
+
+    - name: Display feeder tuning summary
+      ansible.builtin.debug:
+        msg:
+          - "=== Feed Handler Supplemental Tuning ==="
+          - "{{ bpf_jit_check.stdout }}"
+          - "{{ rpf_check.stdout }}"
+          - "{{ mcfwd_check.stdout }}"
+          - "{{ igmp_qrv_check.stdout }}"
+          - ""
+          - "NOTE: SO_PREFER_BUSY_POLL and SO_BUSY_POLL_BUDGET must be set"
+          - "at the AF_XDP socket level in AFXDPSocket::initialize()."
+          - "These are per-socket options, not sysctls."
+          - "  setsockopt(fd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &one, sizeof(one))"
+          - "  setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget))"
+          - "  (budget = TX_BATCH_SIZE = 64)"

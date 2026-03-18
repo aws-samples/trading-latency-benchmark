@@ -25,9 +25,17 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <net/if.h>
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
+
+static bool isMulticastAddress(const std::string& ip) {
+    struct in_addr addr{};
+    if (inet_aton(ip.c_str(), &addr) == 0) return false;
+    // 224.0.0.0/4: first octet 224–239
+    return (ntohl(addr.s_addr) >> 28) == 0xE;
+}
 
 static volatile bool g_running = true;
 
@@ -37,43 +45,66 @@ void signalHandler(int signum) {
 }
 
 void printUsage(const char* progName) {
-    std::cout << "Usage: " << progName << " <target_ip> <target_port> [interval_ms] [message]" << std::endl;
-    std::cout << "  target_ip:   IP address to send UDP packets to" << std::endl;
-    std::cout << "  target_port: Port to send UDP packets to" << std::endl;
-    std::cout << "  interval_ms: Interval between packets in milliseconds (default: 1000)" << std::endl;
-    std::cout << "  message:     Message to send (default: 'Test packet')" << std::endl;
+    std::cout << "Usage: " << progName
+              << " <target_ip> <target_port> [interval_ms] [message] [--iface <name>]" << std::endl;
+    std::cout << "  target_ip:    IP address to send UDP packets to." << std::endl;
+    std::cout << "                Use a multicast group (e.g. 224.0.31.50) for:" << std::endl;
+    std::cout << "                  GRE mode   — kernel routes via 'ip route add 224.0.0.0/4 dev gre_feed'" << std::endl;
+    std::cout << "                  Native mcast — direct multicast on the LAN/TGW domain" << std::endl;
+    std::cout << "  target_port:  UDP destination port." << std::endl;
+    std::cout << "  interval_ms:  Interval between packets in milliseconds (default: 1000)." << std::endl;
+    std::cout << "  message:      Payload string (default: 'Test packet')." << std::endl;
+    std::cout << "  --iface <n>   Outgoing interface for multicast (sets IP_MULTICAST_IF)." << std::endl;
+    std::cout << "                Required for native multicast; optional for GRE mode." << std::endl;
     std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
-    std::cout << "  " << progName << " 192.168.1.100 8080" << std::endl;
-    std::cout << "  " << progName << " 10.0.0.10 9000 500 'Hello World'" << std::endl;
+    std::cout << "  # Unicast to feeder:" << std::endl;
+    std::cout << "  " << progName << " 10.0.1.20 5000" << std::endl;
+    std::cout << "  # GRE mode (kernel GRE tunnel must be configured on this host):" << std::endl;
+    std::cout << "  " << progName << " 224.0.31.50 5000 100 'trade'  --iface eth0" << std::endl;
+    std::cout << "  # Native multicast:" << std::endl;
+    std::cout << "  " << progName << " 224.0.31.50 5000 100 'trade'  --iface eth0" << std::endl;
     std::cout << std::endl;
-    std::cout << "This client sends UDP packets to test the packet multiplexer." << std::endl;
-    std::cout << "Press Ctrl+C to stop sending." << std::endl;
+    std::cout << "Press Ctrl+C to stop." << std::endl;
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 3 || argc > 5) {
+    if (argc < 3) {
         printUsage(argv[0]);
         return 1;
     }
 
-    std::string target_ip = argv[1];
-    uint16_t target_port = static_cast<uint16_t>(std::stoi(argv[2]));
-    
-    int interval_ms = 1000;
-    if (argc >= 4) {
-        interval_ms = std::stoi(argv[3]);
+    std::string target_ip   = argv[1];
+    uint16_t    target_port = static_cast<uint16_t>(std::stoi(argv[2]));
+    int         interval_ms = 1000;
+    std::string message     = "Test packet";
+    std::string iface_name;
+
+    // Parse positional args 3 & 4, then flags
+    for (int i = 3; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--iface" && i + 1 < argc) {
+            iface_name = argv[++i];
+        } else if (i == 3 && arg.find_first_not_of("0123456789") == std::string::npos) {
+            interval_ms = std::stoi(arg);
+        } else if (i == 4 && arg != "--iface") {
+            message = arg;
+        } else if (arg != "--iface") {
+            std::cerr << "Unknown argument: " << arg << std::endl;
+            printUsage(argv[0]);
+            return 1;
+        }
     }
 
-    std::string message = "Test packet";
-    if (argc >= 5) {
-        message = argv[4];
-    }
+    bool multicast = isMulticastAddress(target_ip);
 
     std::cout << "=== UDP Test Client ===" << std::endl;
-    std::cout << "Target: " << target_ip << ":" << target_port << std::endl;
+    std::cout << "Target:   " << target_ip << ":" << target_port << std::endl;
+    std::cout << "Mode:     " << (multicast ? "multicast" : "unicast") << std::endl;
+    if (!iface_name.empty())
+        std::cout << "Iface:    " << iface_name << std::endl;
     std::cout << "Interval: " << interval_ms << " ms" << std::endl;
-    std::cout << "Message: '" << message << "'" << std::endl;
+    std::cout << "Message:  '" << message << "'" << std::endl;
     std::cout << "Press Ctrl+C to stop" << std::endl;
     std::cout << "======================" << std::endl;
 
@@ -88,13 +119,40 @@ int main(int argc, char* argv[]) {
             throw std::runtime_error("Failed to create socket: " + std::string(strerror(errno)));
         }
 
+        // Multicast sender configuration
+        if (multicast) {
+            // TTL=8: crosses TGW/VPC boundaries but stays within a reasonable scope
+            int ttl = 8;
+            if (setsockopt(socket_fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)) < 0) {
+                close(socket_fd);
+                throw std::runtime_error("Failed to set IP_MULTICAST_TTL: " + std::string(strerror(errno)));
+            }
+
+            // Bind outgoing multicast to specific interface if requested.
+            // Required for native multicast (prevents sending on the wrong interface).
+            // In GRE mode the kernel route handles it, but specifying is still cleaner.
+            if (!iface_name.empty()) {
+                struct ip_mreqn mreqn{};
+                mreqn.imr_ifindex = static_cast<int>(if_nametoindex(iface_name.c_str()));
+                if (mreqn.imr_ifindex == 0) {
+                    close(socket_fd);
+                    throw std::runtime_error("Unknown interface: " + iface_name);
+                }
+                if (setsockopt(socket_fd, IPPROTO_IP, IP_MULTICAST_IF, &mreqn, sizeof(mreqn)) < 0) {
+                    close(socket_fd);
+                    throw std::runtime_error("Failed to set IP_MULTICAST_IF: " + std::string(strerror(errno)));
+                }
+            }
+        }
+
         // Setup destination address
         struct sockaddr_in dest_addr;
         memset(&dest_addr, 0, sizeof(dest_addr));
         dest_addr.sin_family = AF_INET;
         dest_addr.sin_port = htons(target_port);
-        
+
         if (inet_aton(target_ip.c_str(), &dest_addr.sin_addr) == 0) {
+            close(socket_fd);
             throw std::runtime_error("Invalid target IP address: " + target_ip);
         }
 

@@ -103,22 +103,25 @@ std::string MarketDataProviderTradeMessage::message_template;
 
 class RoundTripBenchmark {
 private:
-    std::string multiplexer_ip_;
+    std::string multiplexer_ip_;   // Data destination (multicast group in GRE mode)
     uint16_t multiplexer_port_;
     std::string local_ip_;
     uint16_t local_port_;
-    
+    std::string feeder_ctrl_ip_;   // Feeder unicast IP for control protocol (port 12345)
+
     int send_socket_;
     int recv_socket_;
     struct sockaddr_in multiplexer_addr_;
-    
+
     std::thread receiver_thread_;
-    
+
 public:
     RoundTripBenchmark(const std::string& multiplexer_ip, uint16_t multiplexer_port,
-                      const std::string& local_ip, uint16_t local_port)
+                      const std::string& local_ip, uint16_t local_port,
+                      const std::string& feeder_ctrl_ip = "")
         : multiplexer_ip_(multiplexer_ip), multiplexer_port_(multiplexer_port),
           local_ip_(local_ip), local_port_(local_port),
+          feeder_ctrl_ip_(feeder_ctrl_ip.empty() ? multiplexer_ip : feeder_ctrl_ip),
           send_socket_(-1), recv_socket_(-1) {}
     
     ~RoundTripBenchmark() {
@@ -180,9 +183,11 @@ public:
     }
     
     bool addSelfAsSubscriber() {
-        // Use control_client to add ourselves as a subscriber
+        // Use control_client to add ourselves as a subscriber.
+        // In GRE mode multiplexer_ip_ is the multicast group; feeder_ctrl_ip_ is the
+        // feeder's unicast IP where the control protocol (port 12345) is listening.
         std::stringstream cmd;
-        cmd << "./control_client " << multiplexer_ip_ << " add " << local_ip_ << " " << local_port_;
+        cmd << "./control_client " << feeder_ctrl_ip_ << " add " << local_ip_ << " " << local_port_;
         
         std::cout << "Adding self as subscriber: " << cmd.str() << std::endl;
         
@@ -441,57 +446,81 @@ public:
 };
 
 void printUsage(const char* progName) {
-    std::cout << "Usage: " << progName << " <multiplexer_ip> <multiplexer_port> <local_ip> <local_port> "
-              << "<total_messages> <messages_per_sec>" << std::endl;
+    std::cout << "Usage: " << progName
+              << " <multiplexer_ip> <multiplexer_port> <local_ip> <local_port>"
+              << " <total_messages> <messages_per_sec> [--feeder-ip <ip>]" << std::endl;
     std::cout << std::endl;
     std::cout << "Parameters:" << std::endl;
-    std::cout << "  multiplexer_ip:   IP address of the packet multiplexer" << std::endl;
-    std::cout << "  multiplexer_port: Port of the packet multiplexer" << std::endl;
-    std::cout << "  local_ip:        Local IP to listen for echoed messages" << std::endl;
-    std::cout << "  local_port:      Local port to listen on" << std::endl;
-    std::cout << "  total_messages:  Total number of messages to send (e.g., 1000000)" << std::endl;
-    std::cout << "  messages_per_sec: Target message rate (e.g., 10000)" << std::endl;
+    std::cout << "  multiplexer_ip:    Data destination IP. Unicast feeder IP in normal mode;" << std::endl;
+    std::cout << "                     inner multicast group (e.g. 224.0.31.50) in GRE mode." << std::endl;
+    std::cout << "  multiplexer_port:  UDP port of the data stream." << std::endl;
+    std::cout << "  local_ip:          Local IP to listen for fan-out messages from the feeder." << std::endl;
+    std::cout << "  local_port:        Local port to listen on." << std::endl;
+    std::cout << "  total_messages:    Total messages to send (e.g. 1000000)." << std::endl;
+    std::cout << "  messages_per_sec:  Target send rate (e.g. 10000)." << std::endl;
+    std::cout << "  --feeder-ip <ip>   GRE mode only: unicast IP of the feeder for control" << std::endl;
+    std::cout << "                     protocol (port 12345). When omitted, multiplexer_ip is used." << std::endl;
     std::cout << std::endl;
-    std::cout << "Example:" << std::endl;
-    std::cout << "  " << progName << " 10.0.0.71 9000 10.0.0.34 9001 1000000 10000" << std::endl;
+    std::cout << "Examples:" << std::endl;
+    std::cout << "  # Normal mode (feeder unicast):" << std::endl;
+    std::cout << "  " << progName << " 10.0.1.20 5000 10.0.1.30 9001 1000000 10000" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  # GRE tunnel mode (multiplexer_ip = inner multicast group):" << std::endl;
+    std::cout << "  " << progName
+              << " 224.0.31.50 5000 10.0.1.30 9001 1000000 10000 --feeder-ip 10.0.1.20" << std::endl;
     std::cout << std::endl;
     std::cout << "This client measures round-trip latency through the AF_XDP packet multiplexer." << std::endl;
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 7) {
+    if (argc < 7) {
         printUsage(argv[0]);
         return 1;
     }
-    
-    std::string multiplexer_ip = argv[1];
-    uint16_t multiplexer_port = std::stoi(argv[2]);
-    std::string local_ip = argv[3];
-    uint16_t local_port = std::stoi(argv[4]);
-    uint64_t total_messages = std::stoull(argv[5]);
-    uint64_t messages_per_sec = std::stoull(argv[6]);
-    
+
+    std::string multiplexer_ip  = argv[1];
+    uint16_t multiplexer_port   = static_cast<uint16_t>(std::stoi(argv[2]));
+    std::string local_ip        = argv[3];
+    uint16_t local_port         = static_cast<uint16_t>(std::stoi(argv[4]));
+    uint64_t total_messages     = std::stoull(argv[5]);
+    uint64_t messages_per_sec   = std::stoull(argv[6]);
+    std::string feeder_ctrl_ip;
+
+    for (int i = 7; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--feeder-ip" && i + 1 < argc) {
+            feeder_ctrl_ip = argv[++i];
+        } else {
+            std::cerr << "Unknown argument: " << arg << std::endl;
+            printUsage(argv[0]);
+            return 1;
+        }
+    }
+
     if (total_messages == 0 || messages_per_sec == 0) {
         std::cerr << "Error: total_messages and messages_per_sec must be positive" << std::endl;
         return 1;
     }
-    
+
     std::cout << "=== Market Data Provider Trade Feed Round-Trip Benchmark ===" << std::endl;
-    std::cout << "Multiplexer: " << multiplexer_ip << ":" << multiplexer_port << std::endl;
+    std::cout << "Multiplexer:    " << multiplexer_ip << ":" << multiplexer_port << std::endl;
+    if (!feeder_ctrl_ip.empty())
+        std::cout << "Feeder ctrl IP: " << feeder_ctrl_ip << " (port 12345)" << std::endl;
     std::cout << "Local endpoint: " << local_ip << ":" << local_port << std::endl;
     std::cout << "Total messages: " << total_messages << std::endl;
-    std::cout << "Target rate: " << messages_per_sec << " msg/sec" << std::endl;
+    std::cout << "Target rate:    " << messages_per_sec << " msg/sec" << std::endl;
     std::cout << "===============================================" << std::endl;
-    
+
     // Setup signal handler
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
-    
+
     // Initialize message template
     MarketDataProviderTradeMessage::initializeTemplate();
-    
+
     try {
-        RoundTripBenchmark benchmark(multiplexer_ip, multiplexer_port, local_ip, local_port);
+        RoundTripBenchmark benchmark(multiplexer_ip, multiplexer_port, local_ip, local_port,
+                                     feeder_ctrl_ip);
         
         if (!benchmark.initialize()) {
             std::cerr << "Failed to initialize benchmark" << std::endl;
