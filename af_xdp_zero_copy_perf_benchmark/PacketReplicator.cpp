@@ -32,7 +32,7 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
-#include <netinet/ether.h>
+#include <linux/if_ether.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <bpf/bpf.h>
