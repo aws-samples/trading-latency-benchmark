@@ -186,54 +186,49 @@ Three dedicated memory pools:
 
 #### 1. Launch Instances
 
-Launch two EC2 instances (e.g. `m8a.2xlarge`) in the same VPC and subnet. Ensure the security group allows UDP traffic between instances.
+Launch two or more EC2 instances (e.g. `m8a.2xlarge` or `m8a.metal-24xl`) in the same VPC, subnet, and cluster placement group. Ensure the security group allows all UDP traffic between instances.
 
-#### 2. Install DPDK on Both Instances
+#### 2. Bootstrap (Automated)
 
-```bash
-# Install build dependencies
-sudo yum install -y numactl-devel elfutils-libelf-devel libpcap-devel \
-  meson ninja-build python3-pip libatomic
-pip3 install pyelftools
-
-# Download and build DPDK
-cd ~
-curl -sLO https://fast.dpdk.org/rel/dpdk-25.11.tar.xz
-tar xf dpdk-25.11.tar.xz
-cd dpdk-25.11
-meson setup build
-ninja -C build -j$(nproc)
-sudo ninja -C build install
-sudo ldconfig
-```
-
-#### 3. Allocate Hugepages on Both Instances
+The `bootstrap.sh` script installs everything in one step: DPDK, mcast2ucast, igb_uio, benchmarks, and hugepages.
 
 ```bash
-sudo sysctl -w vm.nr_hugepages=1024
-# Verify:
-grep HugePages_Free /proc/meminfo
+# Copy bootstrap.sh to each instance and run:
+scp -i ~/.ssh/<key>.pem bootstrap.sh ec2-user@<instance-ip>:~/
+ssh ec2-user@<instance-ip> "chmod +x ~/bootstrap.sh && sudo ~/bootstrap.sh"
 ```
 
-#### 4. Build mcast2ucast on Both Instances
+This takes ~5 minutes and installs:
+- DPDK 25.11 at `/usr/local/lib64`
+- mcast2ucast at `~/mcast2ucast/build/mcast2ucast`
+- igb_uio kernel module at `~/dpdk-kmods/linux/igb_uio/igb_uio.ko`
+- Benchmark tools at `~/mcast2ucast/benchmarks/latency_test`
+- 1024 hugepages (2GB)
 
-```bash
-cd ~/mcast2ucast
-PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig meson setup build
-meson compile -C build
-```
+#### 3. Create Secondary ENIs for Kernel Bypass
 
-#### 5. (Optional) ENA Kernel Bypass for Lower Latency
-
-Binding a secondary ENI to igb_uio gives mcast2ucast direct NIC access, bypassing the kernel for wire-facing TX/RX. Combined with immediate TX flush and OS tuning, this achieves ~34µs P50 e2e latency.
+Each instance needs a secondary ENI dedicated to DPDK (the primary stays for SSH).
 
 ```bash
 # From a machine with AWS CLI (not the instance):
 ./create_eni.sh <instance-id> <subnet-id> <sg-id> <region>
+```
 
-# On the instance:
-sudo ./build_igb_uio.sh       # Build igb_uio kernel module
-sudo ./setup_ena_bypass.sh     # Bind secondary ENI to DPDK
+#### 4. Bind ENI to DPDK
+
+```bash
+# On each instance — find the secondary NIC's PCI address:
+ls -la /sys/class/net/*/device | grep -v ens67  # or whatever the primary is
+
+# Bind to igb_uio (PCI address varies: 28:00.0 on virtual, 47:00.0 on metal):
+cd ~/mcast2ucast
+sudo ./setup_ena_bypass.sh <pci-addr>
+```
+
+Verify write-combine is active:
+```bash
+dmesg | grep igb_uio
+# Should show: igb_uio: wc_activate is set
 ```
 
 **Why igb_uio?** AWS Nitro has no hardware IOMMU, so:
@@ -241,11 +236,67 @@ sudo ./setup_ena_bypass.sh     # Bind secondary ENI to DPDK
 - `uio_pci_generic`: no MSI-X → ENA admin command timeouts
 - `igb_uio` with `wc_activate=1`: supports MSI-X + write-combine → works
 
-Verify write-combine is active after loading igb_uio:
+#### 5. Apply OS Tuning
+
 ```bash
-dmesg | grep igb_uio
-# Should show: igb_uio: wc_activate is set
+# Runtime tuning only (no reboot):
+cd ~/mcast2ucast && sudo ./tune_os.sh
+
+# Full tuning with kernel boot params (requires reboot):
+cd ~/mcast2ucast && sudo ./tune_os.sh --grub --reboot
 ```
+
+After reboot, re-run steps 4 (igb_uio must be reloaded) and runtime tuning:
+```bash
+cd ~/mcast2ucast
+sudo ./setup_ena_bypass.sh <pci-addr>
+sudo ./tune_os.sh
+```
+
+Verify kernel params took effect:
+```bash
+cat /proc/cmdline | tr ' ' '\n' | grep -E 'isolcpus|nohz_full|idle'
+# Should show: isolcpus=0-2, nohz_full=0-2, idle=poll
+```
+
+#### Manual Setup (Alternative to bootstrap.sh)
+
+<details>
+<summary>Click to expand manual installation steps</summary>
+
+```bash
+# Install build dependencies
+sudo dnf install -y gcc gcc-c++ make meson ninja-build \
+  numactl-devel elfutils-libelf-devel libpcap-devel libatomic \
+  kernel-devel-$(uname -r) python3 python3-pip git tar xz
+pip3 install pyelftools
+
+# Build DPDK
+cd ~ && curl -sLO https://fast.dpdk.org/rel/dpdk-25.11.tar.xz
+tar xf dpdk-25.11.tar.xz && cd dpdk-25.11
+meson setup build && ninja -C build -j$(nproc)
+sudo ninja -C build install && sudo ldconfig
+
+# Clone and build mcast2ucast
+git clone https://github.com/aws-samples/trading-latency-benchmark.git
+ln -sf ~/trading-latency-benchmark/mcast2ucast ~/mcast2ucast
+cd ~/mcast2ucast
+PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig meson setup build
+meson compile -C build
+
+# Build benchmarks
+cd benchmarks && make
+
+# Build igb_uio
+git clone https://dpdk.org/git/dpdk-kmods ~/dpdk-kmods
+cd ~/dpdk-kmods/linux/igb_uio && make
+sudo cp igb_uio.ko /lib/modules/$(uname -r)/extra/ && sudo depmod -a
+
+# Hugepages
+sudo sysctl -w vm.nr_hugepages=1024
+```
+
+</details>
 
 Must also pass `llq_policy=1` devarg (defaults to 0 due to zero-init):
 ```
@@ -701,6 +752,7 @@ mcast2ucast/
     test_sender.py          Python multicast test sender
     latency_sender.py       Python latency sender
     latency_receiver.py     Python latency receiver
+  bootstrap.sh              One-step setup: installs DPDK, mcast2ucast, igb_uio, benchmarks
   create_eni.sh             AWS: create + attach secondary ENI for DPDK bypass
   setup_ena_bypass.sh       AWS: bind ENI to igb_uio for kernel-bypass TX
   build_igb_uio.sh          Build igb_uio kernel module from dpdk-kmods
