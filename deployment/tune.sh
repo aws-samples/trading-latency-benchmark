@@ -61,25 +61,29 @@ systemctl stop amazon-ssm-agent; systemctl disable amazon-ssm-agent
 #Disable iptables
 modprobe -rv ip_tables
 
+#Detect primary network interface
+IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+IFACE=${IFACE:-eth0}
+
 #ENA driver settings
-ethtool -K eth0 rx off tx off sg off gso off gro off
+ethtool -K ${IFACE} rx off tx off sg off gso off gro off
 
 #Enable static interrupt moderation
-ethtool -C eth0 adaptive-rx off rx-usecs 1 tx-usecs 1
+ethtool -C ${IFACE} adaptive-rx off rx-usecs 1 tx-usecs 1
 
 #Disable syscall auditing (leave auditd functioning)
 echo "-a never,task" > /etc/audit/rules.d/disable-syscall-auditing.rules
 /sbin/augenrules --load
 
 #Receive Side Scaling
-export IRQS=($(grep eth0 /proc/interrupts | awk '{print $1}' | tr -d :))for i in ${!IRQS[@]}; do echo $i > /proc/irq/${IRQS[i]}/smp_affinity_list; done;
+export IRQS=($(grep ${IFACE} /proc/interrupts | awk '{print $1}' | tr -d :))for i in ${!IRQS[@]}; do echo $i > /proc/irq/${IRQS[i]}/smp_affinity_list; done;
 
 Transmit Packet Steering
-export TXQUEUES=($(ls -1qdv /sys/class/net/eth0/queues/tx-*))for i in ${!TXQUEUES[@]}; do printf '%x' $((2**i)) > ${TXQUEUES[i]}/xps_cpus; done;
+export TXQUEUES=($(ls -1qdv /sys/class/net/${IFACE}/queues/tx-*))for i in ${!TXQUEUES[@]}; do printf '%x' $((2**i)) > ${TXQUEUES[i]}/xps_cpus; done;
 
 DHCP Client
-dhclient -x -pf /var/run/dhclient-eth0.pid
-ip addr change $( ip -4 addr show dev eth0 | grep 'inet' | awk '{ print $2 " brd " $4 " scope global"}') dev eth0 valid_lft forever preferred_lft forever
+dhclient -x -pf /var/run/dhclient-${IFACE}.pid
+ip addr change $( ip -4 addr show dev ${IFACE} | grep 'inet' | awk '{ print $2 " brd " $4 " scope global"}') dev ${IFACE} valid_lft forever preferred_lft forever
 
 Kernel boot options
 transparent_hugepage=never audit=0 nmi_watchdog=0 nohz=on clocksource=tsc nosoftlockup mce=ignore_ce cpuidle.off=1 skew_tick=1acpi_irq_nobalance intel_pstate=disable intel_idle.max_cstate=0 processor.max_cstate=0 idle=poll isolcpus=2-15 nohz_full=2-15

@@ -11,19 +11,19 @@ import {
 } from 'aws-cdk-lib/aws-ec2';
 import { Tags, RemovalPolicy } from 'aws-cdk-lib';
 
-// ── FeederStack ────────────────────────────────────────────────────────────────
-// Deploys MockExchange + Feeder in the feeder region (default: eu-west-2 / London).
+// ── SourceStack ────────────────────────────────────────────────────────────────
+// Deploys MockExchange + Feeder in the source region (default: eu-west-2 / London).
 // Software installation, GRE tunnel, and OS tuning are handled by Ansible
-// via deploy-feeder.sh — instances boot vanilla Amazon Linux 2023.
-export interface FeederStackProps extends cdk.StackProps {
+// via deploy_feeder.sh — instances boot vanilla Amazon Linux 2023.
+export interface SourceStackProps extends cdk.StackProps {
     /** EC2 key pair name for SSH access (required) */
     keyPairName: string;
     /** Feeder instance type (default: c7i.4xlarge) */
     feederInstanceType?: string;
     /** Mock exchange instance type (default: c7i.4xlarge) */
     exchangeInstanceType?: string;
-    /** AMI ID to use for all instances in the feeder region (required — use build-tuned-ami.sh) */
-    amiId: string;
+    /** Custom AMI ID. Default: latest Amazon Linux 2023 */
+    amiId?: string;
     /** VPC CIDR (default: 10.61.0.0/16) */
     vpcCidr?: string;
     /** Inner multicast group address used as listen_ip on feeder (default: 224.0.31.50) */
@@ -39,12 +39,12 @@ export interface FeederStackProps extends cdk.StackProps {
     sourceFeederCidr?: string;
 }
 
-export class FeederStack extends cdk.Stack {
+export class SourceStack extends cdk.Stack {
     readonly vpc: Vpc;
     readonly sg: SecurityGroup;
     readonly vpcCidr: string;
 
-    constructor(scope: cdk.App, id: string, props: FeederStackProps) {
+    constructor(scope: cdk.App, id: string, props: SourceStackProps) {
         super(scope, id, props);
 
         const feederInstanceType   = props.feederInstanceType   || 'c7i.4xlarge';
@@ -82,7 +82,7 @@ export class FeederStack extends cdk.Stack {
         // - UDP dataPort from upstream source feeder (cross-region fan-out ingress)
         const sg = new SecurityGroup(this, 'FeederSg', {
             vpc,
-            description: 'feeder POC: SSH + intra-cluster GRE, UDP, control',
+            description: 'feeder: SSH + intra-cluster GRE, UDP, control',
             allowAllOutbound: true,
         });
         sg.applyRemovalPolicy(RemovalPolicy.DESTROY);
@@ -101,13 +101,15 @@ export class FeederStack extends cdk.Stack {
                 : 'UDP data port - open (set sourceFeederCidr to restrict to upstream feeder IP)'
         );
 
-        const ami     = MachineImage.genericLinux({ [this.region]: props.amiId });
+        const ami     = props.amiId
+            ? MachineImage.genericLinux({ [this.region]: props.amiId })
+            : MachineImage.latestAmazonLinux2023();
         const keyPair = KeyPair.fromKeyPairName(this, 'KeyPair', props.keyPairName);
 
         // ── Mock exchange instance ─────────────────────────────────────────
         const exchange = new Instance(this, 'Exchange', {
             vpc,
-            vpcSubnets: { subnets: [vpc.publicSubnets[1]] },
+            vpcSubnets: { subnets: [vpc.publicSubnets[0]] },
             instanceType: new InstanceType(exchangeInstanceType),
             machineImage: ami,
             securityGroup: sg,
@@ -115,13 +117,14 @@ export class FeederStack extends cdk.Stack {
             blockDevices: [{ deviceName: '/dev/xvda', volume: BlockDeviceVolume.ebs(40) }],
         });
         exchange.applyRemovalPolicy(RemovalPolicy.DESTROY);
-        Tags.of(exchange).add('Name', 'MockExchange');
+        (exchange.node.defaultChild as ec2.CfnInstance).sourceDestCheck = false;
+        Tags.of(exchange).add('Name', 'Exchange');
         Tags.of(exchange).add('Role', 'exchange');
 
         // ── Feeder instance ────────────────────────────────────────────────
         const feeder = new Instance(this, 'Feeder', {
             vpc,
-            vpcSubnets: { subnets: [vpc.publicSubnets[1]] },
+            vpcSubnets: { subnets: [vpc.publicSubnets[0]] },
             instanceType: new InstanceType(feederInstanceType),
             machineImage: ami,
             securityGroup: sg,
@@ -129,6 +132,7 @@ export class FeederStack extends cdk.Stack {
             blockDevices: [{ deviceName: '/dev/xvda', volume: BlockDeviceVolume.ebs(40) }],
         });
         feeder.applyRemovalPolicy(RemovalPolicy.DESTROY);
+        (feeder.node.defaultChild as ec2.CfnInstance).sourceDestCheck = false;
         Tags.of(feeder).add('Name', 'Feeder');
         Tags.of(feeder).add('Role', 'feeder');
 
@@ -150,52 +154,17 @@ export class FeederStack extends cdk.Stack {
             description: 'Mock exchange private IP',
         });
 
-        // ── Runbook outputs ────────────────────────────────────────────────
-        new cdk.CfnOutput(this, 'RunStep1_StartFeeder', {
-            value: [
-                `ssh ec2-user@<FeederPublicIp>`,
-                `cd ~/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark`,
-                `sudo ./packet_replicator eth0 ${multicastGroup} ${dataPort} true --gre`,
-            ].join('  &&  '),
-            description: 'Run: Start feeder in GRE mode',
-        });
-        new cdk.CfnOutput(this, 'RunStep1_StartFeeder_WithCtrl', {
-            value: [
-                `ssh ec2-user@<FeederPublicIp>`,
-                `cd ~/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark`,
-                `sudo ./packet_replicator eth0 ${multicastGroup} ${dataPort} true --gre`,
-                `  --ctrl ${multicastGroup}:${ctrlPort} --producer ${exchange.instancePrivateIp}:6000`,
-            ].join('  &&  '),
-            description: 'Run (alt): Start feeder with upstream control forwarding',
-        });
-        new cdk.CfnOutput(this, 'RunStep3_SendTestTraffic', {
-            value: [
-                `ssh ec2-user@<ExchangePublicIp>`,
-                `cd ~/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark`,
-                `./test_client ${multicastGroup} ${dataPort} 10 "trade" --iface eth0`,
-            ].join('  &&  '),
-            description: 'Run: Send test traffic from mock exchange (GRE tunnel auto-configured by Ansible)',
-        });
-        new cdk.CfnOutput(this, 'RunStep3_Benchmark', {
-            value: [
-                `ssh ec2-user@<ExchangePublicIp>`,
-                `cd ~/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark`,
-                `./market_data_provider_client ${multicastGroup} ${dataPort}`,
-                `  <subscriber_private_ip> 9001 1000000 10000 --feeder-ip ${feeder.instancePrivateIp}`,
-            ].join('  '),
-            description: 'Run (alt): Full RTT benchmark from mock exchange',
-        });
     }
 }
 
 // ── SubscriberStack ────────────────────────────────────────────────────────────
 // Deploys subscriber instances in the subscriber region (default: eu-central-1 / Frankfurt).
-// Subscribers receive unicast UDP fan-out from the Feeder over the public internet.
+// Subscribers receive unicast UDP fan-out from the Feeder over the VPC peering connection.
 export interface SubscriberStackProps extends cdk.StackProps {
     /** EC2 key pair name for SSH access (required) */
     keyPairName: string;
-    /** AMI ID to use for subscriber instances in the subscriber region (required — use build-tuned-ami.sh) */
-    amiId: string;
+    /** Custom AMI ID. Default: latest Amazon Linux 2023 */
+    amiId?: string;
     /** Subscriber instance type (default: c7i.4xlarge) */
     subscriberInstanceType?: string;
     /** Number of subscriber instances (default: 2) */
@@ -266,15 +235,16 @@ export class SubscriberStack extends cdk.Stack {
                 : 'UDP data port - open (set feederCidr to restrict to feeder public IP)'
         );
 
-        const ami     = MachineImage.genericLinux({ [this.region]: props.amiId });
+        const ami     = props.amiId
+            ? MachineImage.genericLinux({ [this.region]: props.amiId })
+            : MachineImage.latestAmazonLinux2023();
         const keyPair = KeyPair.fromKeyPairName(this, 'KeyPair', props.keyPairName);
 
         // ── Subscriber instances ───────────────────────────────────────────
-        const subscribers: Instance[] = [];
-        for (let i = 0; i < subscriberCount; i++) {
-            const sub = new Instance(this, `Subscriber${i + 1}`, {
+        for (let i = 1; i <= subscriberCount; i++) {
+            const sub = new Instance(this, `Subscriber${i}`, {
                 vpc,
-                vpcSubnets: { subnets: [vpc.publicSubnets[1]] },
+                vpcSubnets: { subnets: [vpc.publicSubnets[0]] },
                 instanceType: new InstanceType(subscriberInstanceType),
                 machineImage: ami,
                 securityGroup: sg,
@@ -282,20 +252,17 @@ export class SubscriberStack extends cdk.Stack {
                 blockDevices: [{ deviceName: '/dev/xvda', volume: BlockDeviceVolume.ebs(40) }],
             });
             sub.applyRemovalPolicy(RemovalPolicy.DESTROY);
-            Tags.of(sub).add('Name', `Subscriber-${i + 1}`);
+            (sub.node.defaultChild as ec2.CfnInstance).sourceDestCheck = false;
+            Tags.of(sub).add('Name', `Subscriber-${i}`);
             Tags.of(sub).add('Role', 'subscriber');
-            subscribers.push(sub);
-        }
 
-        // ── Stack outputs ──────────────────────────────────────────────────
-        for (let i = 0; i < subscribers.length; i++) {
-            new cdk.CfnOutput(this, `Subscriber${i + 1}PublicIp`, {
-                value: subscribers[i].instancePublicIp,
-                description: `Subscriber ${i + 1} public IP`,
+            new cdk.CfnOutput(this, `Subscriber${i}PublicIp`, {
+                value: sub.instancePublicIp,
+                description: `Subscriber ${i} public IP`,
             });
-            new cdk.CfnOutput(this, `Subscriber${i + 1}PrivateIp`, {
-                value: subscribers[i].instancePrivateIp,
-                description: `Subscriber ${i + 1} private IP`,
+            new cdk.CfnOutput(this, `Subscriber${i}PrivateIp`, {
+                value: sub.instancePrivateIp,
+                description: `Subscriber ${i} private IP`,
             });
         }
     }
@@ -306,7 +273,7 @@ export class SubscriberStack extends cdk.Stack {
 // and the subscriber VPC (accepter). Same-account cross-region peering is
 // auto-accepted by CloudFormation. Routes and SG rules are added on both sides.
 //
-// Deployed in the feeder region after FeederStack and SubscriberStack.
+// Deployed in the source region after SourceStack and SubscriberStack.
 // AwsCustomResource handles all subscriber-side operations cross-region.
 export interface PeeringStackProps extends cdk.StackProps {
     /** Feeder VPC (requester side, same region as this stack) */
@@ -480,7 +447,7 @@ export class PeeringStack extends cdk.Stack {
 
         new cdk.CfnOutput(this, 'PeeringConnectionId', {
             value: peering.ref,
-            description: 'VPC peering connection ID (FeederStack ↔ SubscriberStack)',
+            description: 'VPC peering connection ID (SourceStack ↔ SubscriberStack)',
         });
     }
 }

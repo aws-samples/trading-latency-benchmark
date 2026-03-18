@@ -383,8 +383,17 @@ cdk.context.json
 package-lock.json
 yarn.lock
 .cdk.staging
-cdk.out
+cdk.out/
 *outputs.json
+
+# TypeScript compiled output (lib/ and bin/)
+**/cdk/lib/*.js
+**/cdk/lib/*.d.ts
+**/cdk/bin/*.js
+**/cdk/bin/*.d.ts
+
+# CDK asset staging and manifest temp files
+**/cdk/cdk.*
 
 ### Java/Maven ###
 *.class

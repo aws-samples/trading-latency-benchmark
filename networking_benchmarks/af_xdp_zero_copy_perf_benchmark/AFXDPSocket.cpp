@@ -204,6 +204,18 @@ void AFXDPSocket::loadXdpProgram(const std::string& ifName, const std::string& p
     }
 }
 
+int AFXDPSocket::getXdpMapFd(const std::string& mapName) {
+    if (!xdp_prog)
+        return -1;
+    struct bpf_object *bpf_obj = xdp_program__bpf_obj(xdp_prog);
+    if (!bpf_obj)
+        return -1;
+    struct bpf_map *map = bpf_object__find_map_by_name(bpf_obj, mapName.c_str());
+    if (!map)
+        return -1;
+    return bpf_map__fd(map);
+}
+
 void AFXDPSocket::unloadXdpProgram(const std::string& ifName, bool nativeMode) {
     if (!nativeMode) {
         opt_attach_mode = XDP_MODE_SKB;
@@ -222,7 +234,7 @@ void AFXDPSocket::unloadXdpProgram(const std::string& ifName, bool nativeMode) {
 AFXDPSocket::AFXDPSocket(int frameSize, int frameCount, int headroom)
     : closed_(false), chunk_size_(frameSize), headroom_(headroom),
       tx_frames_(DEFAULT_TX_FRAMES), rx_frames_(DEFAULT_RX_FRAMES),
-      prev_umem_tx_frame_(0), cached_completions_(0), outstanding_tx_(0) {
+      outstanding_tx_(0) {
     
     wrapper_ = std::make_unique<xsk_socket_wrapper>();
     memset(wrapper_.get(), 0, sizeof(xsk_socket_wrapper));
@@ -262,9 +274,8 @@ AFXDPSocket::AFXDPSocket(AFXDPSocket&& other) noexcept
       headroom_(other.headroom_),
       tx_frames_(other.tx_frames_),
       rx_frames_(other.rx_frames_),
-      prev_umem_tx_frame_(other.prev_umem_tx_frame_.load()),
-      cached_completions_(other.cached_completions_),
       outstanding_tx_(other.outstanding_tx_),
+      registered_queue_id_(other.registered_queue_id_),
       pending_recycle_addrs_(std::move(other.pending_recycle_addrs_)) {
     other.umem_buffer_ = nullptr;
     other.umem_buffer_size_ = 0;
@@ -283,9 +294,8 @@ AFXDPSocket& AFXDPSocket::operator=(AFXDPSocket&& other) noexcept {
         headroom_ = other.headroom_;
         tx_frames_ = other.tx_frames_;
         rx_frames_ = other.rx_frames_;
-        prev_umem_tx_frame_ = other.prev_umem_tx_frame_.load();
-        cached_completions_ = other.cached_completions_;
         outstanding_tx_ = other.outstanding_tx_;
+        registered_queue_id_ = other.registered_queue_id_;
         pending_recycle_addrs_ = std::move(other.pending_recycle_addrs_);
         other.umem_buffer_ = nullptr;
         other.umem_buffer_size_ = 0;
@@ -453,14 +463,6 @@ int AFXDPSocket::bind(const std::string& ifName, int queueId, int flags) {
     return 0;
 }
 
-int AFXDPSocket::send(int offset, int length) {
-    checkOpen();
-    
-    std::vector<int> offsets = {offset};
-    std::vector<int> lengths = {length};
-    return sendBatch(offsets, lengths, 1);
-}
-
 int AFXDPSocket::sendBatch(const std::vector<int>& offsets, const std::vector<int>& lengths, int batchSize) {
     checkOpen();
 
@@ -515,54 +517,23 @@ int AFXDPSocket::sendBatch(const std::vector<int>& offsets, const std::vector<in
     return batchSize;
 }
 
-int AFXDPSocket::sendBatchToSubscribers(const std::vector<int>& offsets, const std::vector<int>& lengths, int batchSize) {
-    // This is a specialized version of sendBatch for subscriber forwarding
-    return sendBatch(offsets, lengths, batchSize);
-}
-
-int AFXDPSocket::getNextTxFrame() {
-    // CRITICAL FIX: Return frame number, not address (following ena-xdp exactly)
-    // The address calculation happens when setting TX descriptor
-    uint32_t frame_nb = prev_umem_tx_frame_.fetch_add(1) % tx_frames_;
-    return frame_nb;  // Return frame number, not multiplied address
-}
-
 void AFXDPSocket::pollTxCompletions() {
-    checkOpen();
-    
-    if (!outstanding_tx_) {
-        return;
-    }
-    
-    // Poll for new completions (following ena-xdp batching strategy)
+    if (!outstanding_tx_) return;
+
     uint32_t idx = 0;
-    uint32_t new_completions = xsk_ring_cons__peek(&wrapper_->cq, tx_frames_, &idx);
-    
-    if (!new_completions) {
-        return;
-    }
-    
-    // Add to cached completions for batching
-    cached_completions_ += new_completions;
-    
-    // Only release when we have a full batch (following ena-xdp pattern)
-    if (cached_completions_ < TX_BATCH_SIZE) {
-        return;
-    }
-    
-    // Release the cached completions
-    xsk_ring_cons__release(&wrapper_->cq, cached_completions_);
-    outstanding_tx_ -= cached_completions_;
-    
-    DEBUG_PRINT("Released %u TX completions, %u still outstanding\n", 
-                cached_completions_, outstanding_tx_);
-    
-    cached_completions_ = 0;
+    uint32_t completed = xsk_ring_cons__peek(&wrapper_->cq, outstanding_tx_, &idx);
+    if (!completed) return;
+
+    xsk_ring_cons__release(&wrapper_->cq, completed);
+    outstanding_tx_ = (completed <= outstanding_tx_) ? outstanding_tx_ - completed : 0;
+
+    DEBUG_PRINT("Released %u TX completions, %u still outstanding\n", completed, outstanding_tx_);
 }
 
 void AFXDPSocket::requestDriverPoll() {
-    checkOpen();
-    
+    // No checkOpen(): called from replicatePacket after the fan-out loop,
+    // inside processPacketsForQueue's running_ guard.
+
     // CRITICAL: This is the missing piece! Following ena-xdp exactly
     // Check if we need to wake up the driver (only if using XDP_USE_NEED_WAKEUP)
     if (!xsk_ring_prod__needs_wakeup(&wrapper_->tx)) {
@@ -584,40 +555,24 @@ void AFXDPSocket::requestDriverPoll() {
 }
 
 int AFXDPSocket::reserveTxRing(int count, uint32_t* tx_idx) {
-    checkOpen();
-    // Direct wrapper around xsk_ring_prod__reserve (ena-xdp pattern)
+    // No checkOpen(): called only from sendSinglePacketDirect which is guarded
+    // by sendToDestinationWithQueue's queueId/socket validity check.
     return xsk_ring_prod__reserve(&wrapper_->tx, count, tx_idx);
 }
 
 void AFXDPSocket::setTxDescriptor(uint32_t idx, uint64_t addr, uint32_t len) {
-    checkOpen();
-    // Direct TX descriptor access (ena-xdp pattern)
+    // No checkOpen(): same caller-chain guarantee as reserveTxRing.
     struct xdp_desc* tx_desc = xsk_ring_prod__tx_desc(&wrapper_->tx, idx);
     tx_desc->addr = addr;
     tx_desc->len = len;
 }
 
 void AFXDPSocket::submitTxRing(int count) {
-    checkOpen();
+    // No checkOpen(): same caller-chain guarantee as reserveTxRing.
     // Submit TX ring and track outstanding packets (ena-xdp pattern)
     xsk_ring_prod__submit(&wrapper_->tx, count);
     outstanding_tx_ += count;
     DEBUG_PRINT("Submitted %d TX packets, outstanding_tx=%u\n", count, outstanding_tx_);
-}
-
-void AFXDPSocket::copyUmemData(const uint8_t* sourceBuffer, int sourceOffset, int destOffset, int length) {
-    checkOpen();
-    
-    if (!sourceBuffer) {
-        throw std::invalid_argument("Source buffer must not be null");
-    }
-
-    // Copy data from source buffer to this UMEM
-    const uint8_t* src = sourceBuffer + sourceOffset;
-    uint8_t* dst = static_cast<uint8_t*>(umem_buffer_) + destOffset;
-
-    // Do the copy
-    memcpy(dst, src, length);
 }
 
 int AFXDPSocket::receive(std::vector<int>& offsets, std::vector<int>& lengths) {
@@ -630,8 +585,11 @@ int AFXDPSocket::receive(std::vector<int>& offsets, std::vector<int>& lengths) {
     uint32_t idx_rx = 0;
     unsigned int received = xsk_ring_cons__peek(&wrapper_->rx, max_entries, &idx_rx);
 
-    // Track packet addresses for recycling - critical for proper operation
-    std::vector<uint64_t> recycle_addrs(received);
+    // Append new addresses to pending_recycle_addrs_ in-place.
+    // Avoids heap allocation after warmup and preserves any addresses
+    // retained from a prior partial recycleFrames() call.
+    size_t base = pending_recycle_addrs_.size();
+    pending_recycle_addrs_.resize(base + received);
     int valid_packets = 0;
 
     if (received > 0)
@@ -644,40 +602,9 @@ int AFXDPSocket::receive(std::vector<int>& offsets, std::vector<int>& lengths) {
             const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&wrapper_->rx, idx_rx++);
             uint64_t addr = desc->addr;
             uint32_t len = desc->len;
-            
-            // Debug - inspect packet to check if it's UDP
-            uint8_t *pkt_data = static_cast<uint8_t*>(wrapper_->umem_area) + xsk_umem__extract_addr(addr);
-
-            // Check if this is an Ethernet IPv4 packet
-            if (len >= 34 && pkt_data[12] == 0x08 && pkt_data[13] == 0x00)
-            {
-                // Extract IP header
-                uint8_t *ip_hdr = pkt_data + 14;
-                uint8_t ip_proto = ip_hdr[9];
-
-                // Check if it's UDP (protocol 17)
-                if (ip_proto == 17)
-                {
-                    // Calculate IP header length to find UDP header
-                    uint8_t ip_hdr_len = (ip_hdr[0] & 0x0F) * 4;
-                    uint8_t *udp_hdr = ip_hdr + ip_hdr_len;
-
-                    // Extract UDP ports
-                    uint16_t src_port = (udp_hdr[0] << 8) | udp_hdr[1];
-                    uint16_t dst_port = (udp_hdr[2] << 8) | udp_hdr[3];
-
-                    // Extract source and destination IP for better debugging
-                    uint8_t *saddr = ip_hdr + 12;
-                    uint8_t *daddr = ip_hdr + 16;
-                    
-                    DEBUG_PRINT("UDP packet received: %d.%d.%d.%d:%u -> %d.%d.%d.%d:%u, len=%u\n",
-                                saddr[0], saddr[1], saddr[2], saddr[3], src_port,
-                                daddr[0], daddr[1], daddr[2], daddr[3], dst_port, len);
-                }
-            }
 
             // Save address for recycling - this is critical!
-            recycle_addrs[i] = addr;
+            pending_recycle_addrs_[base + i] = addr;
 
             // Pass packet info to caller
             if (valid_packets < static_cast<int>(max_entries)) {
@@ -690,10 +617,7 @@ int AFXDPSocket::receive(std::vector<int>& offsets, std::vector<int>& lengths) {
         // Release processed entries in RX ring - following ena-xdp example
         xsk_ring_cons__release(&wrapper_->rx, received);
         DEBUG_PRINT("Released %u packets from RX ring, valid_packets=%d\n", received, valid_packets);
-
-        // Store the recycle addresses for later recycling
-        pending_recycle_addrs_ = std::move(recycle_addrs);
-        DEBUG_PRINT("Stored %u addresses for later recycling\n", received);
+        DEBUG_PRINT("Appended %u addresses for recycling (total pending=%zu)\n", received, pending_recycle_addrs_.size());
     }
     else
     {
@@ -736,8 +660,16 @@ void AFXDPSocket::recycleFrames() {
         } else {
             DEBUG_PRINT("Warning: Failed to recycle frames - fill queue is full\n");
         }
-        
-        pending_recycle_addrs_.clear();
+
+        // On full recycle clear the list; on partial, retain unrecycled addresses
+        // so they are returned to the fill queue on the next recycleFrames() call.
+        if (free_capacity >= pending_recycle_addrs_.size()) {
+            pending_recycle_addrs_.clear();
+        } else if (free_capacity > 0) {
+            pending_recycle_addrs_.erase(pending_recycle_addrs_.begin(),
+                                         pending_recycle_addrs_.begin() + free_capacity);
+        }
+        // free_capacity == 0: fill queue full, keep all pending for next call.
     }
 }
 
@@ -799,6 +731,7 @@ int AFXDPSocket::registerXskMap(int queueId) {
     }
 
     fprintf(stderr, "Successfully registered AF_XDP socket with XSK map (key=%u)\n", key);
+    registered_queue_id_ = queueId;
     return 0;
 }
 
@@ -814,44 +747,35 @@ void AFXDPSocket::checkOpen() const {
 
 void AFXDPSocket::close() {
     if (closed_.exchange(true) == false) {
-        // Complete any pending TX
-        if (wrapper_ && wrapper_->xsk && wrapper_->outstanding_tx > 0) {
-            DEBUG_PRINT("Completing %u outstanding TX packets before close\n",
-                        wrapper_->outstanding_tx);
+        // Complete any pending TX (use class-level outstanding_tx_, not wrapper_->outstanding_tx
+        // which is never updated and always reads 0)
+        if (wrapper_ && wrapper_->xsk && outstanding_tx_ > 0) {
+            DEBUG_PRINT("Completing %u outstanding TX packets before close\n", outstanding_tx_);
 
-            // Try to complete outstanding TX
             int retries = 10;
-            while (wrapper_->outstanding_tx > 0 && retries-- > 0) {
+            while (outstanding_tx_ > 0 && retries-- > 0) {
                 uint32_t idx_cq = 0;
-                unsigned int completed = xsk_ring_cons__peek(&wrapper_->cq,
-                                                             wrapper_->outstanding_tx, &idx_cq);
+                unsigned int completed = xsk_ring_cons__peek(&wrapper_->cq, outstanding_tx_, &idx_cq);
                 if (completed > 0) {
                     xsk_ring_cons__release(&wrapper_->cq, completed);
-                    wrapper_->outstanding_tx -= completed;
+                    outstanding_tx_ = (completed <= outstanding_tx_) ? outstanding_tx_ - completed : 0;
                 }
-
-                if (wrapper_->outstanding_tx > 0) {
-                    if (xsk_ring_prod__needs_wakeup(&wrapper_->tx)) {
+                if (outstanding_tx_ > 0) {
+                    if (xsk_ring_prod__needs_wakeup(&wrapper_->tx))
                         sendto(xsk_socket__fd(wrapper_->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-                    }
-                    usleep(1000); // Short delay before retry
+                    usleep(1000);
                 }
             }
         }
 
         if (wrapper_) {
-            // Remove our entry from the XSK map if registered
-            if (wrapper_->xsk_map_fd >= 0) {
-                // Try to clean up map entry for our queue
-                for (uint32_t i = 0; i < 256; i++) {
-                    int sock_fd = 0;
-                    if (bpf_map_lookup_elem(wrapper_->xsk_map_fd, &i, &sock_fd) == 0) {
-                        if (wrapper_->xsk && sock_fd == xsk_socket__fd(wrapper_->xsk)) {
-                            bpf_map_delete_elem(wrapper_->xsk_map_fd, &i);
-                            DEBUG_PRINT("Removed socket from XSK map at index %u\n", i);
-                        }
-                    }
-                }
+            // Remove our entry from the XSK map if registered.
+            // Use the stored key (registered_queue_id_) for a single O(1) delete
+            // rather than scanning all 256 possible entries.
+            if (wrapper_->xsk_map_fd >= 0 && registered_queue_id_ >= 0) {
+                uint32_t key = static_cast<uint32_t>(registered_queue_id_);
+                bpf_map_delete_elem(wrapper_->xsk_map_fd, &key);
+                DEBUG_PRINT("Removed socket from XSK map at key %u\n", key);
             }
 
             // Clean up socket and UMEM

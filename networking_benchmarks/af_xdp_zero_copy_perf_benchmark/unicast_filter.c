@@ -53,9 +53,14 @@ struct
     __type(value, __u32);
 } xsks_map SEC(".maps");
 
+// Maximum number of listen addresses a single packet_replicator instance can intercept.
+// config_map slots may be sparse (dynamic add/remove); target_ip == 0 marks an unused
+// slot — the scan always checks all MAX_GROUPS entries via continue, not break.
+#define MAX_GROUPS 16
+
 // Configuration map for target IP and port
 struct unicast_config {
-    __u32 target_ip;    // Target IP address in network byte order
+    __u32 target_ip;    // Target IP address in network byte order (0 = unused slot)
     __u16 target_port;  // Target port in network byte order
     __u16 padding;      // Padding for alignment
 };
@@ -63,7 +68,7 @@ struct unicast_config {
 struct
 {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
+    __uint(max_entries, MAX_GROUPS);
     __type(key, __u32);
     __type(value, struct unicast_config);
 } config_map SEC(".maps");
@@ -142,51 +147,28 @@ int unicast_filter(struct xdp_md *ctx)
 
     struct udphdr *udp = (struct udphdr *)udp_start;
 
-    // Get configuration for target IP and port
-    __u32 config_key = 0;
-    struct unicast_config *config = bpf_map_lookup_elem(&config_map, &config_key);
-    if (!config)
-    {
-        // No configuration found, pass all UDP packets
-        // bpf_debug("XDP: No configuration found, passing packet");
-        return XDP_PASS;
+    // Scan up to MAX_GROUPS config entries.  Entries are populated sequentially;
+    // target_ip == 0 means the slot is unused.
+    __u8 matched = 0;
+    #pragma unroll
+    for (int _idx = 0; _idx < MAX_GROUPS; _idx++) {
+        if (!matched) {
+            __u32 _k = (__u32)_idx;
+            struct unicast_config *cfg = bpf_map_lookup_elem(&config_map, &_k);
+            if (!cfg || cfg->target_ip == 0)
+                continue;
+            if (iph->daddr == cfg->target_ip && udp->dest == cfg->target_port)
+                matched = 1;
+        }
     }
 
-    // Check if this packet matches our target IP and port
-    __u16 dst_port = udp->dest;  // Already in network byte order
-    __u32 dst_ip = iph->daddr;   // Already in network byte order
-
-    if (dst_ip != config->target_ip || dst_port != config->target_port)
-    {
-        // Not our target packet, pass it through
+    if (!matched)
         return XDP_PASS;
-    }
 
-    // Target packet found - log and redirect
-    // increment_counter(3);
-
-    __u8 *saddr = (__u8 *)&iph->saddr;
-    __u8 *daddr = (__u8 *)&iph->daddr;
-    __u16 src_port = bpf_ntohs(udp->source);
-    __u16 target_port_host = bpf_ntohs(config->target_port);
-
-    // bpf_debug("XDP: Target UDP packet %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d",
-    //           saddr[0], saddr[1], saddr[2], saddr[3], src_port,
-    //           daddr[0], daddr[1], daddr[2], daddr[3], target_port_host);
-
-    // Get the actual queue index from the context
-    __u32 queue_idx = ctx->rx_queue_index;
-    int *fd_ptr = bpf_map_lookup_elem(&xsks_map, &queue_idx);
-    if (!fd_ptr)
-    {
-        // bpf_debug("XDP: No AF_XDP socket found for queue %d", queue_idx);
-        return XDP_PASS;
-    }
-
-    // Redirect packet to the AF_XDP socket for zero-copy processing
-    // bpf_debug("XDP: Redirecting target UDP packet on queue %d to socket %d",
-    //           queue_idx, *fd_ptr);
-
-    // increment_counter(4);
-    return bpf_redirect_map(&xsks_map, queue_idx, XDP_DROP);
+    // Redirect to the AF_XDP socket registered for this RX queue.
+    // XDP_PASS fallback: if no socket is registered (e.g. during the brief window
+    // between loadXdpProgram and registerXskMap), packets fall through to the kernel
+    // stack rather than being silently dropped.  This also avoids the extra
+    // bpf_map_lookup_elem that the old explicit-check pattern incurred per packet.
+    return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_PASS);
 }

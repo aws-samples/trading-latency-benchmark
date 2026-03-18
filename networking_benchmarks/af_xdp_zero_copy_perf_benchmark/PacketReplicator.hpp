@@ -28,6 +28,7 @@
 #include <mutex>
 #include <set>
 #include <array>
+#include <unordered_map>
 #include <netinet/in.h>
 #include <cstdint>
 #include <chrono>
@@ -47,9 +48,13 @@ class PacketReplicator {
 public:
     // Control protocol constants
     static constexpr int CONTROL_PORT = 12345;
-    static constexpr uint8_t CTRL_ADD_DESTINATION = 1;
+    static constexpr uint8_t CTRL_ADD_DESTINATION    = 1;
     static constexpr uint8_t CTRL_REMOVE_DESTINATION = 2;
-    static constexpr uint8_t CTRL_LIST_DESTINATIONS = 3;
+    static constexpr uint8_t CTRL_LIST_DESTINATIONS  = 3;
+    // Per-group subscription: subscriber specifies which group + port to receive on.
+    // Feeder infers subscriber IP from the UDP source address of the control message.
+    static constexpr uint8_t CTRL_MCAST_JOIN  = 4;  // [4][4B group]
+    static constexpr uint8_t CTRL_MCAST_LEAVE = 5;  // [5][4B group]
 
     // Destination instance information
     struct Destination {
@@ -71,8 +76,26 @@ private:
     std::string cached_iface_ip_;
     uint8_t     cached_iface_mac_[6]{};
     int num_queues_;
-    int multicast_socket_;  // Holds IGMP membership so NIC receives the multicast group
     bool gre_mode_;         // GRE tunnel mode: outer unicast GRE carries inner multicast UDP
+
+    // ── Dynamic group tracking (GRE mode) / static seed (unicast mode) ───────
+    // config_map_fd_: BPF map fd retained after initialize() for runtime updates.
+    int config_map_fd_{-1};
+
+    // Per-group BPF state.  All maps keyed by group IP in network byte order,
+    // protected by group_mutex_.  Used by GRE mode only.
+    std::unordered_map<uint32_t, uint32_t> group_slots_;        // group NBO → config_map slot index
+    std::unordered_map<uint32_t, int>      group_ref_counts_;   // group NBO → subscriber join count
+    std::vector<uint32_t>                  free_slots_;         // available config_map slot indices
+    std::mutex                             group_mutex_;
+
+    // Per-group subscriber destinations.  Protected by destinations_mutex_.
+    // Maps group NBO → (subscriber IP string → Destination with port + ARP-resolved MAC).
+    // Populated by CTRL_MCAST_JOIN (GRE mode).
+    std::unordered_map<uint32_t, std::unordered_map<std::string, Destination>> group_destinations_;
+
+    // listen_ip_ parsed to NBO once at initialize(); used as cache key in unicast mode.
+    uint32_t listen_ip_nbo_{0};
 
     // Upstream control: subscriber multicast → feeder → producer forwarding
     std::string ctrl_multicast_group_;  // Multicast group subscribers send control messages to
@@ -83,7 +106,6 @@ private:
     int ctrl_forward_socket_{-1};       // Sends forwarded control messages to producer
     
     std::vector<std::unique_ptr<AFXDPSocket>> xdp_sockets_;
-    std::unique_ptr<AFXDPSocket> output_xdp_socket_;  // Zero-copy output socket
     int control_socket_;
     int output_socket_;  // Fallback regular socket
     
@@ -93,25 +115,16 @@ private:
     std::unique_ptr<std::thread> ctrl_upstream_thread_;
     
     mutable std::mutex destinations_mutex_;
-    std::set<Destination> destinations_;
+    // Canonical subscriber registry: IP string → Destination (with ARP-resolved MAC).
+    // Protected by destinations_mutex_.
+    std::unordered_map<std::string, Destination> all_destinations_;
     
-    // HFT OPTIMIZATIONS: Lock-free frame counter
-    alignas(64) std::atomic<uint32_t> tx_frame_counter_{0};  // Cache-aligned atomic counter
-    
-    // HFT OPTIMIZATIONS: Lock-free packet buffer pool
-    static constexpr int BUFFER_POOL_SIZE = 1024;
-    struct alignas(64) PacketBuffer {
-        uint8_t data[4096];
-        std::atomic<bool> in_use{false};
-        uint64_t timestamp{0};
-    };
-    std::array<PacketBuffer, BUFFER_POOL_SIZE> buffer_pool_;
-    alignas(64) std::atomic<uint32_t> buffer_pool_index_{0};
-    
-    // HFT OPTIMIZATIONS: Thread-local destination cache
+    // HFT OPTIMIZATIONS: Thread-local destination cache (per group / unicast)
     struct alignas(64) ThreadLocalDestCache {
-        std::vector<Destination> cached_destinations;
+        // Maps multicast group NBO → subscribers interested in that group.
+        std::unordered_map<uint32_t, std::vector<Destination>> group_dests;
         std::chrono::steady_clock::time_point last_update;
+        bool valid{false};
         static constexpr std::chrono::milliseconds CACHE_TIMEOUT{100};
     };
     static thread_local ThreadLocalDestCache dest_cache_;
@@ -160,11 +173,6 @@ public:
      * @throws std::runtime_error If initialization fails
      */
     void initialize(bool useZeroCopy = true);
-
-    /**
-     * Returns true if the given IP string is in the multicast range 224.0.0.0/4
-     */
-    static bool isMulticastAddress(const std::string& ip);
 
     /**
      * Enable GRE tunnel mode.
@@ -248,20 +256,24 @@ public:
 
 private:
     /**
-     * Configure the XDP program with target IP and port
+     * Configure the XDP program: stores config_map_fd_, zeroes all slots,
+     * populates free_slots_.  In GRE mode writes listen_ip_/listen_port_ to
+     * slot 0 immediately (static inner group).
      */
     void configureXdpProgram();
 
     /**
-     * Join the multicast group specified by listen_ip_ so the NIC delivers
-     * multicast frames to this host.  Stores the socket in multicast_socket_.
+     * Dynamically add a group to the BPF config_map (GRE mode).
+     * Thread-safe; called from processControlMessage on CTRL_MCAST_JOIN.
+     * @param group_nbo  Multicast group address in network byte order.
      */
-    void joinMulticastGroup();
+    void addGroupDynamic(uint32_t group_nbo);
 
     /**
-     * Drop multicast group membership and close multicast_socket_.
+     * Dynamically remove a group (ref-count semantics).  Zeroes the config_map slot.
+     * @param group_nbo  Multicast group address in network byte order.
      */
-    void leaveMulticastGroup();
+    void removeGroupDynamic(uint32_t group_nbo);
 
     /**
      * Join the control multicast group so the feeder receives subscriber control messages.
@@ -297,38 +309,24 @@ private:
     int replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId);
 
     /**
-     * Extract UDP payload from a packet (dispatches to GRE or plain path)
+     * Extract UDP payload from a packet (dispatches to GRE or plain path).
+     * Also returns the multicast group NBO address via group_nbo (used for per-group fan-out).
+     * Non-GRE: group_nbo = outer IP daddr (the multicast group the exchange sent to).
+     * GRE:     group_nbo = inner IP daddr (the multicast group encapsulated in the GRE frame).
      */
     bool extractUdpPayload(const uint8_t* packetData, size_t packetLen,
-                          const uint8_t*& payloadData, size_t& payloadLen);
+                          const uint8_t*& payloadData, size_t& payloadLen,
+                          uint32_t& group_nbo);
 
     /**
      * GRE-specific payload extraction.
      * Strips: Eth + outer IPv4 + GRE (variable 4-16 bytes) + inner IPv4 + UDP.
-     * Called by extractUdpPayload() when gre_mode_ is true.
+     * Returns inner IP datagram (IPv4+UDP+payload) verbatim in payloadData/payloadLen.
+     * group_nbo receives the inner IP destination (multicast group).
      */
     bool extractUdpPayloadGre(const uint8_t* packetData, size_t packetLen,
-                              const uint8_t*& payloadData, size_t& payloadLen);
-
-    /**
-     * Send UDP packet to a destination
-     * 
-     * @param destination Target destination
-     * @param data        Data to send
-     * @param length      Length of data
-     * @return True if sent successfully
-     */
-    bool sendToDestination(const Destination& destination, const uint8_t* data, size_t length);
-
-    /**
-     * Send UDP packet to destination using zero-copy AF_XDP
-     * 
-     * @param destination Target destination
-     * @param data        Data to send
-     * @param length      Length of data
-     * @return True if sent successfully
-     */
-    bool sendToDestinationZeroCopy(const Destination& destination, const uint8_t* data, size_t length);
+                              const uint8_t*& payloadData, size_t& payloadLen,
+                              uint32_t& group_nbo);
 
     /**
      * Fallback method using regular socket when zero-copy fails
@@ -363,57 +361,24 @@ private:
     bool sendSinglePacketDirect(const Destination& destination, const uint8_t* data, size_t length, int queueId);
 
     /**
-     * Create UDP packet with headers for zero-copy transmission
-     * 
-     * @param destination Target destination
-     * @param payload     UDP payload data
-     * @param payloadLen  Length of payload
-     * @param buffer      Output buffer for complete packet
-     * @param bufferSize  Size of output buffer
-     * @return Length of created packet, or 0 on error
+     * Create UDP packet with headers for zero-copy transmission (non-GRE mode)
      */
     size_t createUdpPacket(const Destination& destination, const uint8_t* payload, size_t payloadLen,
                           uint8_t* buffer, size_t bufferSize);
 
     /**
-     * Initialize the zero-copy output socket
-     * Following ena-xdp best practices for TX frame management
+     * Create GRE-encapsulated packet for zero-copy transmission (GRE mode).
+     * Layout: Eth + outer IPv4(proto=GRE) + GRE(4B) + inner_ip datagram verbatim.
+     *
+     * @param destination  Target subscriber (outer unicast destination)
+     * @param inner_ip     Inner IP datagram to encapsulate (IPv4+UDP+payload)
+     * @param inner_ip_len Length of inner IP datagram
+     * @param buffer       Output buffer
+     * @param bufferSize   Size of output buffer
+     * @return Total packet length, or 0 on error
      */
-    void initializeOutputSocket();
-
-    /**
-     * Pre-populate TX frames with packet templates for better performance
-     * Following ena-xdp approach of preparing frames during initialization
-     */
-    void prePopulateTxFrames();
-
-    /**
-     * Create a base packet template that can be modified per destination
-     * 
-     * @param buffer Buffer to write the template to
-     * @return Size of the template packet
-     */
-    size_t createBasePacketTemplate(uint8_t* buffer);
-
-    /**
-     * Update a packet template with specific destination and payload
-     * 
-     * @param buffer      Buffer containing the packet template
-     * @param destination Target destination
-     * @param payload     UDP payload data
-     * @param payloadLen  Length of payload
-     * @return Updated packet size
-     */
-    size_t updatePacketForDestination(uint8_t* buffer, const Destination& destination, 
-                                     const uint8_t* payload, size_t payloadLen);
-
-    /**
-     * Calculate total packet size including headers
-     * 
-     * @param payloadLen UDP payload length
-     * @return Total packet size
-     */
-    size_t calculatePacketSize(size_t payloadLen) const;
+    size_t createGrePacket(const Destination& destination, const uint8_t* inner_ip, size_t inner_ip_len,
+                           uint8_t* buffer, size_t bufferSize);
 
     /**
      * Process control message
@@ -455,11 +420,15 @@ private:
     bool getInterfaceMac(const std::string& interface, uint8_t* mac_address);
 
     /**
-     * Get destination MAC address via ARP lookup
-     * 
-     * @param ip_address Destination IP address string
+     * Get the Ethernet destination MAC for ip_address.
+     * Same-subnet: direct ARP table lookup (/proc/net/arp).
+     * Off-subnet (e.g. cross-VPC via peering): resolves the local gateway from
+     * /proc/net/route and returns the gateway MAC instead, so ENA delivers the
+     * frame to the VPC router which forwards it over the peering connection.
+     *
+     * @param ip_address  Destination IP address string
      * @param mac_address Output MAC address (6 bytes)
-     * @return True if successful
+     * @return True if a MAC was resolved (direct or via gateway)
      */
     bool getDestinationMac(const std::string& ip_address, uint8_t* mac_address);
 
@@ -470,22 +439,6 @@ private:
      */
     void triggerArpResolution(const std::string& ip_address);
 
-    // HFT OPTIMIZATION METHODS
-    
-    /**
-     * Get a free buffer from the lock-free buffer pool
-     * 
-     * @return Pointer to free buffer, or nullptr if none available
-     */
-    PacketBuffer* getBufferFromPool();
-    
-    /**
-     * Return a buffer to the lock-free buffer pool
-     * 
-     * @param buffer Buffer to return
-     */
-    void returnBufferToPool(PacketBuffer* buffer);
-    
     /**
      * Setup CPU affinity for a thread
      * 
@@ -501,38 +454,19 @@ private:
     void initializeCpuCores();
     
     /**
-     * Get cached destinations for current thread (lock-free after first call per 100ms window).
-     * Returns a const reference to the thread-local cache — no copy on the hot path.
+     * Get cached destinations for a group (lock-free after first call per 100ms).
+     * GRE mode: keyed by inner multicast group NBO.
+     * Unicast mode: keyed by listen_ip_nbo_ (feeder's unicast address).
+     * Returns a const ref to the thread-local vector — no copy on hot path.
      */
-    const std::vector<Destination>& getCachedDestinations();
-    
+    const std::vector<Destination>& getCachedGroupDestinations(uint32_t group_nbo);
+
     /**
-     * Update thread-local destination cache
+     * Rebuild thread-local destination cache.
+     * GRE mode: from group_destinations_.
+     * Unicast mode: from all_destinations_ keyed by listen_ip_nbo_.
      */
     void updateDestinationCache();
-    
-    /**
-     * Fast UDP payload extraction with branch prediction hints
-     * Optimized version with minimal branching
-     * 
-     * @param packetData Pointer to packet data
-     * @param packetLen  Length of the packet
-     * @param payloadData Output pointer to payload data
-     * @param payloadLen  Output length of payload
-     * @return True if UDP payload was successfully extracted
-     */
-    inline bool extractUdpPayloadFast(const uint8_t* packetData, size_t packetLen,
-                                     const uint8_t*& payloadData, size_t& payloadLen);
-    
-    /**
-     * Lock-free frame management using bitwise operations
-     * 
-     * @param tx_frames Total number of TX frames (must be power of 2)
-     * @return Next frame index
-     */
-    inline uint32_t getNextFrameIndexFast(uint32_t tx_frames) {
-        return tx_frame_counter_.fetch_add(1, std::memory_order_relaxed) & (tx_frames - 1);
-    }
 };
 
 #endif // PACKET_REPLICATOR_HPP

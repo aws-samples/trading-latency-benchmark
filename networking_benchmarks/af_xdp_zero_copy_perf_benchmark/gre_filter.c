@@ -13,7 +13,7 @@
  *   Ethernet / outer IPv4 (proto=47) / GRE / inner IPv4 (proto=17) / UDP / payload
  *
  * Optional GRE fields (checksum, key, sequence) are handled via the flags word.
- * Same config_map / xsks_map layout as unicast_filter.c and multicast_filter.c —
+ * Same config_map / xsks_map layout as unicast_filter.c —
  * no userspace config changes needed: target_ip is the inner multicast group,
  * target_port is the inner UDP destination port.
  */
@@ -29,6 +29,14 @@
 #ifndef IPPROTO_GRE
 #define IPPROTO_GRE 47
 #endif
+
+// Required for logging in XDP programs
+#define DEBUG 0
+#define bpf_debug(fmt, ...)                 \
+    ({                                      \
+        if (DEBUG)                          \
+            bpf_printk(fmt, ##__VA_ARGS__); \
+    })
 
 char _license[] SEC("license") = "GPL";
 
@@ -48,19 +56,37 @@ struct {
     __type(value, __u32);
 } xsks_map SEC(".maps");
 
+// Maximum number of multicast groups a single packet_replicator instance can intercept.
+// config_map slots may be sparse (dynamic add/remove); target_ip == 0 marks an unused
+// slot — the scan always checks all MAX_GROUPS entries via continue, not break.
+#define MAX_GROUPS 16
+
 // Configuration: inner multicast group + UDP port to intercept
 struct unicast_config {
-    __u32 target_ip;    // inner multicast group address (network byte order)
+    __u32 target_ip;    // inner multicast group address (network byte order; 0 = unused)
     __u16 target_port;  // inner UDP destination port (network byte order)
     __u16 padding;
 };
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
+    __uint(max_entries, MAX_GROUPS);
     __type(key, __u32);
     __type(value, struct unicast_config);
 } config_map SEC(".maps");
+
+// Update statistics counter
+static inline void increment_counter(int index)
+{
+    __u32 key = index;
+    __u64 *value, init_val = 1;
+
+    value = bpf_map_lookup_elem(&stats, &key);
+    if (value)
+        (*value)++;
+    else
+        bpf_map_update_elem(&stats, &key, &init_val, BPF_ANY);
+}
 
 SEC("xdp")
 int gre_filter(struct xdp_md *ctx)
@@ -122,15 +148,6 @@ int gre_filter(struct xdp_md *ctx)
     if ((bpf_ntohl(inner_iph->daddr) & 0xF0000000) != 0xE0000000)
         return XDP_PASS;
 
-    // ── Config map lookup: specific group + port ──────────────────────────────
-    __u32 key = 0;
-    struct unicast_config *config = bpf_map_lookup_elem(&config_map, &key);
-    if (!config)
-        return XDP_PASS;
-
-    if (inner_iph->daddr != config->target_ip)
-        return XDP_PASS;
-
     // ── Inner UDP ─────────────────────────────────────────────────────────────
     __u32 inner_ip_len = inner_iph->ihl * 4;
     if (inner_ip_len < 20 || inner_ip_len > 60)
@@ -140,7 +157,22 @@ int gre_filter(struct xdp_md *ctx)
     if ((void *)(udp + 1) > data_end)
         return XDP_PASS;
 
-    if (udp->dest != config->target_port)
+    // ── Config map scan: up to MAX_GROUPS entries ─────────────────────────────
+    // Entries are populated sequentially; target_ip == 0 means unused slot.
+    __u8 matched = 0;
+    #pragma unroll
+    for (int _idx = 0; _idx < MAX_GROUPS; _idx++) {
+        if (!matched) {
+            __u32 _k = (__u32)_idx;
+            struct unicast_config *cfg = bpf_map_lookup_elem(&config_map, &_k);
+            if (!cfg || cfg->target_ip == 0)
+                continue;
+            if (inner_iph->daddr == cfg->target_ip && udp->dest == cfg->target_port)
+                matched = 1;
+        }
+    }
+
+    if (!matched)
         return XDP_PASS;
 
     // ── Match — redirect whole GRE frame to AF_XDP (zero-copy on ENA) ─────────

@@ -66,9 +66,8 @@
           net.ipv4.conf.default.rp_filter = 0
 
           # Per-interface setting takes precedence over "all" — set explicitly
-          # for eth0 (ENA primary interface).  Ansible fact gives us the default
-          # interface name; hardcode eth0 here as ENA always presents as eth0 on AL2023.
-          net.ipv4.conf.eth0.rp_filter = 0
+          # for the primary interface (detected via ansible_default_ipv4.interface).
+          net.ipv4.conf.{{ ansible_default_ipv4.interface }}.rp_filter = 0
 
           # Increase per-CPU packet backlog for the control protocol socket (port 12345).
           # AF_XDP bypasses this entirely; this covers the UDP control path.
@@ -78,6 +77,53 @@
     - name: Apply feeder sysctl settings
       ansible.builtin.command: sysctl --system
       changed_when: true
+
+    # ==========================================
+    # ENA XDP QUEUE HEADROOM
+    # ENA requires one XDP TX queue per RX queue.
+    # If combined queues == max, there is no room
+    # for XDP queues and attachment fails with
+    # "no enough space for allocating XDP queues".
+    # Halving combined queues frees the headroom.
+    # A systemd drop-in re-applies this on reboot.
+    # ==========================================
+    - name: Halve ENA combined queues to make room for XDP TX queues
+      ansible.builtin.shell: |
+        IFACE={{ ansible_default_ipv4.interface }}
+        MAX_Q=$(ethtool -l "$IFACE" 2>/dev/null | awk '/Combined:/{print $2; exit}')
+        if [ -z "$MAX_Q" ] || [ "$MAX_Q" -lt 2 ]; then exit 0; fi
+        XDP_Q=$(( MAX_Q / 2 ))
+        ethtool -L "$IFACE" combined "$XDP_Q"
+      changed_when: true
+
+    - name: Install systemd drop-in to persist ENA queue headroom across reboots
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ena-xdp-queues.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Halve ENA combined queues for XDP headroom
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/bash -c '\
+            IFACE=$(ip -4 route show default | awk "{print \$5}" | head -1); \
+            IFACE=${IFACE:-eth0}; \
+            MAX_Q=$(ethtool -l "$IFACE" 2>/dev/null | awk "/Combined:/{print \$2; exit}"); \
+            [ -z "$MAX_Q" ] || [ "$MAX_Q" -lt 2 ] && exit 0; \
+            ethtool -L "$IFACE" combined $(( MAX_Q / 2 ))'
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable ENA XDP queue service
+      ansible.builtin.systemd:
+        name: ena-xdp-queues.service
+        enabled: yes
+        daemon_reload: yes
 
     - name: Verify BPF JIT is enabled
       ansible.builtin.command: sysctl net.core.bpf_jit_enable
@@ -108,9 +154,7 @@
           - "{{ mcfwd_check.stdout }}"
           - "{{ igmp_qrv_check.stdout }}"
           - ""
-          - "NOTE: SO_PREFER_BUSY_POLL and SO_BUSY_POLL_BUDGET must be set"
-          - "at the AF_XDP socket level in AFXDPSocket::initialize()."
-          - "These are per-socket options, not sysctls."
-          - "  setsockopt(fd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &one, sizeof(one))"
-          - "  setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget))"
-          - "  (budget = TX_BATCH_SIZE = 64)"
+          - "RX loop: pure user-space spin (xsk_ring_cons__peek + _mm_pause on empty)."
+          - "SO_PREFER_BUSY_POLL is intentionally not set: kernel NAPI busy-poll adds"
+          - "a syscall on every empty-ring check, whereas the spin loop has zero syscalls."
+          - "On a dedicated feeder core the spin loop is lower latency."

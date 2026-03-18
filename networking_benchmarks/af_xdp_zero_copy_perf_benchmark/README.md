@@ -22,10 +22,13 @@ Three ingress modes are supported, selected automatically at startup:
 | Mode | BPF program | When used |
 |------|------------|-----------|
 | Unicast | `unicast_filter.o` | `listen_ip` is a regular unicast address |
-| Native multicast | `multicast_filter.o` | `listen_ip` is a multicast group (224.0.0.0/4); real multicast routing available (TGW Multicast Domain or same-subnet) |
 | GRE tunnel | `gre_filter.o` | `--gre` flag; AWS VPC without native multicast routing; mock exchange wraps inner multicast UDP in GRE unicast |
 
 Egress is always AF_XDP zero-copy unicast UDP to each registered subscriber, with automatic fallback to a kernel socket.
+
+> **config_map:** One static `target_ip:target_port` entry is written at slot 0 using the
+> `listen_ip:listen_port` argument.  In GRE mode this is the inner multicast group; in unicast
+> mode it is the feeder's unicast address.  The map supports up to 16 slots for future expansion.
 
 ## Quick Start
 
@@ -44,7 +47,7 @@ make all
 ```
 
 Produced binaries: `packet_replicator`, `control_client`, `test_client`, `market_data_provider_client`.
-Produced eBPF objects: `unicast_filter.o`, `multicast_filter.o`, `gre_filter.o`.
+Produced eBPF objects: `unicast_filter.o`, `gre_filter.o`.
 
 ---
 
@@ -110,27 +113,41 @@ producer's unicast endpoint.
 ./control_client 10.0.1.20 list
 ```
 
-### Mode 3 — Native multicast (TGW Multicast Domain / co-location)
-
-```bash
-# Feeder joins the multicast group via IGMP and loads multicast_filter.o automatically
-sudo ./packet_replicator eth0 224.0.31.50 5000
-
-# Exchange sends directly to the multicast group (no GRE tunnel needed)
-./test_client 224.0.31.50 5000 1 "trade" --iface eth0
-```
-
-Requires a TGW Multicast Domain (cross-subnet) or same-subnet multicast routing.
-
 ---
 
 ## Control Protocol (port 12345)
 
 ```bash
-./control_client <feeder_ip> add    <dest_ip> <dest_port>   # register subscriber
-./control_client <feeder_ip> remove <dest_ip> <dest_port>   # deregister
-./control_client <feeder_ip> list                           # inspect active subscribers
+# Register subscriber IP:port so the feeder resolves ARP and prepares egress headers
+sudo ./control_client <feeder_ip> add    <dest_ip> <dest_port>
+
+# Subscribe to a multicast group — feeder fans out that group to this host
+./control_client <feeder_ip> mcast <group>
+
+# Unsubscribe from a group
+./control_client <feeder_ip> mcast-leave <group>
+
+# Remove subscriber entirely
+sudo ./control_client <feeder_ip> remove <dest_ip> <dest_port>
+
+# Inspect active subscribers
+./control_client <feeder_ip> list
 ```
+
+Typical subscriber setup (run both on the subscriber machine):
+```bash
+sudo ./control_client 10.0.1.20 add    10.0.1.30 9001          # register IP+port (unicast)
+./control_client 10.0.1.20 mcast 224.0.31.50                   # subscribe to group A (GRE)
+./control_client 10.0.1.20 mcast 224.0.31.51                   # subscribe to group B (GRE)
+```
+
+`mcast <group>` sends a `CTRL_MCAST_JOIN` control message to the feeder over the existing UDP
+control socket (port 12345).  The feeder infers the subscriber IP from the UDP source address,
+resolves ARP, and registers the subscriber for that group.  No raw socket or root privileges
+required.  Subscribers always receive traffic on the exchange data port (the `listen_port`
+argument to `packet_replicator`) — the inner UDP dst is preserved verbatim in the GRE frame.
+
+A subscriber can join multiple groups; each registration is independent.
 
 The control client has a 5-second receive timeout — it will fail fast if the feeder is unreachable
 rather than blocking indefinitely.
@@ -164,12 +181,11 @@ cat /proc/net/arp | grep <subscriber_ip>
 
 | Binary / Object | Role |
 |----------------|------|
-| `packet_replicator` | AF_XDP ingress + zero-copy fan-out engine |
+| `packet_replicator` | AF_XDP ingress + zero-copy fan-out engine; in GRE mode stamps `feeder_ns` (`CLOCK_REALTIME`) into each forwarded packet for per-hop latency breakdown |
 | `control_client` | CLI to add/remove/list subscribers at runtime |
 | `test_client` | UDP traffic generator; supports unicast and multicast targets |
 | `market_data_provider_client` | RTT benchmark: self-registers, sends trade messages, reports latency percentiles |
 | `unicast_filter.o` | eBPF XDP: matches target unicast IP:port → AF_XDP |
-| `multicast_filter.o` | eBPF XDP: matches 224.0.0.0/4 range + target port → AF_XDP |
 | `gre_filter.o` | eBPF XDP: matches GRE unicast frames carrying inner multicast UDP → AF_XDP |
 
 ---
@@ -182,6 +198,9 @@ cat /proc/net/arp | grep <subscriber_ip>
 - **Lock-free** thread-local destination cache refreshed every 100 ms
 - **CPU affinity** binding for cache-resident hot paths
 - **Self-healing MAC resolution** — broadcast-MAC destinations fall back to kernel socket while ARP resolves, then automatically switch to AF_XDP fast path
+- **Single driver kick per TX batch** — `requestDriverPoll()` is called once after fanning out to all K subscribers, not K times; eliminates redundant `sendto` syscalls under load
+- **TX ring overflow recovery** — on full TX ring, kicks driver, drains completions, and retries once before falling back to the kernel socket; no silent drops
+- **Mode-adaptive RX batch size** — 256 frames in GRE mode (handles multi-hundred-frame exchange bursts), 64 in unicast mode
 
 ## HFT Optimizations
 

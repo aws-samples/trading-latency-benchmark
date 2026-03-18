@@ -28,9 +28,11 @@
 class ControlClient {
 private:
     static constexpr int CONTROL_PORT = 12345;
-    static constexpr uint8_t CTRL_ADD_DESTINATION = 1;
+    static constexpr uint8_t CTRL_ADD_DESTINATION    = 1;
     static constexpr uint8_t CTRL_REMOVE_DESTINATION = 2;
-    static constexpr uint8_t CTRL_LIST_DESTINATIONS = 3;
+    static constexpr uint8_t CTRL_LIST_DESTINATIONS  = 3;
+    static constexpr uint8_t CTRL_MCAST_JOIN          = 4;
+    static constexpr uint8_t CTRL_MCAST_LEAVE         = 5;
 
     int socket_fd_;
     std::string server_address_;
@@ -90,6 +92,47 @@ public:
         // Convert port to network byte order
         uint16_t port_net = htons(port);
         memcpy(&message[5], &port_net, 2);
+
+        return sendMessage(message);
+    }
+
+    // Register this subscriber for a multicast group via the feeder control protocol
+    // (CTRL_MCAST_JOIN).  No raw socket or root required.
+    // The feeder infers the subscriber IP from the UDP source address of this message.
+    // No port argument: in GRE mode the inner UDP dst port is preserved verbatim from
+    // the exchange, so subscribers always receive on the exchange data port.
+    bool joinGroup(const std::string& groupAddress) {
+        struct in_addr group_addr{};
+        if (inet_aton(groupAddress.c_str(), &group_addr) == 0) {
+            std::cerr << "Invalid multicast group address: " << groupAddress << std::endl;
+            return false;
+        }
+        uint32_t first_octet = ntohl(group_addr.s_addr) >> 24;
+        if (first_octet < 224 || first_octet > 239) {
+            std::cerr << "Not a multicast address: " << groupAddress << std::endl;
+            return false;
+        }
+
+        // [CTRL_MCAST_JOIN][4B group NBO]
+        std::vector<uint8_t> message(5);
+        message[0] = CTRL_MCAST_JOIN;
+        memcpy(&message[1], &group_addr.s_addr, 4);
+
+        return sendMessage(message);
+    }
+
+    // Deregister this subscriber from a specific multicast group (CTRL_MCAST_LEAVE).
+    bool leaveGroup(const std::string& groupAddress) {
+        struct in_addr group_addr{};
+        if (inet_aton(groupAddress.c_str(), &group_addr) == 0) {
+            std::cerr << "Invalid multicast group address: " << groupAddress << std::endl;
+            return false;
+        }
+
+        // [CTRL_MCAST_LEAVE][4B group NBO]
+        std::vector<uint8_t> message(5);
+        message[0] = CTRL_MCAST_LEAVE;
+        memcpy(&message[1], &group_addr.s_addr, 4);
 
         return sendMessage(message);
     }
@@ -163,8 +206,8 @@ private:
             return false;
         }
 
-        // For add/remove operations, receive a simple response
-        if (message[0] == CTRL_ADD_DESTINATION || message[0] == CTRL_REMOVE_DESTINATION) {
+        // All commands except LIST expect a 1-byte success/failure response
+        if (message[0] != CTRL_LIST_DESTINATIONS) {
             uint8_t response;
             struct sockaddr_in resp_addr;
             socklen_t addr_len = sizeof(resp_addr);
@@ -191,16 +234,23 @@ private:
 };
 
 void printUsage(const char* progName) {
-    std::cout << "Usage: " << progName << " <server_ip> <command> [args...]" << std::endl;
+    std::cout << "Usage: " << progName << " <feeder_ip> <command> [args...]" << std::endl;
     std::cout << "Commands:" << std::endl;
-    std::cout << "  add <dest_ip> <dest_port>    - Add a destination" << std::endl;
-    std::cout << "  remove <dest_ip> <dest_port> - Remove a destination" << std::endl;
-    std::cout << "  list                         - List all destinations" << std::endl;
+    std::cout << "  add <dest_ip> <dest_port>              - Register subscriber IP:port with feeder" << std::endl;
+    std::cout << "  remove <dest_ip> <dest_port>           - Deregister subscriber" << std::endl;
+    std::cout << "  list                                   - List all registered subscribers" << std::endl;
+    std::cout << "  mcast <group>                          - Subscribe to <group>" << std::endl;
+    std::cout << "  mcast-leave <group>                    - Unsubscribe from <group>" << std::endl;
     std::cout << std::endl;
-    std::cout << "Examples:" << std::endl;
-    std::cout << "  " << progName << " 192.168.1.100 add 10.0.0.5 8080" << std::endl;
-    std::cout << "  " << progName << " 192.168.1.100 remove 10.0.0.5 8080" << std::endl;
-    std::cout << "  " << progName << " 192.168.1.100 list" << std::endl;
+    std::cout << "Typical subscriber setup:" << std::endl;
+    std::cout << "  sudo " << progName << " <feeder_ip> add <my_ip> <my_port>" << std::endl;
+    std::cout << "  sudo " << progName << " <feeder_ip> mcast 224.0.31.50" << std::endl;
+    std::cout << "  sudo " << progName << " <feeder_ip> mcast 224.0.31.51    # second group" << std::endl;
+    std::cout << std::endl;
+    std::cout << "Notes:" << std::endl;
+    std::cout << "  mcast/mcast-leave require CAP_NET_RAW (run with sudo)." << std::endl;
+    std::cout << "  The IGMPv2 report is sent unicast to <feeder_ip>, so it works" << std::endl;
+    std::cout << "  across VPC peering and GRE tunnels without multicast routing." << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -247,6 +297,32 @@ int main(int argc, char* argv[]) {
 
         } else if (command == "list") {
             if (!client.listDestinations()) {
+                return 1;
+            }
+
+        } else if (command == "mcast") {
+            if (argc < 4) {
+                std::cerr << "Error: 'mcast' requires <group>" << std::endl;
+                printUsage(argv[0]);
+                return 1;
+            }
+            std::string group = argv[3];
+            std::cout << "Joining multicast group " << group
+                      << " via feeder " << server_ip << std::endl;
+            if (!client.joinGroup(group)) {
+                return 1;
+            }
+
+        } else if (command == "mcast-leave") {
+            if (argc < 4) {
+                std::cerr << "Error: 'mcast-leave' requires <group>" << std::endl;
+                printUsage(argv[0]);
+                return 1;
+            }
+            std::string group = argv[3];
+            std::cout << "Leaving multicast group " << group
+                      << " via feeder " << server_ip << std::endl;
+            if (!client.leaveGroup(group)) {
                 return 1;
             }
 
