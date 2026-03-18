@@ -241,6 +241,12 @@ sudo ./setup_ena_bypass.sh     # Bind secondary ENI to DPDK
 - `uio_pci_generic`: no MSI-X → ENA admin command timeouts
 - `igb_uio` with `wc_activate=1`: supports MSI-X + write-combine → works
 
+Verify write-combine is active after loading igb_uio:
+```bash
+dmesg | grep igb_uio
+# Should show: igb_uio: wc_activate is set
+```
+
 Must also pass `llq_policy=1` devarg (defaults to 0 due to zero-init):
 ```
 --allow=0000:28:00.0,llq_policy=1

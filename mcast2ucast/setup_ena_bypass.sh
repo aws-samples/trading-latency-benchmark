@@ -36,6 +36,14 @@ else
 fi
 echo "  [+] igb_uio loaded (wc_activate=1)"
 
+# Verify write-combine is active (required for ENA LLQ)
+if dmesg | tail -20 | grep -q "wc_activate is set"; then
+    echo "  [+] Verified: write-combine active (dmesg: 'igb_uio: wc_activate is set')"
+else
+    echo "  [!] WARNING: 'igb_uio: wc_activate is set' not found in dmesg"
+    echo "      ENA LLQ may not work. Check: dmesg | grep igb_uio"
+fi
+
 # --- 2. Ensure hugepages are allocated ---
 CURRENT_HP=$(cat /proc/sys/vm/nr_hugepages)
 if [ "$CURRENT_HP" -lt 256 ]; then
