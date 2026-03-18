@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mcast2ucast Live Demo</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --orange: #d29922;
+    --purple: #bc8cff;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 20px;
+  }
+
+  header {
+    text-align: center;
+    margin-bottom: 24px;
+  }
+
+  header h1 {
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.5px;
+  }
+
+  header h1 span { color: var(--accent); }
+
+  .subtitle {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-top: 4px;
+  }
+
+  .flow-diagram {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin: 16px 0;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  .flow-diagram .node {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 12px;
+  }
+
+  .flow-diagram .node.pub { border-color: var(--accent); color: var(--accent); }
+  .flow-diagram .node.sub { border-color: var(--green); color: var(--green); }
+  .flow-diagram .arrow { color: var(--orange); font-size: 16px; }
+
+  .config-bar {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+
+  .config-bar label {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .config-bar input {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    width: 170px;
+  }
+
+  .config-bar input:focus { outline: none; border-color: var(--accent); }
+
+  .config-bar button {
+    background: var(--accent);
+    color: var(--bg);
+    border: none;
+    padding: 6px 16px;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .config-bar button:hover { opacity: 0.9; }
+
+  .panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    min-height: 500px;
+    overflow: hidden;
+  }
+
+  .panel-header {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .panel-header .title {
+    font-size: 14px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .panel-header .role {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 600;
+  }
+
+  .panel.publisher .role { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .panel.subscriber .role { background: rgba(63,185,80,0.15); color: var(--green); }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+    display: inline-block;
+  }
+
+  .status-dot.connected { background: var(--green); }
+  .status-dot.connecting { background: var(--orange); animation: pulse 1s infinite; }
+
+  @keyframes pulse { 50% { opacity: 0.4; } }
+
+  .panel-stats {
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex;
+    gap: 16px;
+  }
+
+  .panel-stats .stat-val { color: var(--text); font-weight: 600; }
+
+  .send-bar {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 8px;
+  }
+
+  .send-bar input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    padding: 8px 12px;
+    border-radius: 6px;
+  }
+
+  .send-bar input:focus { outline: none; border-color: var(--accent); }
+
+  .send-bar button {
+    background: var(--accent);
+    color: var(--bg);
+    border: none;
+    padding: 8px 20px;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .send-bar button:hover { opacity: 0.9; }
+  .send-bar button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0;
+  }
+
+  .messages::-webkit-scrollbar { width: 6px; }
+  .messages::-webkit-scrollbar-track { background: transparent; }
+  .messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .msg {
+    padding: 6px 16px;
+    font-size: 13px;
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    animation: fadeIn 0.3s ease;
+  }
+
+  .msg:hover { background: rgba(255,255,255,0.03); }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .msg .msg-time {
+    color: var(--text-dim);
+    font-size: 11px;
+    flex-shrink: 0;
+    min-width: 60px;
+  }
+
+  .msg .msg-id {
+    color: var(--purple);
+    font-size: 11px;
+    flex-shrink: 0;
+    min-width: 30px;
+  }
+
+  .msg .msg-text { word-break: break-word; }
+
+  .msg .msg-from {
+    color: var(--text-dim);
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+
+  .empty-state {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 13px;
+    padding: 40px;
+    text-align: center;
+    line-height: 1.6;
+  }
+
+  .quick-msgs {
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .quick-msgs button {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-family: inherit;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .quick-msgs button:hover { border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span>mcast2ucast</span> Live Demo</h1>
+  <p class="subtitle">Multicast-to-unicast conversion over AWS VPC with DPDK kernel bypass</p>
+  <div class="flow-diagram">
+    <div class="node pub">Publisher</div>
+    <div class="arrow">--multicast--></div>
+    <div class="node">mcast0 TAP</div>
+    <div class="arrow">--DPDK--></div>
+    <div class="node">ENA (igb_uio)</div>
+    <div class="arrow">--unicast wire--></div>
+    <div class="node">ENA</div>
+    <div class="arrow">--DPDK--></div>
+    <div class="node">mcast0 TAP</div>
+    <div class="arrow">--multicast--></div>
+    <div class="node sub">Subscribers</div>
+  </div>
+</header>
+
+<div class="config-bar" id="configBar">
+  <label>Publisher:</label>
+  <input type="text" id="pubAddr" placeholder="localhost:8881">
+  <label>Subscriber 1:</label>
+  <input type="text" id="sub1Addr" placeholder="localhost:8882">
+  <label>Subscriber 2:</label>
+  <input type="text" id="sub2Addr" placeholder="localhost:8883">
+  <button onclick="connectAll()">Connect</button>
+</div>
+
+<div class="panels">
+  <!-- Publisher -->
+  <div class="panel publisher" id="panelPub">
+    <div class="panel-header">
+      <div class="title">
+        <span class="status-dot" id="pubDot"></span>
+        Publisher
+        <span class="role">TX</span>
+      </div>
+      <span id="pubIpLabel" style="font-size:11px;color:var(--text-dim)"></span>
+    </div>
+    <div class="panel-stats">
+      <span>Sent: <span class="stat-val" id="pubSent">0</span></span>
+      <span>Group: <span class="stat-val">224.0.0.101:5001</span></span>
+    </div>
+    <div class="send-bar">
+      <input type="text" id="msgInput" placeholder="Type a message..." disabled
+             onkeydown="if(event.key==='Enter')sendMsg()">
+      <button id="sendBtn" onclick="sendMsg()" disabled>Send</button>
+    </div>
+    <div class="quick-msgs">
+      <button onclick="sendQuick('Hello from mcast2ucast!')">Hello</button>
+      <button onclick="sendQuick('Market data: AAPL 185.42')">Market data</button>
+      <button onclick="sendQuick('Order: BUY 100 AMZN @ 178.50')">Order</button>
+      <button onclick="sendQuick('Heartbeat ' + Date.now())">Heartbeat</button>
+      <button onclick="sendBurst(10)">Burst x10</button>
+    </div>
+    <div class="messages" id="pubMessages"></div>
+    <div class="empty-state" id="pubEmpty">
+      Connect to publisher to start sending<br>multicast messages
+    </div>
+  </div>
+
+  <!-- Subscriber 1 -->
+  <div class="panel subscriber" id="panelSub1">
+    <div class="panel-header">
+      <div class="title">
+        <span class="status-dot" id="sub1Dot"></span>
+        Subscriber 1
+        <span class="role">RX</span>
+      </div>
+      <span id="sub1IpLabel" style="font-size:11px;color:var(--text-dim)"></span>
+    </div>
+    <div class="panel-stats">
+      <span>Received: <span class="stat-val" id="sub1Recv">0</span></span>
+      <span>Group: <span class="stat-val">224.0.0.101:5001</span></span>
+    </div>
+    <div class="messages" id="sub1Messages"></div>
+    <div class="empty-state" id="sub1Empty">
+      Connect to subscriber 1 to see<br>received multicast messages
+    </div>
+  </div>
+
+  <!-- Subscriber 2 -->
+  <div class="panel subscriber" id="panelSub2">
+    <div class="panel-header">
+      <div class="title">
+        <span class="status-dot" id="sub2Dot"></span>
+        Subscriber 2
+        <span class="role">RX</span>
+      </div>
+      <span id="sub2IpLabel" style="font-size:11px;color:var(--text-dim)"></span>
+    </div>
+    <div class="panel-stats">
+      <span>Received: <span class="stat-val" id="sub2Recv">0</span></span>
+      <span>Group: <span class="stat-val">224.0.0.101:5001</span></span>
+    </div>
+    <div class="messages" id="sub2Messages"></div>
+    <div class="empty-state" id="sub2Empty">
+      Connect to subscriber 2 to see<br>received multicast messages
+    </div>
+  </div>
+</div>
+
+<script>
+let pubUrl = '', sub1Url = '', sub2Url = '';
+let pubEs = null, sub1Es = null, sub2Es = null;
+let pubCount = 0, sub1Count = 0, sub2Count = 0;
+
+// Load saved config from URL params
+const params = new URLSearchParams(window.location.search);
+if (params.get('pub'))  document.getElementById('pubAddr').value  = params.get('pub');
+if (params.get('sub1')) document.getElementById('sub1Addr').value = params.get('sub1');
+if (params.get('sub2')) document.getElementById('sub2Addr').value = params.get('sub2');
+
+function connectAll() {
+  const pub  = document.getElementById('pubAddr').value.trim();
+  const s1   = document.getElementById('sub1Addr').value.trim();
+  const s2   = document.getElementById('sub2Addr').value.trim();
+
+  // Save to URL for easy sharing
+  const u = new URL(window.location);
+  if (pub) u.searchParams.set('pub', pub);
+  if (s1)  u.searchParams.set('sub1', s1);
+  if (s2)  u.searchParams.set('sub2', s2);
+  history.replaceState(null, '', u);
+
+  if (pub)  { pubUrl  = `http://${pub}`;  connectSSE('pub', pubUrl); }
+  if (s1)   { sub1Url = `http://${s1}`;   connectSSE('sub1', sub1Url); }
+  if (s2)   { sub2Url = `http://${s2}`;   connectSSE('sub2', sub2Url); }
+}
+
+function connectSSE(id, baseUrl) {
+  const dot = document.getElementById(id + 'Dot');
+  const label = document.getElementById(id + 'IpLabel');
+  const msgDiv = document.getElementById(id + 'Messages');
+  const emptyDiv = document.getElementById(id + 'Empty');
+
+  // Close existing
+  if (id === 'pub' && pubEs) pubEs.close();
+  if (id === 'sub1' && sub1Es) sub1Es.close();
+  if (id === 'sub2' && sub2Es) sub2Es.close();
+
+  dot.className = 'status-dot connecting';
+  label.textContent = baseUrl.replace('http://', '');
+  msgDiv.innerHTML = '';
+  emptyDiv.style.display = 'none';
+
+  const es = new EventSource(baseUrl + '/api/messages');
+
+  es.onopen = () => {
+    dot.className = 'status-dot connected';
+    if (id === 'pub') {
+      document.getElementById('msgInput').disabled = false;
+      document.getElementById('sendBtn').disabled = false;
+    }
+  };
+
+  es.onerror = () => {
+    dot.className = 'status-dot';
+    if (id === 'pub') {
+      document.getElementById('msgInput').disabled = true;
+      document.getElementById('sendBtn').disabled = true;
+    }
+    // Auto-reconnect is built into EventSource
+  };
+
+  es.addEventListener('message', (e) => {
+    const msg = JSON.parse(e.data);
+    addMessage(id, msg);
+  });
+
+  es.addEventListener('sync', () => {
+    // Initial sync complete
+  });
+
+  if (id === 'pub')  pubEs  = es;
+  if (id === 'sub1') sub1Es = es;
+  if (id === 'sub2') sub2Es = es;
+}
+
+function addMessage(panelId, msg) {
+  const msgDiv = document.getElementById(panelId + 'Messages');
+  const el = document.createElement('div');
+  el.className = 'msg';
+
+  let fromHtml = '';
+  if (msg.from) {
+    fromHtml = `<span class="msg-from">${msg.from}</span>`;
+  }
+
+  el.innerHTML = `
+    <span class="msg-time">${msg.time_str || ''}</span>
+    <span class="msg-id">#${msg.id}</span>
+    ${fromHtml}
+    <span class="msg-text">${escapeHtml(msg.text)}</span>
+  `;
+  msgDiv.appendChild(el);
+  msgDiv.scrollTop = msgDiv.scrollHeight;
+
+  // Update counter
+  if (panelId === 'pub')  document.getElementById('pubSent').textContent = ++pubCount;
+  if (panelId === 'sub1') document.getElementById('sub1Recv').textContent = ++sub1Count;
+  if (panelId === 'sub2') document.getElementById('sub2Recv').textContent = ++sub2Count;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+async function sendMsg() {
+  const input = document.getElementById('msgInput');
+  const text = input.value.trim();
+  if (!text || !pubUrl) return;
+  input.value = '';
+
+  try {
+    await fetch(pubUrl + '/api/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    });
+  } catch (e) {
+    console.error('Send failed:', e);
+  }
+}
+
+function sendQuick(text) {
+  if (!pubUrl) return;
+  fetch(pubUrl + '/api/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: text }),
+  }).catch(console.error);
+}
+
+async function sendBurst(n) {
+  if (!pubUrl) return;
+  for (let i = 1; i <= n; i++) {
+    fetch(pubUrl + '/api/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: `Burst message ${i}/${n} @ ${new Date().toISOString()}` }),
+    }).catch(console.error);
+  }
+}
+
+// Auto-connect if params are set
+if (params.get('pub') || params.get('sub1') || params.get('sub2')) {
+  connectAll();
+}
+</script>
+</body>
+</html>
