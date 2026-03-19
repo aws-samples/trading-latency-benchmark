@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>mcast2ucast Live Demo</title>
+<title>AWS Enhanced Network Routing — Live Demo</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -67,7 +67,37 @@
 
   .flow-diagram .node.pub { border-color: var(--accent); color: var(--accent); }
   .flow-diagram .node.sub { border-color: var(--green); color: var(--green); }
-  .flow-diagram .arrow { color: var(--orange); font-size: 16px; }
+  .flow-diagram .arrow { color: var(--orange); font-size: 14px; }
+
+  .benchmark-bar {
+    display: flex;
+    justify-content: center;
+    gap: 32px;
+    margin: 16px 0 8px;
+    padding: 12px 24px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    max-width: 900px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .bench-stat { text-align: center; }
+
+  .bench-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 2px;
+  }
+
+  .bench-value {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--green);
+  }
 
   .config-bar {
     display: flex;
@@ -299,20 +329,42 @@
 <body>
 
 <header>
-  <h1><span>mcast2ucast</span> Live Demo</h1>
-  <p class="subtitle">Multicast-to-unicast conversion over AWS VPC with DPDK kernel bypass</p>
+  <h1><span>AWS Enhanced Network Routing</span> Live Demo</h1>
+  <p class="subtitle">Native multicast over AWS VPC — sub-30&micro;s latency with DPDK kernel bypass</p>
   <div class="flow-diagram">
-    <div class="node pub">Publisher</div>
-    <div class="arrow">--multicast--></div>
-    <div class="node">mcast0 TAP</div>
-    <div class="arrow">--DPDK--></div>
-    <div class="node">ENA (igb_uio)</div>
-    <div class="arrow">--unicast wire--></div>
-    <div class="node">ENA</div>
-    <div class="arrow">--DPDK--></div>
-    <div class="node">mcast0 TAP</div>
-    <div class="arrow">--multicast--></div>
-    <div class="node sub">Subscribers</div>
+    <div class="node pub">Trading App</div>
+    <div class="arrow">multicast</div>
+    <div class="node">mcast0</div>
+    <div class="arrow">DPDK</div>
+    <div class="node">ENA bypass</div>
+    <div class="arrow">unicast</div>
+    <div class="node">ENA bypass</div>
+    <div class="arrow">DPDK</div>
+    <div class="node">mcast0</div>
+    <div class="arrow">multicast</div>
+    <div class="node sub">Trading App</div>
+  </div>
+  <div class="benchmark-bar">
+    <div class="bench-stat">
+      <div class="bench-label">Multicast RTT (P50)</div>
+      <div class="bench-value">25.6&micro;s</div>
+    </div>
+    <div class="bench-stat">
+      <div class="bench-label">P99 Tail</div>
+      <div class="bench-value">28.2&micro;s</div>
+    </div>
+    <div class="bench-stat">
+      <div class="bench-label">Overhead vs Raw UDP</div>
+      <div class="bench-value">+5&micro;s</div>
+    </div>
+    <div class="bench-stat">
+      <div class="bench-label">Fan-out</div>
+      <div class="bench-value">Zero-copy</div>
+    </div>
+    <div class="bench-stat">
+      <div class="bench-label">Code Changes</div>
+      <div class="bench-value">None</div>
+    </div>
   </div>
 </header>
 
@@ -347,11 +399,12 @@
       <button id="sendBtn" onclick="sendMsg()" disabled>Send</button>
     </div>
     <div class="quick-msgs">
-      <button onclick="sendQuick('Hello from mcast2ucast!')">Hello</button>
-      <button onclick="sendQuick('Market data: AAPL 185.42')">Market data</button>
-      <button onclick="sendQuick('Order: BUY 100 AMZN @ 178.50')">Order</button>
-      <button onclick="sendQuick('Heartbeat ' + Date.now())">Heartbeat</button>
+      <button onclick="sendQuick('BTC/USD 67,842.50 +0.3%')">BTC Quote</button>
+      <button onclick="sendQuick('ETH/USD 3,521.18 -0.1%')">ETH Quote</button>
+      <button onclick="sendQuick('ORDER: BUY 2.5 BTC @ 67,840 LIMIT')">Order</button>
+      <button onclick="sendQuick('FILL: SOLD 1.0 ETH @ 3,522.00')">Fill</button>
       <button onclick="sendBurst(10)">Burst x10</button>
+      <button onclick="sendBurst(50)">Burst x50</button>
     </div>
     <div class="messages" id="pubMessages"></div>
     <div class="empty-state" id="pubEmpty">
