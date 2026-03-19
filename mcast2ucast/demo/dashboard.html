@@ -324,6 +324,115 @@
   }
 
   .quick-msgs button:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Code Demo / Terminal Section */
+  .code-demo {
+    max-width: 1400px;
+    margin: 24px auto 0;
+  }
+
+  .code-demo h2 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .code-demo h2 span { color: var(--accent); }
+
+  .step-btn {
+    background: var(--accent);
+    color: var(--bg);
+    border: none;
+    padding: 6px 18px;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .step-btn:hover { opacity: 0.9; }
+  .step-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  .step-label {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-weight: 400;
+  }
+
+  .terminals {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+  }
+
+  .terminal {
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    min-height: 320px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .terminal-bar {
+    background: #1a1a1a;
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid #333;
+  }
+
+  .terminal-bar .dots {
+    display: flex;
+    gap: 5px;
+  }
+
+  .terminal-bar .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .terminal-bar .dot.r { background: #ff5f57; }
+  .terminal-bar .dot.y { background: #febc2e; }
+  .terminal-bar .dot.g { background: #28c840; }
+
+  .terminal-bar .terminal-title {
+    font-size: 12px;
+    color: #888;
+    margin-left: 8px;
+  }
+
+  .terminal-body {
+    flex: 1;
+    padding: 12px 14px;
+    font-size: 12px;
+    line-height: 1.6;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    color: #e0e0e0;
+  }
+
+  .terminal-body .prompt { color: var(--green); }
+  .terminal-body .cmd { color: #fff; font-weight: 600; }
+  .terminal-body .output { color: #aaa; }
+  .terminal-body .highlight { color: var(--accent); font-weight: 600; }
+  .terminal-body .comment { color: #666; }
+  .terminal-body .keyword { color: var(--purple); }
+  .terminal-body .string { color: var(--green); }
+  .terminal-body .mcast-hl { color: var(--orange); font-weight: 600; }
+  .terminal-body .recv-msg { color: var(--green); }
+  .terminal-body .cursor-blink {
+    display: inline-block;
+    width: 8px;
+    height: 14px;
+    background: var(--green);
+    animation: blink 1s step-end infinite;
+    vertical-align: text-bottom;
+  }
+
+  @keyframes blink { 50% { opacity: 0; } }
 </style>
 </head>
 <body>
@@ -363,7 +472,7 @@
     </div>
     <div class="bench-stat">
       <div class="bench-label">Code Changes</div>
-      <div class="bench-value">None</div>
+      <div class="bench-value" style="cursor:pointer" onclick="document.getElementById('codeDemo').scrollIntoView({behavior:'smooth'})">None &darr;</div>
     </div>
   </div>
 </header>
@@ -602,6 +711,186 @@ async function sendBurst(n) {
 if (params.get('pub') || params.get('sub1') || params.get('sub2')) {
   connectAll();
 }
+
+// ============================================================
+// Code Demo — Interactive Terminal Walkthrough
+// ============================================================
+let codeStep = 0;
+const maxSteps = 4;
+
+function nextCodeStep() {
+  codeStep++;
+  if (codeStep > maxSteps) return;
+
+  const btn = document.getElementById('stepBtn');
+  const label = document.getElementById('stepLabel');
+
+  if (codeStep === 1) {
+    // Step 1: Show interfaces on all terminals
+    label.textContent = 'Step 2: Subscribe to multicast on mcast0';
+    setTerminal('termPub', step1_pub());
+    setTerminal('termSub1', step1_sub('Subscriber 1'));
+    setTerminal('termSub2', step1_sub('Subscriber 2'));
+  } else if (codeStep === 2) {
+    // Step 2: Show subscriber Python code binding to mcast0
+    label.textContent = 'Step 3: Send multicast from publisher';
+    setTerminal('termSub1', step2_sub('Subscriber 1'));
+    setTerminal('termSub2', step2_sub('Subscriber 2'));
+  } else if (codeStep === 3) {
+    // Step 3: Publisher sends
+    label.textContent = 'Step 4: Messages arrive at subscribers';
+    setTerminal('termPub', step3_pub());
+  } else if (codeStep === 4) {
+    // Step 4: Subscribers receive
+    label.textContent = 'Done — zero code changes!';
+    btn.disabled = true;
+    setTerminal('termSub1', step4_sub('10.100.0.102'));
+    setTerminal('termSub2', step4_sub('10.100.0.102'));
+    // Also send real messages via the API for the live panels
+    if (pubUrl) {
+      sendQuick('BTC/USD 67,842.50 +0.3%');
+      setTimeout(() => sendQuick('ETH/USD 3,521.18 -0.1%'), 300);
+      setTimeout(() => sendQuick('ORDER: BUY 2.5 BTC @ 67,840 LIMIT'), 600);
+    }
+  }
+}
+
+function setTerminal(id, html) {
+  const body = document.getElementById(id);
+  body.innerHTML = html;
+  body.scrollTop = body.scrollHeight;
+}
+
+function step1_pub() {
+  return `<span class="prompt">publisher $</span> <span class="cmd">ip link show</span>
+<span class="output">1: lo: &lt;LOOPBACK,UP&gt; mtu 65536
+2: ens67: &lt;BROADCAST,MULTICAST,UP&gt; mtu 9001
+</span><span class="mcast-hl">5: mcast0: &lt;BROADCAST,MULTICAST,UP&gt; mtu 1500</span>
+<span class="output">    link/ether da:27:4a:92:e1:4e</span>
+
+<span class="prompt">publisher $</span> <span class="cmd">ip addr show mcast0</span>
+<span class="mcast-hl">    inet 10.100.0.136/24</span><span class="output"> scope global mcast0</span>
+
+<span class="prompt">publisher $</span> <span class="cmd">ip route show | grep mcast</span>
+<span class="mcast-hl">224.0.0.0/4 dev mcast0</span><span class="output"> scope link</span>
+
+<span class="comment"># mcast0 is a regular interface — apps use it like any NIC</span>
+<span class="prompt">publisher $</span> <span class="cursor-blink"></span>`;
+}
+
+function step1_sub(name) {
+  return `<span class="prompt">${name.toLowerCase().replace(' ','')} $</span> <span class="cmd">ip link show</span>
+<span class="output">1: lo: &lt;LOOPBACK,UP&gt; mtu 65536
+2: ens67: &lt;BROADCAST,MULTICAST,UP&gt; mtu 9001
+</span><span class="mcast-hl">5: mcast0: &lt;BROADCAST,MULTICAST,UP&gt; mtu 1500</span>
+
+<span class="prompt">${name.toLowerCase().replace(' ','')} $</span> <span class="cmd">ip route show | grep 224</span>
+<span class="mcast-hl">224.0.0.0/4 dev mcast0</span><span class="output"> scope link</span>
+
+<span class="comment"># mcast0 available — standard multicast interface</span>
+<span class="prompt">${name.toLowerCase().replace(' ','')} $</span> <span class="cursor-blink"></span>`;
+}
+
+function step2_sub(name) {
+  const host = name.toLowerCase().replace(' ','');
+  return `<span class="prompt">${host} $</span> <span class="cmd">python3 recv_mcast.py</span>
+
+<span class="comment"># Standard Python multicast — no special SDK, no AWS changes</span>
+<span class="keyword">import</span> socket, struct
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, <span class="string">1</span>)
+sock.setsockopt(socket.SOL_SOCKET, <span class="string">25</span>, <span class="string">b"mcast0\\0"</span>)  <span class="comment"># bind to mcast0</span>
+sock.bind((<span class="string">""</span>, <span class="string">5001</span>))
+
+<span class="comment"># Join multicast group — identical to on-premises code</span>
+mreq = struct.pack(<span class="string">"4s4s"</span>,
+    socket.inet_aton(<span class="mcast-hl">"224.0.0.101"</span>),
+    socket.inet_aton(<span class="string">"0.0.0.0"</span>))
+sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+<span class="keyword">print</span>(<span class="string">"Listening on 224.0.0.101:5001..."</span>)
+<span class="keyword">while</span> <span class="string">True</span>:
+    data, addr = sock.recvfrom(<span class="string">4096</span>)
+    <span class="keyword">print</span>(<span class="string">f"From {addr}: {data.decode()}"</span>)
+
+<span class="output">Listening on 224.0.0.101:5001...</span>
+<span class="cursor-blink"></span>`;
+}
+
+function step3_pub() {
+  return `<span class="prompt">publisher $</span> <span class="cmd">python3 send_mcast.py</span>
+
+<span class="comment"># Standard Python multicast sender — no changes needed</span>
+<span class="keyword">import</span> socket
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, <span class="string">32</span>)
+sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+    socket.inet_aton(<span class="mcast-hl">"10.100.0.136"</span>))  <span class="comment"># mcast0 IP</span>
+
+<span class="comment"># Send to multicast group — app has no idea it goes over unicast</span>
+sock.sendto(<span class="string">b"BTC/USD 67,842.50 +0.3%"</span>, (<span class="mcast-hl">"224.0.0.101"</span>, <span class="string">5001</span>))
+sock.sendto(<span class="string">b"ETH/USD 3,521.18 -0.1%"</span>, (<span class="mcast-hl">"224.0.0.101"</span>, <span class="string">5001</span>))
+sock.sendto(<span class="string">b"ORDER: BUY 2.5 BTC @ 67,840"</span>, (<span class="mcast-hl">"224.0.0.101"</span>, <span class="string">5001</span>))
+
+<span class="output">Sent: BTC/USD 67,842.50 +0.3%</span>
+<span class="output">Sent: ETH/USD 3,521.18 -0.1%</span>
+<span class="output">Sent: ORDER: BUY 2.5 BTC @ 67,840</span>
+<span class="prompt">publisher $</span> <span class="cursor-blink"></span>`;
+}
+
+function step4_sub(pubIp) {
+  return `<span class="output">Listening on 224.0.0.101:5001...</span>
+<span class="recv-msg">From ('${pubIp}', 52841): BTC/USD 67,842.50 +0.3%</span>
+<span class="recv-msg">From ('${pubIp}', 52841): ETH/USD 3,521.18 -0.1%</span>
+<span class="recv-msg">From ('${pubIp}', 52841): ORDER: BUY 2.5 BTC @ 67,840</span>
+<span class="cursor-blink"></span>
+
+<span class="comment"># Messages arrived via:</span>
+<span class="comment">#   app → mcast0 → DPDK → ENA bypass → wire (unicast)</span>
+<span class="comment">#     → ENA → DPDK → mcast0 → app receives multicast</span>
+<span class="comment">#</span>
+<span class="comment"># The app never knew. Zero code changes.</span>`;
+}
 </script>
+
+<div class="code-demo" id="codeDemo">
+  <h2>
+    <span>Zero Code Changes</span> — Standard Multicast Just Works
+    <button class="step-btn" id="stepBtn" onclick="nextCodeStep()">Next Step</button>
+    <span class="step-label" id="stepLabel">Step 1: Show network interfaces</span>
+  </h2>
+  <div class="terminals">
+    <div class="terminal">
+      <div class="terminal-bar">
+        <div class="dots"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
+        <span class="terminal-title">publisher — ec2-user@ip-10-100-0-102</span>
+      </div>
+      <div class="terminal-body" id="termPub">
+<span class="prompt">publisher $</span> <span class="cursor-blink"></span>
+      </div>
+    </div>
+    <div class="terminal">
+      <div class="terminal-bar">
+        <div class="dots"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
+        <span class="terminal-title">subscriber1 — ec2-user@ip-10-100-0-213</span>
+      </div>
+      <div class="terminal-body" id="termSub1">
+<span class="prompt">subscriber1 $</span> <span class="cursor-blink"></span>
+      </div>
+    </div>
+    <div class="terminal">
+      <div class="terminal-bar">
+        <div class="dots"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
+        <span class="terminal-title">subscriber2 — ec2-user@ip-10-100-0-151</span>
+      </div>
+      <div class="terminal-body" id="termSub2">
+<span class="prompt">subscriber2 $</span> <span class="cursor-blink"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
