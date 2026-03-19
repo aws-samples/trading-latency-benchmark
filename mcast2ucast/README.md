@@ -158,6 +158,55 @@ The control protocol uses a 16-byte `notify_msg` over unicast UDP:
 | subscriber_ip | 4B | Subscriber's unicast IP (NBO) |
 | source_ip | 4B | Source filter IP (0 = ASM, any source) |
 
+### IGMP Snooping
+
+The data plane intercepts IGMP packets (IP protocol 2) at line speed and punts them to the control plane via a lockless `rte_ring`. The NIC runs in promiscuous mode — multicast classification is done at the IP level (`dst >> 28 == 0xE`) since AWS VPC rewrites multicast Ethernet dst MACs to the ENI's unicast MAC.
+
+The control plane dispatches by IGMP type:
+
+| IGMP Type | Value | Action |
+|-----------|-------|--------|
+| V1 Membership Report | `0x12` | Join — add subscriber |
+| V2 Membership Report | `0x16` | Join — add subscriber |
+| V2 Leave Group | `0x17` | Leave — remove subscriber |
+| V3 Membership Report | `0x22` | Parse group records (see below) |
+| Membership Query | `0x11` | Logged, ignored |
+
+IGMPv3 group records are parsed per-record:
+- `MODE_IS_EXCLUDE` / `CHANGE_TO_EXCLUDE` → join (subscriber wants all sources)
+- `MODE_IS_INCLUDE` with 0 sources / `CHANGE_TO_INCLUDE` with 0 sources → leave
+- `MODE_IS_INCLUDE` with sources / `ALLOW_NEW_SOURCES` → join
+
+The source IP from the IPv4 header identifies the subscriber's unicast address.
+
+### Group Table
+
+An `rte_hash` (CRC, lock-free concurrent reads) keyed by multicast group IP in network byte order. Each entry holds a `subscriber_list` with up to 128 subscribers per group (max 1024 groups).
+
+Each subscriber entry tracks:
+
+| Field | Description |
+|-------|-------------|
+| `unicast_ip` | Where to deliver (network byte order) |
+| `unicast_port` | UDP dst port for delivery |
+| `dst_mac` | Ethernet destination MAC for the unicast packet |
+| `tx_port` | Which DPDK port to egress on |
+| `is_static` | 1 = from config file, never expires |
+| `is_local` | 1 = local IGMP join (TAP delivery, not UDP) |
+| `last_seen` | Keepalive timestamp; 0 = static entry |
+
+**Subscriber sources** — three ways entries are added:
+
+1. **Static config**: `subscriber` lines in the config file. `is_static=1`, never expires.
+2. **Local IGMP**: app on the same host joins a group via mcast0 TAP. `is_local=1`, delivered back to TAP.
+3. **Remote control message**: another mcast2ucast instance sends a UDP `SUBSCRIBE` notification. `is_local=0`, delivered as unicast over the wire.
+
+**Write path**: mutations use a `pthread_mutex`. A new `subscriber_list` is allocated, the old list is copied with the change applied, the hash pointer is atomically swapped via `rte_hash_add_key_data()`, then after a 1ms quiesce the old list is freed. This is a simplified copy-on-write/RCU pattern — safe because IGMP events are rare.
+
+**Read path**: `group_table_lookup()` is a plain `rte_hash_lookup_data()` with no locking. The hash is configured with `RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY_LF` for lock-free concurrent access from the data plane.
+
+**Expiry**: the control loop runs `group_table_expire_subscribers(90)` every 30 seconds. Dynamic subscribers not refreshed within 90 seconds are removed. Static entries never expire.
+
 ## Zero-Copy Strategy
 
 Adapted from DPDK's `examples/ipv4_multicast`:
