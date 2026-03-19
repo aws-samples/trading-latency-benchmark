@@ -4,8 +4,8 @@ mcast2ucast demo server — lightweight HTTP + multicast bridge.
 Zero dependencies (stdlib only). Runs on each EC2 instance.
 
 Usage:
-  Publisher:    python3 server.py --mode publisher --mcast-iface 10.100.0.182
-  Subscriber:   python3 server.py --mode subscriber --mcast-iface 10.100.0.243
+  Publisher:    python3 server.py --mode publisher --mcast-iface <mcast0-ip>
+  Subscriber:   python3 server.py --mode subscriber --mcast-iface <mcast0-ip>
 
 Opens port 8888 for the dashboard to connect to.
 """
@@ -46,13 +46,21 @@ def broadcast_sse(event_type, data):
 
 
 def multicast_listener(mcast_iface_ip):
-    """Listen for multicast on mcast0 and record received messages."""
+    """Listen for multicast on mcast0 and record received messages with latency."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.setsockopt(socket.SOL_SOCKET, 25, b"mcast0\0")  # SO_BINDTODEVICE
     except Exception:
         pass
+
+    # Enable kernel-level nanosecond receive timestamps (SO_TIMESTAMPNS = 35)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, 35, 1)
+        print("[subscriber] SO_TIMESTAMPNS enabled — using kernel receive timestamps")
+    except Exception:
+        print("[subscriber] SO_TIMESTAMPNS not available — using userspace timestamps")
+
     sock.bind(("", MCAST_PORT))
     mreq = struct.pack("4s4s",
                         socket.inet_aton(MCAST_GROUP),
@@ -62,8 +70,30 @@ def multicast_listener(mcast_iface_ip):
 
     while True:
         try:
-            data, addr = sock.recvfrom(4096)
-            text = data.decode("utf-8", errors="replace")
+            # Use recvmsg to get kernel timestamp from ancillary data
+            data, ancdata, flags, addr = sock.recvmsg(4096, 1024)
+            recv_ts_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)  # fallback
+
+            # Parse kernel timestamp from ancillary data (SCM_TIMESTAMPNS)
+            # Level=SOL_SOCKET(1), Type=SCM_TIMESTAMPNS(35), Data=timespec(sec,nsec)
+            for cmsg_level, cmsg_type, cmsg_data in ancdata:
+                if cmsg_level == socket.SOL_SOCKET and cmsg_type == 35:
+                    sec, nsec = struct.unpack("ll", cmsg_data[:struct.calcsize("ll")])
+                    recv_ts_ns = sec * 1_000_000_000 + nsec
+                    break
+
+            raw = data.decode("utf-8", errors="replace")
+
+            # Parse embedded send timestamp: "TS:<nanoseconds>|<text>"
+            latency_us = None
+            if raw.startswith("TS:"):
+                pipe_idx = raw.index("|")
+                send_ts_ns = int(raw[3:pipe_idx])
+                text = raw[pipe_idx + 1:]
+                latency_us = round((recv_ts_ns - send_ts_ns) / 1000, 1)
+            else:
+                text = raw
+
             stats["received"] += 1
             msg = {
                 "id": stats["received"],
@@ -72,20 +102,26 @@ def multicast_listener(mcast_iface_ip):
                 "time": time.time(),
                 "time_str": time.strftime("%H:%M:%S"),
             }
+            if latency_us is not None:
+                msg["latency_us"] = latency_us
             messages.append(msg)
             broadcast_sse("message", msg)
-            print(f"[recv] #{stats['received']} from {addr[0]}: {text}")
+            lat_str = f" [{latency_us}µs]" if latency_us is not None else ""
+            print(f"[recv] #{stats['received']} from {addr[0]}: {text}{lat_str}")
         except Exception as e:
             print(f"[subscriber] Error: {e}")
 
 
 def send_multicast(text, mcast_iface_ip):
-    """Send a multicast message via mcast0."""
+    """Send a multicast message via mcast0 with embedded nanosecond timestamp."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 32)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
                     socket.inet_aton(mcast_iface_ip))
-    sock.sendto(text.encode("utf-8"), (MCAST_GROUP, MCAST_PORT))
+    # Embed send timestamp (nanoseconds) right before sendto for accuracy
+    send_ts = time.clock_gettime_ns(time.CLOCK_REALTIME)
+    payload = f"TS:{send_ts}|{text}".encode("utf-8")
+    sock.sendto(payload, (MCAST_GROUP, MCAST_PORT))
     sock.close()
     stats["sent"] += 1
     msg = {

@@ -71,18 +71,20 @@ Or fill in the connection fields manually and click **Connect**.
 
 ## Dashboard Features
 
-- **Publisher panel**: Text input, quick-send buttons (Hello, Market data, Order, Burst x10)
-- **Subscriber panels**: Messages appear in real-time via Server-Sent Events (SSE)
+- **Live latency stats**: Real-time per-message latency (one-way, using `SO_TIMESTAMPNS` kernel timestamps), avg, min/max
+- **Interactive terminal walkthrough**: Step through `ip link show`, Python listener/sender code, then send live messages
+- **Send buttons**: BTC Quote, ETH Quote, Order, Fill, Trade, Burst x10 — each generates Python `sendto()` code in the publisher terminal and shows received output with latency in subscriber terminals
+- **Real message delivery**: Every button click sends a real multicast message through the DPDK pipeline
 - **Connection indicators**: Green = connected, orange = connecting, red = disconnected
-- **Live counters**: Sent/received message counts update as messages flow
 - **URL persistence**: Connection settings are saved in the URL for easy bookmarking
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `server.py` | HTTP + multicast bridge, runs on each instance (zero dependencies) |
-| `dashboard.html` | Single-file browser dashboard (no build step, no dependencies) |
+| `server.py` | HTTP + multicast bridge with latency measurement, runs on each instance (zero dependencies) |
+| `dashboard.html` | Single-file browser dashboard with interactive terminal demo (no build step, no dependencies) |
+| `tunnels.sh` | Helper script to manage SSH tunnels (edit variables for your deployment) |
 
 ## Troubleshooting
 

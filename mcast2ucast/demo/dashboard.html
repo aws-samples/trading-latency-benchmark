@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AWS Enhanced Network Routing — Live Demo</title>
+<title>mcast2ucast — Live Demo</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -30,7 +30,7 @@
 
   header {
     text-align: center;
-    margin-bottom: 24px;
+    margin-bottom: 16px;
   }
 
   header h1 {
@@ -69,23 +69,22 @@
   .flow-diagram .node.sub { border-color: var(--green); color: var(--green); }
   .flow-diagram .arrow { color: var(--orange); font-size: 14px; }
 
-  .benchmark-bar {
+  /* Live latency stats bar */
+  .live-stats {
     display: flex;
     justify-content: center;
     gap: 32px;
-    margin: 16px 0 8px;
+    margin: 12px auto;
     padding: 12px 24px;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
-    max-width: 900px;
-    margin-left: auto;
-    margin-right: auto;
+    max-width: 1100px;
   }
 
-  .bench-stat { text-align: center; }
+  .live-stat { text-align: center; }
 
-  .bench-label {
+  .live-stat-label {
     font-size: 10px;
     color: var(--text-dim);
     text-transform: uppercase;
@@ -93,25 +92,27 @@
     margin-bottom: 2px;
   }
 
-  .bench-value {
-    font-size: 18px;
+  .live-stat-value {
+    font-size: 20px;
     font-weight: 700;
     color: var(--green);
+    transition: color 0.3s;
   }
 
+  .live-stat-value.warn { color: var(--orange); }
+  .live-stat-value.dim { color: var(--text-dim); font-size: 14px; }
+
+  /* Config bar */
   .config-bar {
     display: flex;
     gap: 12px;
     align-items: center;
     justify-content: center;
-    margin-bottom: 20px;
+    margin-bottom: 16px;
     flex-wrap: wrap;
   }
 
-  .config-bar label {
-    font-size: 12px;
-    color: var(--text-dim);
-  }
+  .config-bar label { font-size: 12px; color: var(--text-dim); }
 
   .config-bar input {
     background: var(--surface);
@@ -140,195 +141,19 @@
 
   .config-bar button:hover { opacity: 0.9; }
 
-  .panels {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 16px;
-    max-width: 1400px;
-    margin: 0 auto;
+  .config-bar .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--red); display: inline-block;
   }
-
-  .panel {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    display: flex;
-    flex-direction: column;
-    min-height: 500px;
-    overflow: hidden;
-  }
-
-  .panel-header {
-    padding: 14px 16px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-
-  .panel-header .title {
-    font-size: 14px;
-    font-weight: 600;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .panel-header .role {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-weight: 600;
-  }
-
-  .panel.publisher .role { background: rgba(88,166,255,0.15); color: var(--accent); }
-  .panel.subscriber .role { background: rgba(63,185,80,0.15); color: var(--green); }
-
-  .status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--red);
-    display: inline-block;
-  }
-
-  .status-dot.connected { background: var(--green); }
-  .status-dot.connecting { background: var(--orange); animation: pulse 1s infinite; }
+  .config-bar .status-dot.connected { background: var(--green); }
+  .config-bar .status-dot.connecting { background: var(--orange); animation: pulse 1s infinite; }
 
   @keyframes pulse { 50% { opacity: 0.4; } }
 
-  .panel-stats {
-    padding: 8px 16px;
-    border-bottom: 1px solid var(--border);
-    font-size: 11px;
-    color: var(--text-dim);
-    display: flex;
-    gap: 16px;
-  }
-
-  .panel-stats .stat-val { color: var(--text); font-weight: 600; }
-
-  .send-bar {
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    gap: 8px;
-  }
-
-  .send-bar input {
-    flex: 1;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    font-family: inherit;
-    font-size: 13px;
-    padding: 8px 12px;
-    border-radius: 6px;
-  }
-
-  .send-bar input:focus { outline: none; border-color: var(--accent); }
-
-  .send-bar button {
-    background: var(--accent);
-    color: var(--bg);
-    border: none;
-    padding: 8px 20px;
-    border-radius: 6px;
-    font-family: inherit;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .send-bar button:hover { opacity: 0.9; }
-  .send-bar button:disabled { opacity: 0.4; cursor: not-allowed; }
-
-  .messages {
-    flex: 1;
-    overflow-y: auto;
-    padding: 8px 0;
-  }
-
-  .messages::-webkit-scrollbar { width: 6px; }
-  .messages::-webkit-scrollbar-track { background: transparent; }
-  .messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-
-  .msg {
-    padding: 6px 16px;
-    font-size: 13px;
-    display: flex;
-    gap: 10px;
-    align-items: baseline;
-    animation: fadeIn 0.3s ease;
-  }
-
-  .msg:hover { background: rgba(255,255,255,0.03); }
-
-  @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(-4px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-
-  .msg .msg-time {
-    color: var(--text-dim);
-    font-size: 11px;
-    flex-shrink: 0;
-    min-width: 60px;
-  }
-
-  .msg .msg-id {
-    color: var(--purple);
-    font-size: 11px;
-    flex-shrink: 0;
-    min-width: 30px;
-  }
-
-  .msg .msg-text { word-break: break-word; }
-
-  .msg .msg-from {
-    color: var(--text-dim);
-    font-size: 11px;
-    flex-shrink: 0;
-  }
-
-  .empty-state {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-dim);
-    font-size: 13px;
-    padding: 40px;
-    text-align: center;
-    line-height: 1.6;
-  }
-
-  .quick-msgs {
-    padding: 8px 16px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-
-  .quick-msgs button {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    font-family: inherit;
-    font-size: 11px;
-    padding: 4px 10px;
-    border-radius: 4px;
-    cursor: pointer;
-  }
-
-  .quick-msgs button:hover { border-color: var(--accent); color: var(--accent); }
-
-  /* Code Demo / Terminal Section */
+  /* Code Demo */
   .code-demo {
     max-width: 1400px;
-    margin: 24px auto 0;
+    margin: 0 auto;
   }
 
   .code-demo h2 {
@@ -363,6 +188,44 @@
     font-weight: 400;
   }
 
+  /* Send buttons bar — above terminals */
+  .term-quick-btns {
+    display: none;
+    gap: 8px;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+    padding: 12px 24px;
+    background: var(--surface);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+  }
+
+  .term-quick-btns .tq-label {
+    font-size: 12px;
+    color: var(--text-dim);
+    align-self: center;
+  }
+
+  .term-quick-btns button {
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: all 0.15s;
+  }
+
+  .term-quick-btns button:hover {
+    background: var(--accent);
+    color: var(--bg);
+  }
+
+  /* Terminals */
   .terminals {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
@@ -374,7 +237,7 @@
     border: 1px solid var(--border);
     border-radius: 10px;
     overflow: hidden;
-    min-height: 320px;
+    height: 420px;
     display: flex;
     flex-direction: column;
   }
@@ -386,13 +249,10 @@
     align-items: center;
     gap: 8px;
     border-bottom: 1px solid #333;
+    flex-shrink: 0;
   }
 
-  .terminal-bar .dots {
-    display: flex;
-    gap: 5px;
-  }
-
+  .terminal-bar .dots { display: flex; gap: 5px; }
   .terminal-bar .dot { width: 10px; height: 10px; border-radius: 50%; }
   .terminal-bar .dot.r { background: #ff5f57; }
   .terminal-bar .dot.y { background: #febc2e; }
@@ -414,6 +274,10 @@
     color: #e0e0e0;
   }
 
+  .terminal-body::-webkit-scrollbar { width: 6px; }
+  .terminal-body::-webkit-scrollbar-track { background: transparent; }
+  .terminal-body::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+
   .terminal-body .prompt { color: var(--green); }
   .terminal-body .cmd { color: #fff; font-weight: 600; }
   .terminal-body .output { color: #aaa; }
@@ -423,6 +287,9 @@
   .terminal-body .string { color: var(--green); }
   .terminal-body .mcast-hl { color: var(--orange); font-weight: 600; }
   .terminal-body .recv-msg { color: var(--green); }
+  .terminal-body .latency { color: var(--orange); font-weight: 700; }
+  .terminal-body .latency-good { color: var(--green); font-weight: 700; }
+  .terminal-body .latency-pending { color: var(--text-dim); font-style: italic; font-size: 11px; }
   .terminal-body .cursor-blink {
     display: inline-block;
     width: 8px;
@@ -438,8 +305,8 @@
 <body>
 
 <header>
-  <h1><span>AWS Enhanced Network Routing</span> Live Demo</h1>
-  <p class="subtitle">Native multicast over AWS VPC — sub-30&micro;s latency with DPDK kernel bypass</p>
+  <h1><span>mcast2ucast</span> Live Demo</h1>
+  <p class="subtitle">Native multicast over AWS VPC &mdash; sub-30&micro;s latency with DPDK kernel bypass</p>
   <div class="flow-diagram">
     <div class="node pub">Trading App</div>
     <div class="arrow">multicast</div>
@@ -453,238 +320,207 @@
     <div class="arrow">multicast</div>
     <div class="node sub">Trading App</div>
   </div>
-  <div class="benchmark-bar">
-    <div class="bench-stat">
-      <div class="bench-label">Multicast RTT (P50)</div>
-      <div class="bench-value">25.6&micro;s</div>
-    </div>
-    <div class="bench-stat">
-      <div class="bench-label">P99 Tail</div>
-      <div class="bench-value">28.2&micro;s</div>
-    </div>
-    <div class="bench-stat">
-      <div class="bench-label">Overhead vs Raw UDP</div>
-      <div class="bench-value">+5&micro;s</div>
-    </div>
-    <div class="bench-stat">
-      <div class="bench-label">Fan-out</div>
-      <div class="bench-value">Zero-copy</div>
-    </div>
-    <div class="bench-stat">
-      <div class="bench-label">Code Changes</div>
-      <div class="bench-value" style="cursor:pointer" onclick="document.getElementById('codeDemo').scrollIntoView({behavior:'smooth'})">None &darr;</div>
-    </div>
-  </div>
 </header>
+
+<!-- Live latency stats — updates in real-time -->
+<div class="live-stats" id="liveStats">
+  <div class="live-stat">
+    <div class="live-stat-label">Last Latency (Sub 1)</div>
+    <div class="live-stat-value dim" id="latSub1">&mdash;</div>
+  </div>
+  <div class="live-stat">
+    <div class="live-stat-label">Last Latency (Sub 2)</div>
+    <div class="live-stat-value dim" id="latSub2">&mdash;</div>
+  </div>
+  <div class="live-stat">
+    <div class="live-stat-label">Avg Latency</div>
+    <div class="live-stat-value dim" id="latAvg">&mdash;</div>
+  </div>
+  <div class="live-stat">
+    <div class="live-stat-label">Min / Max</div>
+    <div class="live-stat-value dim" id="latMinMax">&mdash;</div>
+  </div>
+  <div class="live-stat">
+    <div class="live-stat-label">Messages</div>
+    <div class="live-stat-value dim" id="latCount">0</div>
+  </div>
+  <div class="live-stat">
+    <div class="live-stat-label">Code Changes</div>
+    <div class="live-stat-value" style="color:var(--green)">None</div>
+  </div>
+</div>
 
 <div class="config-bar" id="configBar">
   <label>Publisher:</label>
   <input type="text" id="pubAddr" placeholder="localhost:8881">
-  <label>Subscriber 1:</label>
+  <label>Sub 1:</label>
   <input type="text" id="sub1Addr" placeholder="localhost:8882">
-  <label>Subscriber 2:</label>
+  <label>Sub 2:</label>
   <input type="text" id="sub2Addr" placeholder="localhost:8883">
   <button onclick="connectAll()">Connect</button>
+  <span class="status-dot" id="connDot"></span>
 </div>
 
-<div class="panels">
-  <!-- Publisher -->
-  <div class="panel publisher" id="panelPub">
-    <div class="panel-header">
-      <div class="title">
-        <span class="status-dot" id="pubDot"></span>
-        Publisher
-        <span class="role">TX</span>
-      </div>
-      <span id="pubIpLabel" style="font-size:11px;color:var(--text-dim)"></span>
-    </div>
-    <div class="panel-stats">
-      <span>Sent: <span class="stat-val" id="pubSent">0</span></span>
-      <span>Group: <span class="stat-val">224.0.0.101:5001</span></span>
-    </div>
-    <div class="send-bar">
-      <input type="text" id="msgInput" placeholder="Type a message..." disabled
-             onkeydown="if(event.key==='Enter')sendMsg()">
-      <button id="sendBtn" onclick="sendMsg()" disabled>Send</button>
-    </div>
-    <div class="quick-msgs">
-      <button onclick="sendQuick('BTC/USD 67,842.50 +0.3%')">BTC Quote</button>
-      <button onclick="sendQuick('ETH/USD 3,521.18 -0.1%')">ETH Quote</button>
-      <button onclick="sendQuick('ORDER: BUY 2.5 BTC @ 67,840 LIMIT')">Order</button>
-      <button onclick="sendQuick('FILL: SOLD 1.0 ETH @ 3,522.00')">Fill</button>
-      <button onclick="sendBurst(10)">Burst x10</button>
-      <button onclick="sendBurst(50)">Burst x50</button>
-    </div>
-    <div class="messages" id="pubMessages"></div>
-    <div class="empty-state" id="pubEmpty">
-      Connect to publisher to start sending<br>multicast messages
-    </div>
+<div class="code-demo" id="codeDemo">
+  <h2>
+    <span>Zero Code Changes</span> &mdash; Standard Multicast Just Works
+    <button class="step-btn" id="stepBtn" onclick="nextCodeStep()">Next Step</button>
+    <span class="step-label" id="stepLabel">Step 1: Show network interfaces</span>
+  </h2>
+
+  <!-- Buttons ABOVE terminals -->
+  <div class="term-quick-btns" id="termQuickBtns">
+    <span class="tq-label">Send multicast &rarr;</span>
+    <button onclick="termSend('BTC/USD 67,842.50 +0.3%')">BTC Quote</button>
+    <button onclick="termSend('ETH/USD 3,521.18 -0.1%')">ETH Quote</button>
+    <button onclick="termSend('ORDER: BUY 2.5 BTC @ 67,840 LIMIT')">Order</button>
+    <button onclick="termSend('FILL: SOLD 1.0 ETH @ 3,522.00')">Fill</button>
+    <button onclick="termSend('TRADE: 0.5 BTC @ 67,841.25 ts=1710849600')">Trade</button>
+    <button onclick="termSendBurst(10)">Burst x10</button>
   </div>
 
-  <!-- Subscriber 1 -->
-  <div class="panel subscriber" id="panelSub1">
-    <div class="panel-header">
-      <div class="title">
-        <span class="status-dot" id="sub1Dot"></span>
-        Subscriber 1
-        <span class="role">RX</span>
+  <div class="terminals">
+    <div class="terminal">
+      <div class="terminal-bar">
+        <div class="dots"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
+        <span class="terminal-title">publisher &mdash; ec2-user@ip-10-0-1-10</span>
       </div>
-      <span id="sub1IpLabel" style="font-size:11px;color:var(--text-dim)"></span>
-    </div>
-    <div class="panel-stats">
-      <span>Received: <span class="stat-val" id="sub1Recv">0</span></span>
-      <span>Group: <span class="stat-val">224.0.0.101:5001</span></span>
-    </div>
-    <div class="messages" id="sub1Messages"></div>
-    <div class="empty-state" id="sub1Empty">
-      Connect to subscriber 1 to see<br>received multicast messages
-    </div>
-  </div>
-
-  <!-- Subscriber 2 -->
-  <div class="panel subscriber" id="panelSub2">
-    <div class="panel-header">
-      <div class="title">
-        <span class="status-dot" id="sub2Dot"></span>
-        Subscriber 2
-        <span class="role">RX</span>
+      <div class="terminal-body" id="termPub">
+<span class="prompt">publisher $</span> <span class="cursor-blink"></span>
       </div>
-      <span id="sub2IpLabel" style="font-size:11px;color:var(--text-dim)"></span>
     </div>
-    <div class="panel-stats">
-      <span>Received: <span class="stat-val" id="sub2Recv">0</span></span>
-      <span>Group: <span class="stat-val">224.0.0.101:5001</span></span>
+    <div class="terminal">
+      <div class="terminal-bar">
+        <div class="dots"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
+        <span class="terminal-title">subscriber1 &mdash; ec2-user@ip-10-0-1-20</span>
+      </div>
+      <div class="terminal-body" id="termSub1">
+<span class="prompt">subscriber1 $</span> <span class="cursor-blink"></span>
+      </div>
     </div>
-    <div class="messages" id="sub2Messages"></div>
-    <div class="empty-state" id="sub2Empty">
-      Connect to subscriber 2 to see<br>received multicast messages
+    <div class="terminal">
+      <div class="terminal-bar">
+        <div class="dots"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
+        <span class="terminal-title">subscriber2 &mdash; ec2-user@ip-10-0-1-30</span>
+      </div>
+      <div class="terminal-body" id="termSub2">
+<span class="prompt">subscriber2 $</span> <span class="cursor-blink"></span>
+      </div>
     </div>
   </div>
 </div>
 
 <script>
 let pubUrl = '', sub1Url = '', sub2Url = '';
-let pubEs = null, sub1Es = null, sub2Es = null;
-let pubCount = 0, sub1Count = 0, sub2Count = 0;
+let sub1Es = null, sub2Es = null;
 
-// Load saved config from URL params
+// Latency tracking for live stats
+const latencyHistory = [];
+let lastLatSub1 = null, lastLatSub2 = null;
+
 const params = new URLSearchParams(window.location.search);
 if (params.get('pub'))  document.getElementById('pubAddr').value  = params.get('pub');
 if (params.get('sub1')) document.getElementById('sub1Addr').value = params.get('sub1');
 if (params.get('sub2')) document.getElementById('sub2Addr').value = params.get('sub2');
 
 function connectAll() {
-  const pub  = document.getElementById('pubAddr').value.trim();
-  const s1   = document.getElementById('sub1Addr').value.trim();
-  const s2   = document.getElementById('sub2Addr').value.trim();
+  const pub = document.getElementById('pubAddr').value.trim();
+  const s1  = document.getElementById('sub1Addr').value.trim();
+  const s2  = document.getElementById('sub2Addr').value.trim();
 
-  // Save to URL for easy sharing
   const u = new URL(window.location);
   if (pub) u.searchParams.set('pub', pub);
   if (s1)  u.searchParams.set('sub1', s1);
   if (s2)  u.searchParams.set('sub2', s2);
   history.replaceState(null, '', u);
 
-  if (pub)  { pubUrl  = `http://${pub}`;  connectSSE('pub', pubUrl); }
-  if (s1)   { sub1Url = `http://${s1}`;   connectSSE('sub1', sub1Url); }
-  if (s2)   { sub2Url = `http://${s2}`;   connectSSE('sub2', sub2Url); }
+  if (pub) pubUrl = `http://${pub}`;
+  if (s1) { sub1Url = `http://${s1}`; connectSubSSE('sub1', sub1Url); }
+  if (s2) { sub2Url = `http://${s2}`; connectSubSSE('sub2', sub2Url); }
+
+  const dot = document.getElementById('connDot');
+  dot.className = 'status-dot connecting';
+  fetch(pubUrl + '/api/status')
+    .then(r => r.json())
+    .then(() => { dot.className = 'status-dot connected'; })
+    .catch(() => { dot.className = 'status-dot'; });
 }
 
-function connectSSE(id, baseUrl) {
-  const dot = document.getElementById(id + 'Dot');
-  const label = document.getElementById(id + 'IpLabel');
-  const msgDiv = document.getElementById(id + 'Messages');
-  const emptyDiv = document.getElementById(id + 'Empty');
-
-  // Close existing
-  if (id === 'pub' && pubEs) pubEs.close();
-  if (id === 'sub1' && sub1Es) sub1Es.close();
-  if (id === 'sub2' && sub2Es) sub2Es.close();
-
-  dot.className = 'status-dot connecting';
-  label.textContent = baseUrl.replace('http://', '');
-  msgDiv.innerHTML = '';
-  emptyDiv.style.display = 'none';
+function connectSubSSE(subId, baseUrl) {
+  if (subId === 'sub1' && sub1Es) sub1Es.close();
+  if (subId === 'sub2' && sub2Es) sub2Es.close();
 
   const es = new EventSource(baseUrl + '/api/messages');
 
-  es.onopen = () => {
-    dot.className = 'status-dot connected';
-    if (id === 'pub') {
-      document.getElementById('msgInput').disabled = false;
-      document.getElementById('sendBtn').disabled = false;
-    }
-  };
-
-  es.onerror = () => {
-    dot.className = 'status-dot';
-    if (id === 'pub') {
-      document.getElementById('msgInput').disabled = true;
-      document.getElementById('sendBtn').disabled = true;
-    }
-    // Auto-reconnect is built into EventSource
-  };
-
   es.addEventListener('message', (e) => {
     const msg = JSON.parse(e.data);
-    addMessage(id, msg);
+    if (msg.latency_us !== undefined && msg.text) {
+      onSubLatency(subId, msg.text, msg.latency_us);
+    }
   });
 
-  es.addEventListener('sync', () => {
-    // Initial sync complete
-  });
-
-  if (id === 'pub')  pubEs  = es;
-  if (id === 'sub1') sub1Es = es;
-  if (id === 'sub2') sub2Es = es;
+  if (subId === 'sub1') sub1Es = es;
+  if (subId === 'sub2') sub2Es = es;
 }
 
-function addMessage(panelId, msg) {
-  const msgDiv = document.getElementById(panelId + 'Messages');
-  const el = document.createElement('div');
-  el.className = 'msg';
-
-  let fromHtml = '';
-  if (msg.from) {
-    fromHtml = `<span class="msg-from">${msg.from}</span>`;
+function onSubLatency(subId, text, latencyUs) {
+  // Update terminal placeholder
+  const termId = subId === 'sub1' ? 'termSub1' : 'termSub2';
+  const term = document.getElementById(termId);
+  const placeholder = term.querySelector(`.latency-pending[data-msg="${CSS.escape(text)}"]`);
+  if (placeholder) {
+    const cls = latencyUs < 100 ? 'latency-good' : 'latency';
+    placeholder.className = cls;
+    placeholder.textContent = `${latencyUs}\u00B5s`;
+    placeholder.removeAttribute('data-msg');
   }
 
-  el.innerHTML = `
-    <span class="msg-time">${msg.time_str || ''}</span>
-    <span class="msg-id">#${msg.id}</span>
-    ${fromHtml}
-    <span class="msg-text">${escapeHtml(msg.text)}</span>
-  `;
-  msgDiv.appendChild(el);
-  msgDiv.scrollTop = msgDiv.scrollHeight;
+  // Update live stats
+  latencyHistory.push(latencyUs);
+  if (subId === 'sub1') lastLatSub1 = latencyUs;
+  if (subId === 'sub2') lastLatSub2 = latencyUs;
+  updateLiveStats();
+}
 
-  // Update counter
-  if (panelId === 'pub')  document.getElementById('pubSent').textContent = ++pubCount;
-  if (panelId === 'sub1') document.getElementById('sub1Recv').textContent = ++sub1Count;
-  if (panelId === 'sub2') document.getElementById('sub2Recv').textContent = ++sub2Count;
+function updateLiveStats() {
+  const el = (id) => document.getElementById(id);
+
+  // Sub1 last
+  if (lastLatSub1 !== null) {
+    el('latSub1').textContent = lastLatSub1 + '\u00B5s';
+    el('latSub1').className = 'live-stat-value' + (lastLatSub1 < 100 ? '' : ' warn');
+  }
+
+  // Sub2 last
+  if (lastLatSub2 !== null) {
+    el('latSub2').textContent = lastLatSub2 + '\u00B5s';
+    el('latSub2').className = 'live-stat-value' + (lastLatSub2 < 100 ? '' : ' warn');
+  }
+
+  // Avg
+  if (latencyHistory.length > 0) {
+    const avg = (latencyHistory.reduce((a, b) => a + b, 0) / latencyHistory.length).toFixed(1);
+    el('latAvg').textContent = avg + '\u00B5s';
+    el('latAvg').className = 'live-stat-value' + (avg < 100 ? '' : ' warn');
+  }
+
+  // Min / Max
+  if (latencyHistory.length > 0) {
+    const min = Math.min(...latencyHistory).toFixed(1);
+    const max = Math.max(...latencyHistory).toFixed(1);
+    el('latMinMax').textContent = min + ' / ' + max + '\u00B5s';
+    el('latMinMax').className = 'live-stat-value' + (max < 100 ? '' : ' warn');
+  }
+
+  // Count
+  el('latCount').textContent = latencyHistory.length;
+  el('latCount').className = 'live-stat-value';
 }
 
 function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
-}
-
-async function sendMsg() {
-  const input = document.getElementById('msgInput');
-  const text = input.value.trim();
-  if (!text || !pubUrl) return;
-  input.value = '';
-
-  try {
-    await fetch(pubUrl + '/api/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
-    });
-  } catch (e) {
-    console.error('Send failed:', e);
-  }
 }
 
 function sendQuick(text) {
@@ -696,62 +532,53 @@ function sendQuick(text) {
   }).catch(console.error);
 }
 
-async function sendBurst(n) {
-  if (!pubUrl) return;
-  for (let i = 1; i <= n; i++) {
-    fetch(pubUrl + '/api/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: `Burst message ${i}/${n} @ ${new Date().toISOString()}` }),
-    }).catch(console.error);
-  }
-}
-
-// Auto-connect if params are set
-if (params.get('pub') || params.get('sub1') || params.get('sub2')) {
+// Auto-connect
+if (params.get('pub')) {
   connectAll();
 }
 
 // ============================================================
-// Code Demo — Interactive Terminal Walkthrough
+// Interactive Terminal Walkthrough
 // ============================================================
 let codeStep = 0;
-const maxSteps = 4;
+let pubTermSendCount = 0;
 
 function nextCodeStep() {
   codeStep++;
-  if (codeStep > maxSteps) return;
-
   const btn = document.getElementById('stepBtn');
   const label = document.getElementById('stepLabel');
 
   if (codeStep === 1) {
-    // Step 1: Show interfaces on all terminals
-    label.textContent = 'Step 2: Subscribe to multicast on mcast0';
+    label.textContent = 'Step 2: Start listeners & sender';
     setTerminal('termPub', step1_pub());
     setTerminal('termSub1', step1_sub('Subscriber 1'));
     setTerminal('termSub2', step1_sub('Subscriber 2'));
   } else if (codeStep === 2) {
-    // Step 2: Show subscriber Python code binding to mcast0
-    label.textContent = 'Step 3: Send multicast from publisher';
+    label.textContent = 'Click the buttons above to send messages';
     setTerminal('termSub1', step2_sub('Subscriber 1'));
     setTerminal('termSub2', step2_sub('Subscriber 2'));
+    setTerminal('termPub', step2_pub());
+    document.getElementById('termQuickBtns').style.display = 'flex';
+    btn.textContent = 'Reset';
   } else if (codeStep === 3) {
-    // Step 3: Publisher sends
-    label.textContent = 'Step 4: Messages arrive at subscribers';
-    setTerminal('termPub', step3_pub());
-  } else if (codeStep === 4) {
-    // Step 4: Subscribers receive
-    label.textContent = 'Done — zero code changes!';
-    btn.disabled = true;
-    setTerminal('termSub1', step4_sub('10.100.0.102'));
-    setTerminal('termSub2', step4_sub('10.100.0.102'));
-    // Also send real messages via the API for the live panels
-    if (pubUrl) {
-      sendQuick('BTC/USD 67,842.50 +0.3%');
-      setTimeout(() => sendQuick('ETH/USD 3,521.18 -0.1%'), 300);
-      setTimeout(() => sendQuick('ORDER: BUY 2.5 BTC @ 67,840 LIMIT'), 600);
-    }
+    codeStep = 0;
+    pubTermSendCount = 0;
+    latencyHistory.length = 0;
+    lastLatSub1 = null;
+    lastLatSub2 = null;
+    label.textContent = 'Step 1: Show network interfaces';
+    btn.textContent = 'Next Step';
+    document.getElementById('termQuickBtns').style.display = 'none';
+    setTerminal('termPub', '<span class="prompt">publisher $</span> <span class="cursor-blink"></span>');
+    setTerminal('termSub1', '<span class="prompt">subscriber1 $</span> <span class="cursor-blink"></span>');
+    setTerminal('termSub2', '<span class="prompt">subscriber2 $</span> <span class="cursor-blink"></span>');
+    // Reset live stats display
+    ['latSub1','latSub2','latAvg','latMinMax'].forEach(id => {
+      document.getElementById(id).textContent = '\u2014';
+      document.getElementById(id).className = 'live-stat-value dim';
+    });
+    document.getElementById('latCount').textContent = '0';
+    document.getElementById('latCount').className = 'live-stat-value dim';
   }
 }
 
@@ -759,6 +586,59 @@ function setTerminal(id, html) {
   const body = document.getElementById(id);
   body.innerHTML = html;
   body.scrollTop = body.scrollHeight;
+}
+
+function termSend(msg) {
+  if (codeStep < 2) {
+    while (codeStep < 2) nextCodeStep();
+  }
+
+  // Publisher terminal: append sendto() code
+  const pubTerm = document.getElementById('termPub');
+  const cursorEl = pubTerm.querySelector('.cursor-blink');
+  if (cursorEl) cursorEl.remove();
+
+  pubTermSendCount++;
+  const line = document.createElement('span');
+  line.innerHTML = `\nsock.sendto(<span class="string">b"${escapeHtml(msg)}"</span>, (<span class="mcast-hl">"224.0.0.101"</span>, <span class="string">5001</span>))
+<span class="output">Sent: ${escapeHtml(msg)}</span>
+<span class="cursor-blink"></span>`;
+  pubTerm.appendChild(line);
+  pubTerm.scrollTop = pubTerm.scrollHeight;
+
+  // Subscriber terminals: append received line with latency placeholder
+  const escapedMsg = escapeHtml(msg);
+  ['termSub1', 'termSub2'].forEach(tid => {
+    const term = document.getElementById(tid);
+    const cur = term.querySelector('.cursor-blink');
+    if (cur) cur.remove();
+    const recv = document.createElement('span');
+    recv.innerHTML = `\n<span class="recv-msg">From ('10.0.1.10', ${52840 + pubTermSendCount}): ${escapedMsg}</span>  <span class="latency-pending" data-msg="${msg}">measuring...</span>
+<span class="cursor-blink"></span>`;
+    term.appendChild(recv);
+    term.scrollTop = term.scrollHeight;
+  });
+
+  // Send the real message
+  sendQuick(msg);
+}
+
+function termSendBurst(n) {
+  const msgs = [
+    'BTC/USD 67,842.50 +0.3%',
+    'ETH/USD 3,521.18 -0.1%',
+    'SOL/USD 142.87 +1.2%',
+    'BNB/USD 587.33 -0.4%',
+    'XRP/USD 0.6218 +0.8%',
+    'ADA/USD 0.4512 -0.2%',
+    'DOGE/USD 0.1634 +2.1%',
+    'AVAX/USD 35.92 -0.7%',
+    'DOT/USD 7.84 +0.5%',
+    'LINK/USD 14.27 +1.8%',
+  ];
+  for (let i = 0; i < n && i < msgs.length; i++) {
+    setTimeout(() => termSend(msgs[i]), i * 150);
+  }
 }
 
 function step1_pub() {
@@ -769,7 +649,7 @@ function step1_pub() {
 <span class="output">    link/ether da:27:4a:92:e1:4e</span>
 
 <span class="prompt">publisher $</span> <span class="cmd">ip addr show mcast0</span>
-<span class="mcast-hl">    inet 10.100.0.136/24</span><span class="output"> scope global mcast0</span>
+<span class="mcast-hl">    inet 10.0.1.10/24</span><span class="output"> scope global mcast0</span>
 
 <span class="prompt">publisher $</span> <span class="cmd">ip route show | grep mcast</span>
 <span class="mcast-hl">224.0.0.0/4 dev mcast0</span><span class="output"> scope link</span>
@@ -779,16 +659,17 @@ function step1_pub() {
 }
 
 function step1_sub(name) {
-  return `<span class="prompt">${name.toLowerCase().replace(' ','')} $</span> <span class="cmd">ip link show</span>
+  const host = name.toLowerCase().replace(' ','');
+  return `<span class="prompt">${host} $</span> <span class="cmd">ip link show</span>
 <span class="output">1: lo: &lt;LOOPBACK,UP&gt; mtu 65536
 2: ens67: &lt;BROADCAST,MULTICAST,UP&gt; mtu 9001
 </span><span class="mcast-hl">5: mcast0: &lt;BROADCAST,MULTICAST,UP&gt; mtu 1500</span>
 
-<span class="prompt">${name.toLowerCase().replace(' ','')} $</span> <span class="cmd">ip route show | grep 224</span>
+<span class="prompt">${host} $</span> <span class="cmd">ip route show | grep 224</span>
 <span class="mcast-hl">224.0.0.0/4 dev mcast0</span><span class="output"> scope link</span>
 
 <span class="comment"># mcast0 available — standard multicast interface</span>
-<span class="prompt">${name.toLowerCase().replace(' ','')} $</span> <span class="cursor-blink"></span>`;
+<span class="prompt">${host} $</span> <span class="cursor-blink"></span>`;
 }
 
 function step2_sub(name) {
@@ -818,7 +699,7 @@ sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 <span class="cursor-blink"></span>`;
 }
 
-function step3_pub() {
+function step2_pub() {
   return `<span class="prompt">publisher $</span> <span class="cmd">python3 send_mcast.py</span>
 
 <span class="comment"># Standard Python multicast sender — no changes needed</span>
@@ -827,70 +708,12 @@ function step3_pub() {
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, <span class="string">32</span>)
 sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
-    socket.inet_aton(<span class="mcast-hl">"10.100.0.136"</span>))  <span class="comment"># mcast0 IP</span>
+    socket.inet_aton(<span class="mcast-hl">"10.0.1.10"</span>))  <span class="comment"># mcast0 IP</span>
 
-<span class="comment"># Send to multicast group — app has no idea it goes over unicast</span>
-sock.sendto(<span class="string">b"BTC/USD 67,842.50 +0.3%"</span>, (<span class="mcast-hl">"224.0.0.101"</span>, <span class="string">5001</span>))
-sock.sendto(<span class="string">b"ETH/USD 3,521.18 -0.1%"</span>, (<span class="mcast-hl">"224.0.0.101"</span>, <span class="string">5001</span>))
-sock.sendto(<span class="string">b"ORDER: BUY 2.5 BTC @ 67,840"</span>, (<span class="mcast-hl">"224.0.0.101"</span>, <span class="string">5001</span>))
-
-<span class="output">Sent: BTC/USD 67,842.50 +0.3%</span>
-<span class="output">Sent: ETH/USD 3,521.18 -0.1%</span>
-<span class="output">Sent: ORDER: BUY 2.5 BTC @ 67,840</span>
-<span class="prompt">publisher $</span> <span class="cursor-blink"></span>`;
-}
-
-function step4_sub(pubIp) {
-  return `<span class="output">Listening on 224.0.0.101:5001...</span>
-<span class="recv-msg">From ('${pubIp}', 52841): BTC/USD 67,842.50 +0.3%</span>
-<span class="recv-msg">From ('${pubIp}', 52841): ETH/USD 3,521.18 -0.1%</span>
-<span class="recv-msg">From ('${pubIp}', 52841): ORDER: BUY 2.5 BTC @ 67,840</span>
-<span class="cursor-blink"></span>
-
-<span class="comment"># Messages arrived via:</span>
-<span class="comment">#   app → mcast0 → DPDK → ENA bypass → wire (unicast)</span>
-<span class="comment">#     → ENA → DPDK → mcast0 → app receives multicast</span>
-<span class="comment">#</span>
-<span class="comment"># The app never knew. Zero code changes.</span>`;
+<span class="comment"># Send to multicast group — click buttons above to send ↑</span>
+<span class="cursor-blink"></span>`;
 }
 </script>
-
-<div class="code-demo" id="codeDemo">
-  <h2>
-    <span>Zero Code Changes</span> — Standard Multicast Just Works
-    <button class="step-btn" id="stepBtn" onclick="nextCodeStep()">Next Step</button>
-    <span class="step-label" id="stepLabel">Step 1: Show network interfaces</span>
-  </h2>
-  <div class="terminals">
-    <div class="terminal">
-      <div class="terminal-bar">
-        <div class="dots"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
-        <span class="terminal-title">publisher — ec2-user@ip-10-100-0-102</span>
-      </div>
-      <div class="terminal-body" id="termPub">
-<span class="prompt">publisher $</span> <span class="cursor-blink"></span>
-      </div>
-    </div>
-    <div class="terminal">
-      <div class="terminal-bar">
-        <div class="dots"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
-        <span class="terminal-title">subscriber1 — ec2-user@ip-10-100-0-213</span>
-      </div>
-      <div class="terminal-body" id="termSub1">
-<span class="prompt">subscriber1 $</span> <span class="cursor-blink"></span>
-      </div>
-    </div>
-    <div class="terminal">
-      <div class="terminal-bar">
-        <div class="dots"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
-        <span class="terminal-title">subscriber2 — ec2-user@ip-10-100-0-151</span>
-      </div>
-      <div class="terminal-body" id="termSub2">
-<span class="prompt">subscriber2 $</span> <span class="cursor-blink"></span>
-      </div>
-    </div>
-  </div>
-</div>
 
 </body>
 </html>
