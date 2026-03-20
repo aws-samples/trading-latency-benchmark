@@ -7,6 +7,7 @@ A collection of low-latency networking tools for measuring and optimizing packet
 | Project | Approach | Language | Latency | Use Case |
 |---------|----------|----------|---------|----------|
 | [ec2_timestamping_programs](#ec2-timestamping-programs) | Kernel sockets + HW timestamps | C | Baseline | Per-hop latency decomposition with Nitro PHC |
+| [open_onload](#open_onload) | OpenOnload kernel bypass | C | — | Feed relay receiver with ENA AF_XDP integration |
 | [af_xdp_zero_copy_perf_benchmark](#af_xdp-zero-copy-performance-benchmark) | AF_XDP + eBPF XDP filters | C++ | Sub-microsecond forwarding | Market data fan-out / packet replicator |
 | [mcast2ucast](#mcast2ucast) | DPDK poll-mode driver | C | ~25 us RTT (metal) | Transparent multicast-over-unicast for AWS VPC |
 
@@ -21,6 +22,7 @@ Exchange / Market Data Source
 |              Ingress / Feeder Host                |
 |                                                   |
 |  af_xdp_zero_copy  -- eBPF XDP at NIC driver     |
+|  open_onload       -- OpenOnload kernel bypass    |
 |  mcast2ucast       -- DPDK ENA PMD bypass         |
 |  ec2_timestamping  -- kernel sockets (baseline)   |
 +--------------------------------------------------+
@@ -51,7 +53,7 @@ A client/server toolkit for measuring one-way delay and round-trip time using th
 - **Batched TX** via `sendmmsg()` (128 packets/call), per-packet `recvmsg()` for RX timestamp precision
 - **TSC calibration** with `rdtsc`/`rdtscp` for sub-microsecond busy-wait rate control
 - **CSV join utility** for post-processing client + server logs by sequence number
-- **Zero-copy TX** via `SO_ZEROCOPY` / `MSG_ZEROCOPY`
+- **Best-effort zero-copy TX** via `SO_ZEROCOPY` / `MSG_ZEROCOPY` (falls back gracefully if unsupported)
 
 ### Quick Start
 ```bash
@@ -68,6 +70,7 @@ cd ec2_timestamping_programs && make
 
 # Join CSVs for analysis
 ./timestamp_csvjoin --one-way --client-server \
+  --clt-src-ip 10.0.0.1 --clt-src-port 45678 \
   --input-files clt.csv,clt_tx.csv,svr.csv --output-csv joined.csv
 ```
 
@@ -75,6 +78,60 @@ cd ec2_timestamping_programs && make
 - GCC, glibc, libpthread, librt
 - EC2 instance with Nitro hardware timestamping + ENA driver
 - PHC configured via chrony (`/dev/ptp*`)
+
+---
+
+## open_onload
+
+**Path:** `open_onload/`
+
+A one-way latency measurement receiver (`feed_relay_receiver`) that uses Xilinx OpenOnload kernel bypass with AF_XDP zero-copy on ENA NICs. Measures the delta between sender's application TX timestamp (embedded in payload) and receiver's hardware RX timestamp from the ENA PHC.
+
+### Key Features
+- **Hardware RX timestamps** from ENA PHC (`scm_timestamping64.ts[2]`) with automatic kernel fallback
+- **Non-blocking hot loop** with `MSG_DONTWAIT` + `SO_BUSY_POLL` on dedicated CPU core
+- **Lock-free stats + CSV ring buffers** with background writer thread on separate core
+- **TSC-based timing** (`rdtsc`/`rdtscp`) for sub-nanosecond loop iteration and duration checks
+- **Percentile statistics** (P25/P50/P75/P90/P95) with configurable histogram binning
+- **8 property-based tests** covering packet parsing, latency computation, ring buffers, histograms, and CLI fuzz
+- **Automated setup scripts** for patched ENA driver + OpenOnload installation on Nitro V5+ instances
+
+### Quick Start
+```bash
+cd open_onload && make
+
+# One-time setup (patches ENA + OpenOnload for AF_XDP)
+sudo bash scripts/setup_onload_ena.sh enp40s0
+sudo bash scripts/setup_ptp.sh enp40s0
+
+# Run receiver under OpenOnload
+EF_USE_HUGE_PAGES=0 EF_RX_TIMESTAMPING=1 EF_AF_XDP_ZEROCOPY=1 \
+onload ./feed_relay_receiver \
+  --rx-interface eth0 --port 12345 --rx-cpu 5 --time 60 \
+  --stats=1M,bw=5,bn=100 --output-csv=latency.csv --log-cpu 0
+
+# Verify AF_XDP is active
+sudo ethtool -n enp40s0              # check n-tuple filter
+sudo ./scripts/xdp_monitor.sh enp40s0 2   # watch rx_xdp_redirect
+
+# Run tests
+make test
+```
+
+### Architecture
+- **Main thread** (pinned to `--rx-cpu`): non-blocking `recvmsg()` hot loop extracting HW timestamps from `SO_TIMESTAMPING` ancillary data
+- **CSV writer thread** (pinned to `--log-cpu`): drains lock-free ring buffer, writes batches to disk
+- **SIGALRM PPS reporter**: periodic stats display without impacting hot path
+- **Sender**: any host, any language — just embed `(seq_num, tx_app_ns)` as first 12 bytes of UDP payload
+
+### Dependencies
+- GCC (GNU C99), glibc, libpthread, librt
+- Patched ENA driver (`amzn/amzn-drivers` + `ena-onload-patches.tar`)
+- Patched OpenOnload (Xilinx-CNS/onload at commit `2d4ec08aa`)
+- EC2 Nitro V5+ instance (i7ie.*, m8i.*, r8i.*) with 2 ENIs
+
+### Known Limitation
+PTP hardware timestamping does not work with OpenOnload in `EF_AF_XDP_ZEROCOPY=1` mode. The receiver automatically falls back to kernel software timestamps with a warning.
 
 ---
 
@@ -177,7 +234,7 @@ sudo ip route add 224.0.0.0/4 dev mcast0
 | m8a.2xlarge (same AZ) | TAP-only (no bypass) | 100.0 us | 105.2 us |
 
 ### Dependencies
-- DPDK 24.11+ (ENA PMD, TAP PMD, rte_hash, rte_ring, rte_mempool)
+- DPDK 25.11 (ENA PMD, TAP PMD, rte_hash, rte_ring, rte_mempool)
 - igb_uio kernel module (from dpdk-kmods)
 - Meson + Ninja build system
 - GCC (C11), g++ (C++17 for benchmarks)

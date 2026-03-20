@@ -41,6 +41,7 @@ The benchmark suite consists of:
 6. **Ansible Playbooks**: Scripts to provision instances, run tests, and collect results
 7. **OS-Tuned AMI Builder**: Automated pipeline to create pre-optimized Amazon Machine Images with performance tuning baked in
 8. **Analysis Tools**: Utilities to process and visualize latency data using HDR Histograms
+9. **[Networking Benchmarks](networking_benchmarks/)**: Low-latency networking tools — EC2 hardware timestamping, AF_XDP zero-copy packet replication, OpenOnload kernel bypass, and DPDK multicast-over-unicast
 
 ### Sequence Diagram
 The benchmark contains a simple HFT client and Matching Engine written in Java to simulate a basic order flow sequence for latency measurements, as per the following diagram:
