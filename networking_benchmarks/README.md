@@ -10,6 +10,7 @@ A collection of low-latency networking tools for measuring and optimizing packet
 | [open_onload](#open_onload) | OpenOnload kernel bypass | C | — | Feed relay receiver with ENA AF_XDP integration |
 | [af_xdp_zero_copy_perf_benchmark](#af_xdp-zero-copy-performance-benchmark) | AF_XDP + eBPF XDP filters | C++ | Sub-microsecond forwarding | Market data fan-out / packet replicator |
 | [mcast2ucast](#mcast2ucast) | DPDK poll-mode driver | C | ~25 us RTT (metal) | Transparent multicast-over-unicast for AWS VPC |
+| [phc_probe](#phc_probe) | SO_TIMESTAMPING + PHC | Python | — | HW vs SW timestamp diagnostic with live graph |
 
 ## Architecture Overview
 
@@ -239,6 +240,38 @@ sudo ip route add 224.0.0.0/4 dev mcast0
 - Meson + Ninja build system
 - GCC (C11), g++ (C++17 for benchmarks)
 - Linux hugepages (2 GB recommended)
+
+---
+
+## phc_probe
+
+**Path:** `utilities/phc_probe/`
+
+A two-host diagnostic tool that compares hardware RX timestamps from the ENA PTP Hardware Clock (`ts[2]`) with kernel software RX timestamps (`ts[0]`) for UDP packets. Validates that NIC hardware timestamping is working correctly and measures the HW-SW clock delta with a live rolling ASCII graph.
+
+### Key Features
+- **Two timestamp sources:** `ts[2]` (NIC PTP Hardware Clock) vs `ts[0]` (kernel `CLOCK_REALTIME`) from `SO_TIMESTAMPING` ancillary data
+- **Live ASCII graph mode** (`--live`) showing HW-SW delta over a rolling 60-second window
+- **Fixed-count mode** for quick validation with per-packet breakdown and summary statistics
+- **Automatic fallback** from `SO_TIMESTAMPING_NEW` (option 65) to legacy `SO_TIMESTAMPING` (option 37)
+- **Zero dependencies** beyond Python 3.9+ (receiver) and Python 3.6+ (sender)
+
+### Quick Start
+```bash
+# On the receiver (EC2 with ENA PHC):
+sudo python3 utilities/phc_probe/ts_receiver.py ens5 --port 9999 --count 20
+
+# On the sender (any host):
+python3 utilities/phc_probe/ts_sender.py 10.0.1.100 --port 9999 --count 20
+
+# Live graph mode:
+sudo python3 utilities/phc_probe/ts_receiver.py ens5 --port 9999 --live
+```
+
+### Dependencies
+- Python 3.9+ (receiver), Python 3.6+ (sender)
+- EC2 instance with ENA PHC enabled (`phc_enable=1`)
+- Root access on the receiver for `SIOCSHWTSTAMP` ioctl
 
 ---
 
