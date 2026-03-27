@@ -17,7 +17,7 @@ info() { echo -e "        $*"; }
 die() { fail "$*"; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LINUXPTP_DIR="${SCRIPT_DIR}/../third_party/linuxptp"
+LINUXPTP_DIR="${SCRIPT_DIR}/third_party/linuxptp"
 HWSTAMP_CTL_BIN="${LINUXPTP_DIR}/hwstamp_ctl"
 
 # ── Root check ───────────────────────────────────────────────────────

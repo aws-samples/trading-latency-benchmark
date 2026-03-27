@@ -12,6 +12,7 @@ It is a two-host test: a sender on one machine sends UDP packets to a receiver o
 
 | Script | Where to run | Privileges | Description |
 |--------|-------------|------------|-------------|
+| `setup_ptp.sh` | EC2 instance (receiver) | `sudo` required | Automated PTP hardware timestamping setup: ENA PHC enable, hwstamp_ctl, verification |
 | `compare_timestamps.sh` | Either host | Varies | Wrapper that dispatches to `ts_receiver.py` or `ts_sender.py` |
 | `ts_receiver.py` | EC2 instance (receiver) | `sudo` required | Listens for UDP packets, extracts HW and SW timestamps, displays comparison |
 | `ts_sender.py` | Any host (sender) | No privileges needed | Sends UDP packets with embedded sequence numbers and TX timestamps |
@@ -24,6 +25,12 @@ It is a two-host test: a sender on one machine sends UDP packets to a receiver o
 - Hardware timestamping verified: `ethtool -T <interface>` should show `hardware-receive` capability
 - Python 3.9+
 - Root access (for `SO_TIMESTAMPING` and `SIOCSHWTSTAMP` ioctl)
+
+For fully automatic PTP hardware timestamping setup (ENA PHC enable, hwstamp_ctl, verification):
+```bash
+sudo ./setup_ptp.sh [interface]   # explicit interface
+sudo ./setup_ptp.sh               # auto-detect first UP NIC
+```
 
 **Sender host:**
 - Any Linux/macOS host with network connectivity to the receiver
