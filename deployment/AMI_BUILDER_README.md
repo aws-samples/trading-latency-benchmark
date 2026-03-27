@@ -469,10 +469,9 @@ Output: AMI ID saved to ami-builder-latest.txt
 
 For issues or questions:
 1. Check the [main README](../README.md)
-2. Review the [CLAUDE.md](../CLAUDE.md) documentation
-3. Examine logs in the CDK outputs: `cdk/ami-builder-outputs.json`
-4. Check Ansible output for tuning errors
-5. Open an issue on GitHub
+2. Examine logs in the CDK outputs: `cdk/ami-builder-outputs.json`
+3. Check Ansible output for tuning errors
+4. Open an issue on GitHub
 
 ## License
 

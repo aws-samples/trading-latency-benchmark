@@ -58,10 +58,12 @@ private:
     // Frame management (following ena-xdp best practices)
     int tx_frames_;
     int rx_frames_;
-    std::atomic<uint32_t> prev_umem_tx_frame_;  // Track TX frame cycling
-    uint32_t cached_completions_;               // Batch completions
     uint32_t outstanding_tx_;                   // Track pending TX
-    
+
+    // Key used in xsks_map when registerXskMap() was called; -1 if not registered.
+    // Stored so close() can do a single O(1) bpf_map_delete_elem instead of a 256-entry scan.
+    int registered_queue_id_{-1};
+
     // Field to store addresses pending recycling
     std::vector<uint64_t> pending_recycle_addrs_;
 
@@ -145,18 +147,8 @@ public:
     int bind(const std::string& ifName, int queueId, int flags);
 
     /**
-     * Send a packet
-     * 
-     * @param offset Offset in the UMEM
-     * @param length Length of the packet
-     * @return 0 on success, negative error code on failure
-     * @throws std::runtime_error If sending fails
-     */
-    int send(int offset, int length);
-
-    /**
      * Send multiple packets in a batch
-     * 
+     *
      * @param offsets   Vector of packet offsets in the UMEM
      * @param lengths   Vector of packet lengths
      * @param batchSize Number of packets to send (must be <= vectors size)
@@ -166,25 +158,7 @@ public:
     int sendBatch(const std::vector<int>& offsets, const std::vector<int>& lengths, int batchSize);
 
     /**
-     * Send packets to subscribers with zero-copy
-     * 
-     * @param offsets   Vector of packet offsets in UMEM
-     * @param lengths   Vector of packet lengths
-     * @param batchSize Number of packets to send
-     * @return Number of packets sent
-     * @throws std::runtime_error If sending fails
-     */
-    int sendBatchToSubscribers(const std::vector<int>& offsets, const std::vector<int>& lengths, int batchSize);
-
-    /**
-     * Get the next available TX frame
-     * 
-     * @return Frame offset or -1 if none available
-     */
-    int getNextTxFrame();
-
-    /**
-     * Poll for TX completions and handle them in batches
+     * Poll for TX completions and release them immediately
      * This should be called regularly to free up TX ring space
      */
     void pollTxCompletions();
@@ -219,17 +193,6 @@ public:
      * @param count Number of entries to submit
      */
     void submitTxRing(int count);
-
-    /**
-     * Copy data from one UMEM location to another
-     * 
-     * @param sourceBuffer Source buffer
-     * @param sourceOffset Source offset
-     * @param destOffset   Destination offset in this UMEM
-     * @param length       Length to copy
-     * @throws std::runtime_error If copying fails
-     */
-    void copyUmemData(const uint8_t* sourceBuffer, int sourceOffset, int destOffset, int length);
 
     /**
      * Receive packets
@@ -288,6 +251,14 @@ public:
      * @throws std::runtime_error if unloading fails
      */
     static void unloadXdpProgram(const std::string& ifName, bool nativeMode);
+
+    /**
+     * Look up a map in the currently loaded XDP program by name.
+     *
+     * @param mapName BPF map name (as declared in the eBPF source)
+     * @return File descriptor (≥ 0) on success, -1 if not found or no program loaded
+     */
+    static int getXdpMapFd(const std::string& mapName);
 
     /**
      * Register the socket with the XDP program's map

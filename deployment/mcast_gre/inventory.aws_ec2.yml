@@ -2,9 +2,8 @@
 #  SPDX-License-Identifier: MIT-0
 
 plugin: amazon.aws.aws_ec2
-regions:
-  - eu-west-2     # feeder region (London)    — MockExchange + Feeder
-  - eu-central-1  # subscriber region (Frankfurt) — Subscribers
+# Targets the region of the McastCpgStack deployment.
+# Set AWS_DEFAULT_REGION or pass --aws-region to ansible-inventory / ansible-playbook.
 
 include_filters:
   - tag:Role:
@@ -18,12 +17,11 @@ hostnames:
 compose:
   ansible_host: public_ip_address
   ansible_user: "'ec2-user'"
-  # SSH key selected by region: feeder region uses london.pem, subscriber region uses frankfurt.pem
-  ansible_ssh_private_key_file: >-
-    '~/.ssh/london.pem' if placement.region == 'eu-west-2' else '~/.ssh/frankfurt.pem'
+  # Key file path — set SSH_KEY_FILE env var before running ansible-playbook.
+  ansible_ssh_private_key_file: "lookup('env', 'SSH_KEY_FILE')"
 
 groups:
   exchange:     "tags.Role == 'exchange'"
   feeder:       "tags.Role == 'feeder'"
   subscribers:  "tags.Role == 'subscriber'"
-  feeder_nodes: "tags.Role in ['feeder', 'subscriber']"
+  all: "tags.Role in ['feeder', 'subscriber', 'exchange']"

@@ -9,7 +9,10 @@ The CDK code supports multiple deployment architectures:
 1. **Single Instance Stack** (default): Deploys two EC2 instances in a single availability zone (AZ) but **not within a Cluster Placement Group** for benchmarking different instance types
 2. **Cluster Placement Group Stack**: Deploys two EC2 instances (client and server) in a single AZ **within** a Cluster Placement Group (CPG) for optimal network performance
 3. **Multi-AZ Stack**: Deploys instances across multiple AZs to measure cross-AZ latency
-4. **HFT Feeder Stack**: Deploys a full feed-handler POC topology — mock exchange, feeder, and N subscribers — using AF_XDP zero-copy with GRE tunnel to simulate exchange multicast within AWS VPC
+4. **AMI Builder Stack**: Builds a pre-tuned Amazon Machine Image with OS-level optimisations baked in
+5. **Latency Hunting Stack**: Deploys instances for network placement optimisation and latency hunting
+
+> **GRE feed-handler topology** (mock exchange + feeder + subscribers) is deployed by a separate CDK app in [`deployment/mcast_gre/cdk/`](../mcast_gre/README.md) using the `deploy.sh` script.
 
 ## Prerequisites
 
@@ -71,38 +74,21 @@ You can specify the instance type for all AZ instances:
 cdk deploy --context deploymentType=multi-az --context instanceType=r4.xlarge
 ```
 
-### Feed Handler POC Deployment
+### Latency Hunting Deployment
 
-Deploys the full GRE-tunnel feed handler topology: mock exchange + feeder + N subscribers.
+Deploy instances for network placement optimisation:
 
 ```bash
-# Minimal — defaults: c7i.xlarge feeder, c7i.xlarge exchange, 2× c6in.xlarge subscribers
-cdk deploy --context deploymentType=feeder --context keyPairName=my-keypair
+# New VPC
+cdk deploy --context deploymentType=latency-hunting --context keyPairName=my-keypair
 
-# Custom instance types and subscriber count
-cdk deploy --context deploymentType=feeder \
-  --context keyPairName=my-keypair \
-  --context feederInstanceType=c7i.4xlarge \
-  --context exchangeInstanceType=c7i.4xlarge \
-  --context subscriberInstanceType=c6in.xlarge \
-  --context subscriberCount=2 \
-  --context availabilityZone=us-east-1a
+# Existing VPC (BYOVPC)
+cdk deploy --context deploymentType=latency-hunting \
+  --context useExistingVpc=true \
+  --context vpcId=vpc-xxxxxxxx \
+  --context subnetId=subnet-xxxxxxxx \
+  --context keyPairName=my-keypair
 ```
-
-After `cdk deploy` completes, the stack outputs include:
-- Public/private IPs for every instance
-- Ready-to-run commands for each operational step (start feeder, register subscribers, send traffic)
-
-**What happens automatically on first boot:**
-- Build dependencies and xdp-tools are installed
-- The benchmark binaries and eBPF programs are compiled (`make all`)
-- On the exchange instance: the GRE tunnel to the feeder is configured (`ip tunnel add gre_feed`, `ip route add 224.0.0.0/4 dev gre_feed`)
-
-**What requires manual steps after deploy:**
-1. SSH to feeder, run `packet_replicator` (command in `Step1_StartFeeder` output)
-2. Register each subscriber via `control_client` (command in `Step2_RegisterSubscribers` output)
-3. SSH to exchange, run `test_client` or `market_data_provider_client` (commands in `Step3_*` outputs)
-4. Optionally run Ansible tuning playbooks for production-grade performance (command in `OptionalTuning` output)
 
 ## Context Parameters
 
@@ -110,7 +96,7 @@ After `cdk deploy` completes, the stack outputs include:
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `deploymentType` | Deployment architecture | `single` — `single`, `cluster`, `multi-az`, `feeder` |
+| `deploymentType` | Deployment architecture | `single` — `single`, `cluster`, `multi-az`, `ami-builder`, `latency-hunting` |
 | `keyPairName` | EC2 key pair name for SSH | `virginia` |
 | `availabilityZone` | Specific AZ | First AZ in region |
 | `vpcCidr` | VPC CIDR block | `10.50.0.0/16` |
@@ -126,17 +112,15 @@ After `cdk deploy` completes, the stack outputs include:
 | `serverInstanceType` | Server instance type (cluster mode) | `c6in.4xlarge` |
 | `instanceType` | Instance type for all instances (multi-az mode) | `r4.xlarge` |
 
-### Feeder stack (`deploymentType=feeder`)
+### Latency Hunting stack (`deploymentType=latency-hunting`)
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `feederInstanceType` | Feeder EC2 instance type | `c7i.4xlarge` |
-| `exchangeInstanceType` | Mock exchange instance type | `c7i.4xlarge` |
-| `subscriberInstanceType` | Subscriber instance type | `c6in.4xlarge` |
-| `subscriberCount` | Number of subscriber instances | `2` |
-| `multicastGroup` | Inner multicast group address (listen_ip on feeder) | `224.0.31.50` |
-| `dataPort` | UDP data port | `5000` |
-| `ctrlPort` | UDP upstream control port | `5001` |
+| `useExistingVpc` | Import an existing VPC instead of creating one | `false` |
+| `vpcId` | Existing VPC ID (required when `useExistingVpc=true`) | — |
+| `subnetId` | Existing subnet ID (required when `useExistingVpc=true`) | — |
+| `securityGroupId` | Existing security group ID (optional) | — |
+| `elasticIps` | Comma-separated list of Elastic IPs to associate | — |
 
 ## Useful Commands
 

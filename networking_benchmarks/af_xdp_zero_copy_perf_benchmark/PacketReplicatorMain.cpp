@@ -39,12 +39,13 @@ void printUsage(const char* progName) {
               << " <interface> <listen_ip> <listen_port> [zero_copy] [--gre]"
               << " [--ctrl <group>:<port>] [--producer <ip>:<port>]" << std::endl;
     std::cout << "  interface:    Network interface to bind to (e.g., eth0)" << std::endl;
-    std::cout << "  listen_ip:    Multicast group IP to intercept (e.g., 224.0.31.50)" << std::endl;
-    std::cout << "  listen_port:  UDP destination port to intercept" << std::endl;
+    std::cout << "  listen_ip:    Unicast IP to listen on (unicast mode), or inner multicast" << std::endl;
+    std::cout << "                group address (GRE mode, required)." << std::endl;
+    std::cout << "  listen_port:  UDP data port." << std::endl;
     std::cout << "  zero_copy:    'true' to enable zero-copy mode (default: true)" << std::endl;
     std::cout << "  --gre:        GRE tunnel mode — outer unicast GRE carries inner multicast." << std::endl;
-    std::cout << "                Loads gre_filter.o; no IGMP join performed." << std::endl;
-    std::cout << "                listen_ip is the INNER multicast group address." << std::endl;
+    std::cout << "                Loads gre_filter.o; listen_ip is the inner multicast group." << std::endl;
+    std::cout << "                Subscribers register via CTRL_MCAST_JOIN (control_client mcast)." << std::endl;
     std::cout << "  --ctrl <g:p>  Multicast group:port where subscribers send control messages." << std::endl;
     std::cout << "                Feeder joins this group and listens for control datagrams." << std::endl;
     std::cout << "                Requires --producer." << std::endl;
@@ -53,12 +54,12 @@ void printUsage(const char* progName) {
     std::cout << "                Control messages received from subscribers are forwarded here." << std::endl;
     std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
+    std::cout << "  # Unicast mode:" << std::endl;
+    std::cout << "  sudo " << progName << " eth0 10.0.1.20 5000" << std::endl;
+    std::cout << std::endl;
     std::cout << "  # GRE + upstream control forwarding:" << std::endl;
     std::cout << "  sudo " << progName
               << " eth0 224.0.31.50 5000 true --gre --ctrl 224.0.31.51:5001 --producer 10.0.1.10:6000" << std::endl;
-    std::cout << std::endl;
-    std::cout << "  # Native multicast (TGW multicast domain or real co-location):" << std::endl;
-    std::cout << "  sudo " << progName << " eth0 224.0.31.50 5000" << std::endl;
     std::cout << std::endl;
     std::cout << "  # GRE only (no control forwarding):" << std::endl;
     std::cout << "  sudo " << progName << " eth0 224.0.31.50 5000 true --gre" << std::endl;
@@ -138,10 +139,9 @@ int main(int argc, char* argv[]) {
 
     std::cout << "=== AF_XDP Packet Replicator ===" << std::endl;
     std::cout << "Interface:    " << interface << std::endl;
-    std::cout << "Listen IP:    " << listen_ip << std::endl;
-    std::cout << "Listen Port:  " << listen_port << std::endl;
+    std::cout << "Listen IP:    " << listen_ip << ":" << listen_port << std::endl;
     std::cout << "Zero Copy:    " << (use_zero_copy ? "Enabled" : "Disabled") << std::endl;
-    std::cout << "Mode:         " << (use_gre ? "GRE tunnel" : (PacketReplicator::isMulticastAddress(listen_ip) ? "Native multicast" : "Unicast")) << std::endl;
+    std::cout << "Mode:         " << (use_gre ? "GRE tunnel" : "Unicast") << std::endl;
     if (!ctrl_group.empty()) {
         std::cout << "Ctrl group:   " << ctrl_group << ":" << ctrl_port << std::endl;
         std::cout << "Producer:     " << producer_ip << ":" << producer_port << std::endl;
@@ -175,7 +175,6 @@ int main(int argc, char* argv[]) {
         std::thread stats_thread(printStatisticsLoop);
         
         std::cout << "Packet replicator is running!" << std::endl;
-        std::cout << "Listening for UDP packets to " << listen_ip << ":" << listen_port << std::endl;
         std::cout << "Control protocol available on port " << PacketReplicator::CONTROL_PORT << std::endl;
         std::cout << "Press Ctrl+C to stop..." << std::endl;
         std::cout << std::endl;

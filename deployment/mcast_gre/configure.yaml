@@ -1,0 +1,469 @@
+---
+# Unified provisioning playbook for exchange + feeder + subscriber nodes.
+#
+# Plays:
+#   1. all           — build deps, xdp-tools, repo sync, binaries, PTP, coalescing
+#   2. exchange      — GRE tunnel to feeder
+#   3. subscribers   — ENA native-XDP NIC prep (MTU + queue headroom)
+#   4. feeder        — packet_replicator systemd service
+#   5. subscribers   — multicast group registration (skipped if feeder_private_ip unset)
+#
+# Required variable (pass via --extra-vars or inventory host_vars):
+#   feeder_private_ip   — private IP of the feeder (GRE tunnel + control channel)
+#
+# Tunable vars (override via --extra-vars):
+#   mcast_group       (default: 224.0.31.50)
+#   base_mcast_group  (default: 224.0.31.50)  — last octet incremented per subscriber
+#   data_port         (default: 5000)
+#
+# Usage (called by deploy.single_region.sh / deploy.cross_region.sh):
+#   ansible-playbook -i <inventory> configure.yaml \
+#       --extra-vars "feeder_private_ip=<feeder-private-ip>"
+
+# ── Play 1: All nodes — build, sync, binaries, PTP, coalescing ────────────────
+- name: Build and configure all nodes
+  hosts: all   # [feeder] + [subscribers] + [exchange]
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+    # ── Build dependencies ─────────────────────────────────────────────────
+    - name: Install build dependencies
+      ansible.builtin.dnf:
+        name:
+          - git
+          - clang
+          - llvm
+          - libbpf-devel
+          - elfutils-libelf-devel
+          - kernel-headers
+          - kernel-devel
+          - iproute
+          - ethtool
+          - make
+          - gcc
+          - gcc-c++
+          - pkgconfig
+          - m4
+          - libpcap-devel
+          - rsync
+        state: present
+
+    # ── xdp-tools ─────────────────────────────────────────────────────────
+    # Provides libxdp and xdp-loader required by the AF_XDP socket code.
+    - name: Check if libxdp is already installed
+      ansible.builtin.stat:
+        path: /usr/local/lib/libxdp.so
+      register: libxdp_stat
+
+    - name: Clone xdp-tools
+      ansible.builtin.git:
+        repo: https://github.com/xdp-project/xdp-tools.git
+        dest: /opt/xdp-tools
+        depth: 1
+        version: HEAD
+      when: not libxdp_stat.stat.exists
+
+    - name: Build and install xdp-tools
+      ansible.builtin.shell: |
+        set -e
+        cd /opt/xdp-tools
+        ./configure
+        make -j$(nproc)
+        make install
+        ldconfig
+      when: not libxdp_stat.stat.exists
+
+    # ── trading-latency-benchmark ──────────────────────────────────────────
+    - name: Sync trading-latency-benchmark from local repo
+      become: false
+      ansible.builtin.synchronize:
+        src: "{{ playbook_dir }}/../../"
+        dest: /home/ec2-user/gre-benchmark/
+        rsync_opts:
+          - "--exclude=.git"
+          - "--checksum"
+
+    - name: Build benchmark binaries and eBPF objects
+      ansible.builtin.shell: |
+        set -e
+        cd /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark
+        make all
+        chown -R ec2-user:ec2-user /home/ec2-user/gre-benchmark
+
+    - name: Build latency benchmark binaries and XDP subscriber filter
+      ansible.builtin.shell: |
+        set -e
+        cd /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark
+        make all
+        chown -R ec2-user:ec2-user /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark
+
+    # ── Verify binaries ────────────────────────────────────────────────────
+    - name: Confirm binaries exist
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: bin_check
+      loop:
+        - /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark/packet_replicator
+        - /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark/gre_filter.o
+        - /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark/unicast_filter.o
+        - /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark/receiver
+        - /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark/sender
+        - /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark/subscriber_filter.o
+
+    - name: Fail if expected binaries are missing
+      ansible.builtin.fail:
+        msg: "Expected binary not found: {{ item.item }}"
+      when: not item.stat.exists
+      loop: "{{ bin_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # ── PTP hardware clock ─────────────────────────────────────────────────
+    - name: Make ptp.sh executable
+      ansible.builtin.file:
+        path: /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark/ptp.sh
+        mode: '0755'
+
+    - name: Run ptp.sh to enable ENA PTP hardware clock
+      ansible.builtin.shell: |
+        /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark/ptp.sh
+      register: ptp_result
+      changed_when: true
+      # exit 2 = phc_enable was 0; modprobe config written, reboot required.
+      # The subsequent phc_enable check + reboot block handles this — do not fail here.
+      failed_when: ptp_result.rc not in [0, 2]
+
+    - name: Show ptp.sh output
+      ansible.builtin.debug:
+        msg: "{{ ptp_result.stdout_lines }}"
+
+    # ── ENA PHC enable + conditional reboot ───────────────────────────────
+    # Check phc_enable after ptp.sh.  If it is not already 1, write the
+    # modprobe option and reboot so the ENA driver loads with PHC support.
+    # ansible.builtin.reboot waits for SSH to return before continuing.
+    # After the reboot (or immediately if already 1), configure chrony to
+    # use the NIC hardware clock — tightening sync from ±1–5 µs to ±100–500 ns.
+    - name: Check ENA phc_enable after ptp.sh
+      ansible.builtin.shell: cat /sys/module/ena/parameters/phc_enable 2>/dev/null || echo "0"
+      register: phc_enable_val
+      changed_when: false
+      failed_when: false
+
+    # ptp.sh writes /etc/modprobe.d/ena-phc.conf when phc_enable=0.
+    # Reboot here to activate it; ptp.sh is not re-run (modprobe config persists).
+    - name: Reboot to activate phc_enable=1 (ptp.sh wrote modprobe config)
+      when: phc_enable_val.stdout | trim != "1"
+      block:
+
+        - name: Reboot to activate phc_enable=1
+          ansible.builtin.reboot:
+            reboot_timeout: 300
+            connect_timeout: 60
+            post_reboot_delay: 10
+
+        - name: Verify phc_enable=1 after reboot
+          ansible.builtin.shell: cat /sys/module/ena/parameters/phc_enable 2>/dev/null || echo "0"
+          register: phc_enable_post
+          changed_when: false
+          failed_when: phc_enable_post.stdout | trim != "1"
+
+    # ── chrony hardware timestamping (ENA PHC) ─────────────────────────────
+    # Runs unconditionally here — either phc_enable was already 1, or the
+    # reboot above ensured it.  Written to a separate file so ptp.sh re-runs
+    # do not overwrite it.
+    - name: Detect primary interface and persist as IFACE env var for ec2-user
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        echo "export IFACE=${IFACE}" > /etc/profile.d/bench-iface.sh
+        echo "${IFACE}"
+      register: primary_iface
+      changed_when: true
+
+    - name: Write chrony refclock PHC config
+      ansible.builtin.copy:
+        dest: /etc/chrony.d/aws-phc.conf
+        mode: '0644'
+        content: |
+          # ENA PHC (Nitro hypervisor clock) as chrony reference — ±100–500 ns accuracy.
+          # Bypasses NTP UDP packet exchange; reads the PHC device directly.
+          # Requires phc_enable=1 in /etc/modprobe.d/ena-phc.conf.
+          # NOTE: do NOT use hwtimestamp <iface> on ENA — per-packet HW timestamping
+          # (SIOCSHWTSTAMP) is not supported; chrony will fatal-error if attempted.
+          refclock PHC /dev/ptp0 poll 0 dpoll -2 trust prefer
+
+    - name: Restart chronyd to activate refclock PHC
+      ansible.builtin.systemd:
+        name: chronyd
+        state: restarted
+
+    # ── Interrupt coalescing ───────────────────────────────────────────────
+    # ENA defaults: rx-usecs=20, tx-usecs=64 — adds up batching delay.
+    - name: Disable NIC interrupt coalescing for minimum latency
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ethtool -C "$IFACE" rx-usecs 0 tx-usecs 0 || \
+        { ethtool -C "$IFACE" rx-usecs 0; ethtool -C "$IFACE" tx-usecs 0; }
+      changed_when: true
+
+    - name: Display provisioning summary
+      ansible.builtin.debug:
+        msg:
+          - "=== Node provisioning complete ==="
+          - "Host: {{ inventory_hostname }}"
+          - "libxdp: /usr/local/lib/libxdp.so"
+          - "packet_replicator: /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark/packet_replicator"
+          - "latency tools: deployment/mcast_gre/benchmark/{receiver,sender}"
+
+
+# ── Play 2: Exchange — GRE tunnel to feeder ───────────────────────────────────
+- name: Configure GRE tunnel on mock exchange
+  hosts: exchange
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+    - name: Validate feeder_private_ip variable is provided
+      ansible.builtin.assert:
+        that:
+          - feeder_private_ip is defined
+          - feeder_private_ip | length > 0
+        fail_msg: "feeder_private_ip must be provided via --extra-vars"
+
+    - name: Check if GRE tunnel gre_feed already exists
+      ansible.builtin.shell: ip tunnel show gre_feed
+      register: gre_check
+      changed_when: false
+      failed_when: false
+
+    - name: Configure GRE tunnel to feeder
+      ansible.builtin.shell: |
+        IFACE=$(ip route show default | awk '/default/ {print $5}' | head -1)
+        LOCAL_IP=$(ip -4 addr show "$IFACE" | awk '/inet / {print $2}' | cut -d/ -f1)
+        ip tunnel add gre_feed mode gre remote {{ feeder_private_ip }} local "$LOCAL_IP" ttl 64
+        ip link set gre_feed up
+        ip route add 224.0.0.0/4 dev gre_feed
+      when: gre_check.rc != 0
+
+    - name: Persist GRE tunnel via NetworkManager dispatcher
+      ansible.builtin.copy:
+        dest: /etc/NetworkManager/dispatcher.d/99-gre-feed
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Restore GRE tunnel to feeder on interface up events
+          IFACE="$1"
+          EVENT="$2"
+          [ "$EVENT" != "up" ] && exit 0
+          ip route show default | grep -q "$IFACE" || exit 0
+
+          LOCAL_IP=$(ip -4 addr show "$IFACE" | awk '/inet / {print $2}' | cut -d/ -f1)
+          ip tunnel show gre_feed >/dev/null 2>&1 && exit 0
+
+          ip tunnel add gre_feed mode gre remote {{ feeder_private_ip }} local "$LOCAL_IP" ttl 64
+          ip link set gre_feed up
+          ip route add 224.0.0.0/4 dev gre_feed
+
+    - name: Confirm GRE tunnel is up
+      ansible.builtin.shell: ip tunnel show gre_feed
+      register: gre_verify
+      changed_when: false
+
+    - name: Confirm multicast route via tunnel
+      ansible.builtin.shell: ip route show 224.0.0.0/4
+      register: route_verify
+      changed_when: false
+
+    - name: Display exchange provisioning summary
+      ansible.builtin.debug:
+        msg:
+          - "=== Mock exchange provisioning complete ==="
+          - "Host: {{ inventory_hostname }}"
+          - "GRE tunnel (production path): {{ gre_verify.stdout }}"
+          - "Multicast route: {{ route_verify.stdout }}"
+
+
+# ── Play 3: Subscribers — ENA native-XDP NIC prep ─────────────────────────────
+# ENA requires MTU ≤3498 (frame fits in 4KB page) and combined queues ≤ MAX/2
+# (needs one XDP TX queue per RX queue) for native XDP mode.
+#
+# We set combined queues to 1 (not MAX/2) so that all RSS traffic lands on
+# queue 0 — the only queue where the AF_XDP socket is registered (xsks_map[0]).
+# On metal instances MAX/2 can be 16–32 queues; GRE from a single 5-tuple would
+# hash to one fixed non-zero queue, causing bpf_redirect_map to fall back to
+# XDP_PASS and the receiver to see nothing.  1 satisfies ENA's XDP constraint
+# (1 ≤ MAX/2) while guaranteeing all traffic arrives on queue 0.
+- name: Prepare subscribers for native XDP (MTU + ENA queue headroom)
+  hosts: subscribers
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+    - name: Set MTU to 3498 (ENA native XDP page-size limit)
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ip link set "$IFACE" mtu 3498
+      changed_when: true
+
+    - name: Persist MTU via NetworkManager
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        nmcli connection modify "$(nmcli -g GENERAL.CONNECTION device show "$IFACE")" \
+            ethernet.mtu 3498 || true
+      changed_when: false
+      failed_when: false
+
+    - name: Set ENA combined queues to 1 (guarantees all traffic on queue 0 for AF_XDP)
+      ansible.builtin.shell: |
+        IFACE={{ ansible_default_ipv4.interface }}
+        ethtool -L "$IFACE" combined 1
+      changed_when: true
+
+    - name: Install systemd service to persist ENA queue count across reboots
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ena-xdp-queues.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Set ENA combined queues to 1 for AF_XDP subscriber
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/bash -c '\
+            IFACE=$(ip -4 route show default | awk "{print \$5}" | head -1); \
+            IFACE=${IFACE:-eth0}; \
+            ethtool -L "$IFACE" combined 1'
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable ENA XDP queue service
+      ansible.builtin.systemd:
+        name: ena-xdp-queues.service
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+
+# ── Play 4: Feeder — packet_replicator systemd service ────────────────────────
+# Installs a systemd service that launches packet_replicator in GRE mode on boot
+# and starts it immediately.
+- name: Start packet_replicator on feeder (GRE mode)
+  hosts: feeder
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+    - name: Install packet_replicator start script
+      ansible.builtin.copy:
+        dest: /usr/local/bin/start-packet-replicator.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          IFACE=$(ip -4 route show default | awk '{% raw %}{print $5}{% endraw %}' | head -1)
+          exec /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark/packet_replicator \
+               "$IFACE" {{ mcast_group | default('224.0.31.50') }} {{ data_port | default(5000) }} --gre
+
+    - name: Install packet_replicator systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/packet-replicator.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=packet_replicator — GRE feed handler (AF_XDP zero-copy)
+          After=network-online.target ena-xdp-queues.service
+          Wants=network-online.target ena-xdp-queues.service
+
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory=/home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark
+          ExecStart=/usr/local/bin/start-packet-replicator.sh
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable and start packet_replicator service
+      ansible.builtin.systemd:
+        name: packet-replicator.service
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Wait for packet_replicator to finish AF_XDP initialisation
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Verify packet_replicator is running
+      ansible.builtin.command: systemctl is-active packet-replicator.service
+      register: pr_active
+      changed_when: false
+      failed_when: false
+
+    - name: Show journal on failure
+      ansible.builtin.command: journalctl -u packet-replicator.service -n 40 --no-pager
+      register: pr_journal
+      changed_when: false
+      when: pr_active.stdout != 'active'
+
+    - name: Fail with journal output if service is not active
+      ansible.builtin.fail:
+        msg: |
+          packet-replicator.service is {{ pr_active.stdout }} (expected: active)
+          --- journal ---
+          {{ pr_journal.stdout }}
+      when: pr_active.stdout != 'active'
+
+    - name: Display feeder service status
+      ansible.builtin.debug:
+        msg:
+          - "=== packet_replicator service started ==="
+          - "Status: {{ pr_active.stdout }}"
+          - "Group:  {{ mcast_group | default('224.0.31.50') }}:{{ data_port | default(5000) }}"
+          - "Mode:   GRE"
+
+
+# ── Play 5: Subscribers — multicast group registration ────────────────────────
+# Sends CTRL_MCAST_JOIN from each subscriber to the feeder's control channel.
+# Skipped automatically when feeder_private_ip is not defined.
+#
+# Re-run once packet_replicator is up:
+#   ansible-playbook -i <inventory> configure.yaml \
+#       --extra-vars "feeder_private_ip=<feeder-private-ip>"
+- name: Register subscribers with feeder multicast group
+  hosts: subscribers
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Skip registration when feeder_private_ip is not defined
+      ansible.builtin.meta: end_play
+      when: feeder_private_ip is not defined
+
+    - name: Compute per-subscriber multicast group
+      ansible.builtin.set_fact:
+        mcast_group: >-
+          {{ (base_mcast_group | default('224.0.31.50')).split('.')[:-1] | join('.') }}.{{
+             (base_mcast_group | default('224.0.31.50')).split('.')[-1] | int +
+             groups['subscribers'].index(inventory_hostname) | int }}
+
+    - name: Join multicast group via feeder control channel
+      ansible.builtin.shell: >
+        /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark/control_client
+        {{ feeder_private_ip }} mcast {{ mcast_group }}
+      register: join_result
+      failed_when: join_result.rc != 0
+
+    - name: Display registration result
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} registered — group {{ mcast_group }}: {{ join_result.stdout }}"
