@@ -10,6 +10,7 @@ A collection of low-latency networking tools for measuring and optimizing packet
 | [open_onload](#open_onload) | OpenOnload kernel bypass | C | — | Feed relay receiver with ENA AF_XDP integration |
 | [af_xdp_zero_copy_perf_benchmark](#af_xdp-zero-copy-performance-benchmark) | AF_XDP + eBPF XDP filters | C++ | Sub-microsecond forwarding | Market data fan-out / packet replicator |
 | [mcast2ucast](#mcast2ucast) | DPDK poll-mode driver | C | ~25 us RTT (metal) | Transparent multicast-over-unicast for AWS VPC |
+| [transit-gateway](#transit-gateway) | AWS TGW multicast (native) | Python / CDK | ~150-200 us OWD | One-way latency benchmark for TGW multicast |
 | [phc_probe](#phc_probe) | SO_TIMESTAMPING + PHC | Python | — | HW vs SW timestamp diagnostic with live graph |
 | [clock_bound_measure](#clock_bound_measure) | ClockBound + PTP/NTP | Python CDK + Bash | ±25–34µs (PTP) | Clock error bound measurement across instance types |
 
@@ -241,6 +242,73 @@ sudo ip route add 224.0.0.0/4 dev mcast0
 - Meson + Ninja build system
 - GCC (C11), g++ (C++17 for benchmarks)
 - Linux hugepages (2 GB recommended)
+
+---
+
+## transit-gateway
+
+**Path:** `transit-gateway/`
+
+A self-contained AWS CDK (Python) app that provisions a TGW multicast benchmark
+environment — 1 publisher + N subscribers (default 3, max 256) on PHC-capable
+instances — and orchestrates measurement via SSM. Measures **TGW multicast
+one-way latency** using NIC hardware RX timestamps from the ENA PHC, plus
+optional unicast RTT (sockperf) and throughput (iperf3) baselines.
+
+### Key Features
+- **Native TGW multicast domain** with `StaticSourcesSupport=enable`,
+  `Igmpv2Support=disable` (removes IGMP join/leave from the data path)
+- **Hardware RX timestamping** via `SO_TIMESTAMPING` + `SIOCSHWTSTAMP` against
+  `/dev/ptp_ena`; receiver hard-fails if `ts[2] == 0` to prevent silent
+  software-timestamp fallback
+- **Strict PTP pre-flight** — aborts the benchmark unless `chrony` is actively
+  disciplined to the local PHC on every host
+- **Three placement strategies:** `single-az-cpg` (cluster PG), `single-az`,
+  `cross-az` (subscribers round-robin across 3 subnets)
+- **Synth-time PHC family gate** — rejects non-PHC instance families
+  (`m6i`, `c5n`, …) with a clear `ValueError`
+- **Composable `--tool` flag** (repeatable / comma-separated): `mcast`,
+  `sockperf`, `iperf3` — runs in canonical order regardless of CLI order
+- **Pure CDK synthesis tests** (Hypothesis property tests for subscriber count,
+  parametrized PHC family allow/reject lists, placement-strategy coverage)
+- **`scripts/check_ptp.sh`** standalone diagnostic with per-host summary table
+
+### Quick Start
+```bash
+cd transit-gateway
+
+# One-time CDK env
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
+npx cdk bootstrap
+
+# Deploy 6 subscribers on m7i.4xlarge in a cluster placement group
+npx cdk deploy \
+  -c num_subscribers=6 \
+  -c instance_type=m7i.4xlarge \
+  -c placement_strategy=single-az-cpg
+
+# Run TGW one-way latency only
+scripts/run_benchmark.sh --stack-name TgwMulticastBenchmark \
+  --tool mcast --rate 1000 --duration 60
+
+# All three tools (mcast + sockperf + iperf3)
+scripts/run_benchmark.sh --stack-name TgwMulticastBenchmark \
+  --tool mcast,sockperf,iperf3
+
+# Diagnose PTP across the fleet
+scripts/check_ptp.sh --stack-name TgwMulticastBenchmark
+
+# Tear down
+npx cdk destroy
+```
+
+### Dependencies
+- AWS CDK 2.x (`aws-cdk-lib`, `constructs`, `cdk-nag`)
+- Python 3.9+ with `pytest` + `hypothesis` for tests
+- AWS account with TGW + cluster-placement-group quotas
+- PHC-capable EC2 family (`m7*`, `c7*`, `r7*`, `c8*`, `m8*`, `r8*`, `x8*`, …) —
+  enforced at synth time
 
 ---
 
