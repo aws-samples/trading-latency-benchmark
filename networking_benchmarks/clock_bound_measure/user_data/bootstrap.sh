@@ -147,25 +147,18 @@ if [[ ! -d repo ]]; then
     git clone https://github.com/aws/clock-bound.git repo
 fi
 cd repo/examples/client/rust
-cargo build --release
+cargo build --release 2>&1 | tail -5
 
-# The example client binary is 'clock-bound-vmclock-client-example'
-CLIENT_BIN="/opt/clock-bound/repo/target/release/clock-bound-vmclock-client-example"
-if [[ -x "$CLIENT_BIN" ]]; then
+# Find the built binary — name varies by version
+CLIENT_BIN=$(find /opt/clock-bound/repo/target/release -maxdepth 1 -type f -executable \
+    ! -name "*.d" ! -name "*.so" ! -name "clockbound" \
+    | head -1)
+if [[ -n "$CLIENT_BIN" ]]; then
     cp "$CLIENT_BIN" /usr/local/bin/clock-bound-client
+    echo "Client binary installed: $(basename $CLIENT_BIN)"
 else
-    # Fallback: search for any client binary
-    CLIENT_BIN=$(find /opt/clock-bound/repo/target/release -maxdepth 1 -type f -executable \
-        ! -name "*.d" ! -name "*.so" | grep -i client | head -1)
-    if [[ -n "$CLIENT_BIN" ]]; then
-        cp "$CLIENT_BIN" /usr/local/bin/clock-bound-client
-    else
-        echo "WARNING: No client binary found"
-        find /opt/clock-bound/repo/target/release -maxdepth 1 -type f -executable ! -name "*.d" ! -name "*.so"
-    fi
+    echo "WARNING: No client binary found in target/release"
 fi
-
-chmod +x /usr/local/bin/clock-bound-client 2>/dev/null || true
 
 # ── Step 6: Write status marker ─────────────────────────────────────────────
 INSTANCE_TYPE=$(TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \

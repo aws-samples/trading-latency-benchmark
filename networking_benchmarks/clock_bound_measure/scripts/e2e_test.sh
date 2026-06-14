@@ -9,7 +9,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # ── Defaults ─────────────────────────────────────────────────────────────────
 INSTANCE_TYPE_1="m7i.4xlarge"
 INSTANCE_TYPE_2="m5.4xlarge"
-CLEANUP=true
+CLEANUP=false
 REGION=""
 VERBOSE=false
 
@@ -20,7 +20,6 @@ while [[ $# -gt 0 ]]; do
         --instance-type-2) INSTANCE_TYPE_2="$2"; shift 2 ;;
         --region) REGION="$2"; shift 2 ;;
         --cleanup) CLEANUP=true; shift ;;
-        --no-cleanup) CLEANUP=false; shift ;;
         --verbose) VERBOSE=true; shift ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
@@ -29,8 +28,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --instance-type-1 TYPE  Instance type for first EC2 (default: c6in.4xlarge)"
             echo "  --instance-type-2 TYPE  Instance type for second EC2 (default: c6in.4xlarge)"
             echo "  --region REGION         AWS region to deploy to"
-            echo "  --cleanup               Destroy stack after test (default)"
-            echo "  --no-cleanup            Keep stack running after test"
+            echo "  --cleanup               Destroy stack after test"
             echo "  --verbose               Pass --verbose to run_clock_bound.sh"
             echo "  -h, --help              Show this help"
             exit 0 ;;
@@ -90,12 +88,10 @@ fi
 echo ""
 if [[ "$CLEANUP" == "true" ]]; then
     echo "[3/3] Destroying stack..."
-    npx cdk destroy $CDK_REGION_FLAG --force 2>&1 | tail -5
-    echo ""
-    echo "Stack destroyed."
+    "$SCRIPT_DIR/cleanup.sh" $RUN_REGION_FLAG
 else
     echo "[3/3] Skipping cleanup (--no-cleanup). Stack is still running."
-    echo "  To destroy later: cd $PROJECT_DIR && source .venv/bin/activate && npx cdk destroy"
+    echo "  To destroy later: ./scripts/cleanup.sh ${RUN_REGION_FLAG}"
 fi
 
 echo ""
