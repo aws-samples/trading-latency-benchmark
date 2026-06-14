@@ -11,6 +11,7 @@ A collection of low-latency networking tools for measuring and optimizing packet
 | [af_xdp_zero_copy_perf_benchmark](#af_xdp-zero-copy-performance-benchmark) | AF_XDP + eBPF XDP filters | C++ | Sub-microsecond forwarding | Market data fan-out / packet replicator |
 | [mcast2ucast](#mcast2ucast) | DPDK poll-mode driver | C | ~25 us RTT (metal) | Transparent multicast-over-unicast for AWS VPC |
 | [phc_probe](#phc_probe) | SO_TIMESTAMPING + PHC | Python | — | HW vs SW timestamp diagnostic with live graph |
+| [clock_bound_measure](#clock_bound_measure) | ClockBound + PTP/NTP | Python CDK + Bash | ±25–34µs (PTP) | Clock error bound measurement across instance types |
 
 ## Architecture Overview
 
@@ -272,6 +273,51 @@ sudo python3 utilities/phc_probe/ts_receiver.py ens5 --port 9999 --live
 - Python 3.9+ (receiver), Python 3.6+ (sender)
 - EC2 instance with ENA PHC enabled (`phc_enable=1`)
 - Root access on the receiver for `SIOCSHWTSTAMP` ioctl
+
+---
+
+## clock_bound_measure
+
+**Path:** `clock_bound_measure/`
+
+An automated benchmark for measuring [ClockBound](https://github.com/aws/clock-bound) clock error bounds across EC2 instances, comparing PTP (Precision Time Protocol) vs NTP time synchronization. Deploys via Python CDK, queries via SSM.
+
+### Key Features
+- **Auto-detects PTP PHC** on supported instances (M7i, R7i, etc.) and configures chrony refclock
+- **Installs ClockBound 3.0** daemon with feed-forward clock discipline (no chrony dependency for bounds)
+- **Reports two error bound calculations:** ClockBound daemon (±63–78µs) and chrony+PHC formula (±25–34µs)
+- **SSM-based** — no SSH keys, no inbound ports
+- **Configurable instance types** via CDK parameters, region via `-c region=`
+
+### Quick Start
+```bash
+cd clock_bound_measure
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# Deploy PTP instance + NTP instance
+npx cdk deploy -c region=us-east-1 \
+    --parameters InstanceType1=m7i.4xlarge \
+    --parameters InstanceType2=m5.4xlarge
+
+# Query results (~5-7 min after deploy for bootstrap)
+./scripts/run_clock_bound.sh --region us-east-1
+
+# Or run full e2e (deploy + query + optional destroy)
+./scripts/e2e_test.sh --region us-east-1 \
+    --instance-type-1 m7i.4xlarge --instance-type-2 m5.4xlarge --no-cleanup
+```
+
+### Measured Results
+
+| Instance Type | Sync | ClockBound | Chrony+PHC Formula |
+|---------------|------|------------|-------------------|
+| m7i.4xlarge | PTP | ±63–78µs | ±25–34µs |
+| m5.4xlarge | NTP | ±1391–1448µs | N/A |
+
+### Dependencies
+- Python 3.9+, Node.js (CDK CLI), AWS CLI v2, Session Manager plugin
+- PTP-capable instance families: M7a, M7g, M7i, R7a, R7g, R7i, I8g
 
 ---
 

@@ -482,3 +482,6 @@ config.properties.bak
 # Kiro
 .kiro/
 *.code-workspace
+
+# Superpowers specs/plans (local working docs, not shipped)
+**/docs/superpowers/
