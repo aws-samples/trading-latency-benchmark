@@ -149,6 +149,31 @@ npx cdk deploy -c region=us-east-1 \
     --no-cleanup
 ```
 
+### Event Ordering Demo
+
+Demonstrates ClockBound's core value proposition: determining whether two events on different instances can be definitively ordered.
+
+```bash
+# Requires a running stack (use --no-cleanup above)
+./scripts/demo_event_ordering.sh --region us-east-1
+```
+
+The demo measures actual clock error bounds from both instances, then simulates event ordering at increasing delays until the bounded timestamp intervals no longer overlap:
+
+```
+── Delay: 0µs (simultaneous) ────────────────────────────────
+  A: [===]  ±72µs
+  B: [============================================================]  ±1390µs
+     ↑ OVERLAP ↑
+  Verdict: AMBIGUOUS — cannot determine order
+
+── Delay: 100µs ─────────────────────────────────────────────
+  A: [==]  ±72µs
+  B:     [========================================================]  ±1390µs
+       ↑ GAP ↑
+  Verdict: ORDERED — A happened before B
+```
+
 ### Teardown
 
 ```bash
@@ -259,7 +284,8 @@ clock_bound_measure/
 │   └── bootstrap.sh            # Instance bootstrap (PTP, ClockBound, Rust)
 └── scripts/
     ├── run_clock_bound.sh      # Query instances via SSM
-    └── e2e_test.sh             # Deploy + query + optional cleanup
+    ├── e2e_test.sh             # Deploy + query + optional cleanup
+    └── demo_event_ordering.sh  # Event ordering visualization
 ```
 
 ## References
