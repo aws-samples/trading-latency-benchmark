@@ -1,0 +1,17 @@
+{
+  "app": "python3 app.py",
+  "watch": {
+    "include": ["**"],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      "requirements*.txt",
+      "source.bat",
+      "**/__pycache__",
+      "**/.venv"
+    ]
+  },
+  "context": {
+    "@aws-cdk/aws-ec2:restrictDefaultSecurityGroup": true
+  }
+}
