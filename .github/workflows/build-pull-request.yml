@@ -239,13 +239,30 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
-      
+
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libbpf-dev libxdp-dev
         continue-on-error: true
-      
+
       - name: Build AF_XDP components
         run: make
         continue-on-error: true
+
+  mcast2ucast-deploy-cdk-tests:
+    name: CDK unit tests for mcast2ucast benchmark stack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CDK Python deps
+        working-directory: networking_benchmarks/mcast2ucast/deploy/cdk
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run CDK unit tests
+        working-directory: networking_benchmarks/mcast2ucast/deploy/cdk
+        run: python -m pytest tests/ -v
