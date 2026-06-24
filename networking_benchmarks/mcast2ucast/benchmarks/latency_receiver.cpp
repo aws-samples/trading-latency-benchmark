@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <time.h>
 #include <signal.h>
 #include <cerrno>
@@ -53,10 +54,13 @@ static uint64_t pct(std::vector<uint64_t> &sorted, int p)
 static void usage(const char *prog)
 {
 	printf("Usage: %s [options]\n"
+	       "  -g <group>    multicast group to join (default: 224.0.0.101)\n"
+	       "  -I <iface_ip> local interface IP for multicast join (default: 0.0.0.0)\n"
 	       "  -p <port>     UDP port (default: %d)\n"
 	       "  -c <count>    packets to receive (default: %d)\n"
 	       "  -t <timeout>  seconds to wait (default: %d)\n"
 	       "  -r            print raw latencies\n"
+	       "  --csv-out <path>  write seq,rx_ns per packet to CSV file\n"
 	       "  -h            this help\n",
 	       prog, DEF_PORT, DEF_COUNT, DEF_TIMEOUT);
 }
@@ -67,15 +71,26 @@ int main(int argc, char *argv[])
 	int count   = DEF_COUNT;
 	int timeout = DEF_TIMEOUT;
 	bool raw    = false;
+	const char *csv_out_path = nullptr;
+	const char *mcast_group = "224.0.0.101";
+	const char *iface_ip    = "0.0.0.0";
+
+	static const struct option long_opts[] = {
+		{"csv-out", required_argument, nullptr, 1000},
+		{nullptr, 0, nullptr, 0},
+	};
 
 	int opt;
-	while ((opt = getopt(argc, argv, "p:c:t:rh")) != -1) {
+	while ((opt = getopt_long(argc, argv, "g:I:p:c:t:rh", long_opts, nullptr)) != -1) {
 		switch (opt) {
+		case 'g': mcast_group = optarg; break;
+		case 'I': iface_ip    = optarg; break;
 		case 'p': port    = atoi(optarg); break;
 		case 'c': count   = atoi(optarg); break;
 		case 't': timeout = atoi(optarg); break;
 		case 'r': raw     = true;         break;
 		case 'h': usage(argv[0]); return 0;
+		case 1000: csv_out_path = optarg; break;
 		default:  usage(argv[0]); return 1;
 		}
 	}
@@ -91,12 +106,38 @@ int main(int argc, char *argv[])
 	struct sockaddr_in addr{};
 	addr.sin_family      = AF_INET;
 	addr.sin_port        = htons(port);
-	addr.sin_addr.s_addr = INADDR_ANY;
+	addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
 	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		perror("bind");
 		close(fd);
 		return 1;
+	}
+
+	struct ip_mreq mreq{};
+	mreq.imr_multiaddr.s_addr = inet_addr(mcast_group);
+	mreq.imr_interface.s_addr = inet_addr(iface_ip);
+	if (setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+		perror("IP_ADD_MEMBERSHIP");
+		close(fd);
+		return 1;
+	}
+
+	FILE *csv_fp = nullptr;
+	// csv_buf must outlive csv_fp; main() lifetime covers fclose below.
+	char csv_buf[65536];
+	if (csv_out_path) {
+		csv_fp = fopen(csv_out_path, "w");
+		if (!csv_fp) {
+			perror("fopen csv-out");
+			close(fd);
+			return 1;
+		}
+		// Buffer 64KB to avoid I/O jitter affecting RX timestamps
+		setvbuf(csv_fp, csv_buf, _IOFBF, sizeof(csv_buf));
+		// Header row keeps the file self-describing for analyze_spread.py
+		// and any future consumer.
+		fprintf(csv_fp, "seq,rx_ns\n");
 	}
 
 	struct timeval tv = { .tv_sec = timeout, .tv_usec = 0 };
@@ -143,6 +184,9 @@ int main(int argc, char *argv[])
 
 		uint64_t ulat = (uint64_t)lat;
 		latencies.push_back(ulat);
+		if (csv_fp) {
+			fprintf(csv_fp, "%" PRIu64 ",%" PRIu64 "\n", seq, rx_ns);
+		}
 		sum_lat += ulat;
 		received++;
 
@@ -181,6 +225,12 @@ int main(int argc, char *argv[])
 			 (t1.tv_nsec - t0.tv_nsec) / 1e9;
 
 	close(fd);
+
+	if (csv_fp) {
+		fflush(csv_fp);
+		fclose(csv_fp);
+		csv_fp = nullptr;
+	}
 
 	if (received == 0) {
 		printf("No packets received.\n");
