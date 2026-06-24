@@ -99,6 +99,11 @@ echo "  [+] mcast2ucast built at ${MCAST_DIR}/build/mcast2ucast"
 echo ""
 echo "=== [4/6] Building benchmark tools ==="
 cd "${MCAST_DIR}/benchmarks"
+# `make clean` first: the source tree may ship pre-built binaries from the
+# operator's workstation (e.g. macOS arm64 Mach-O). tar preserves mtimes,
+# so without clean, GNU make sees binary newer than .cpp and skips the
+# rebuild — leaving an unrunnable binary baked into the AMI.
+sudo -u ec2-user make clean
 sudo -u ec2-user make
 echo "  [+] Benchmarks built"
 
