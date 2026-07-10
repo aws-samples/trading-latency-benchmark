@@ -154,7 +154,11 @@ echo "[bake] copying remote bootstrap runner..."
 # from heredoc-inside-bash-c-inside-single-quoted-ssh-arg. AL2023 cleanup
 # rationale (do NOT touch /etc/systemd/network or machine-id; minimal
 # cloud-init clean only) is documented in this file as comments.
-cat > /tmp/bake-remote-runner.sh <<'REMOTE_EOF'
+# Local staging files use mktemp so two concurrent bakes on one workstation
+# don't clobber each other. The remote paths are on a fresh instance, unique.
+LOCAL_RUNNER=$(mktemp "${TMPDIR:-/tmp}/bake-remote-runner.XXXXXX.sh")
+LOCAL_SSH_LOG=$(mktemp "${TMPDIR:-/tmp}/bake-ssh.XXXXXX.log")
+cat > "$LOCAL_RUNNER" <<'REMOTE_EOF'
 #!/bin/bash
 set -e
 # Use absolute path: under sudo, $HOME=/root, not /home/ec2-user.
@@ -167,7 +171,7 @@ echo 0 > /proc/sys/vm/nr_hugepages
 # files, truncating machine-id) breaks the NIC initialization on next boot.
 echo BOOTSTRAP_OK
 REMOTE_EOF
-scp "${SSH_OPTS[@]}" /tmp/bake-remote-runner.sh ec2-user@"$PUBLIC_IP":/tmp/bake-remote-runner.sh
+scp "${SSH_OPTS[@]}" "$LOCAL_RUNNER" ec2-user@"$PUBLIC_IP":/tmp/bake-remote-runner.sh
 
 echo "[bake] launching bootstrap.sh detached on instance ..."
 # Detach via setsid so the SSH session can drop without killing bootstrap
@@ -179,10 +183,10 @@ ssh "${SSH_OPTS[@]}" ec2-user@"$PUBLIC_IP" '
     sudo nohup setsid bash -c "/tmp/bake-remote-runner.sh >> /tmp/bootstrap.log 2>&1; echo \$? > /tmp/bootstrap.exit" < /dev/null > /dev/null 2>&1 &
     sleep 2
     echo LAUNCHED
-' < /dev/null > /tmp/bake-ssh.log 2>&1
-if ! grep -q LAUNCHED /tmp/bake-ssh.log; then
+' < /dev/null > "$LOCAL_SSH_LOG" 2>&1
+if ! grep -q LAUNCHED "$LOCAL_SSH_LOG"; then
     echo "ERROR: failed to launch detached bootstrap" >&2
-    cat /tmp/bake-ssh.log >&2
+    cat "$LOCAL_SSH_LOG" >&2
     exit 11
 fi
 

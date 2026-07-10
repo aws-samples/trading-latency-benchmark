@@ -8,6 +8,7 @@
 #   --ami-id <id>          AMI to deploy (required)
 #   --key <keypair>        EC2 key pair name (default: my-keypair)
 #   --topology <t>         cpg|same-az|multi-az (default: cpg)
+#   --single-az <az>       AZ for cpg/same-az placement (default: <region>a)
 #   --sender-type <t>      sender instance type (default: c7a.2xlarge)
 #   --receiver-type <t>    subscriber instance type (default: c7a.2xlarge)
 #   --pps <n>              packets per second (default: 1000)
@@ -44,6 +45,7 @@ ORCHESTRATE="$HERE/orchestrate.sh"
 AMI=""
 KEY="my-keypair"
 TOPOLOGY="cpg"
+SINGLE_AZ=""
 SENDER_TYPE="c7a.2xlarge"
 RECEIVER_TYPE="c7a.2xlarge"
 PPS=1000
@@ -59,6 +61,7 @@ while [[ $# -gt 0 ]]; do
         --ami-id)        AMI="$2";           shift 2 ;;
         --key)           KEY="$2";           shift 2 ;;
         --topology)      TOPOLOGY="$2";      shift 2 ;;
+        --single-az)     SINGLE_AZ="$2";     shift 2 ;;
         --sender-type)   SENDER_TYPE="$2";   shift 2 ;;
         --receiver-type) RECEIVER_TYPE="$2"; shift 2 ;;
         --pps)           PPS="$2";           shift 2 ;;
@@ -104,6 +107,14 @@ run_step() {
     fi
 }
 
+# Print sender + all subscriber primary IPs from topology.json, one per line.
+# Usage:  local -a ips; while IFS= read -r ip; do ips+=("$ip"); done < <(_topology_ips)
+# (Prints rather than using a nameref so this stays bash 3.2 compatible — macOS
+# ships bash 3.2, which has no `local -n`.)
+_topology_ips() {
+    jq -r '.sender.primary_ip, .subscriber_hosts[].primary_ip' "$HERE/topology.json"
+}
+
 # Probe SSH on every host in topology.json (up to 30 min).
 # CDK CREATE_COMPLETE does not mean sshd is accepting connections.
 wait_for_ssh() {
@@ -111,11 +122,8 @@ wait_for_ssh() {
     local cell_log="$LOG_DIR/$tag.log"
     local key
     key=$(jq -r '.ssh_key_path' "$HERE/topology.json")
-    local -a ips
-    ips+=( "$(jq -r '.sender.primary_ip' "$HERE/topology.json")" )
-    while IFS= read -r ip; do ips+=("$ip"); done < <(
-        jq -r '.subscriber_hosts[].primary_ip' "$HERE/topology.json"
-    )
+    local -a ips=()
+    while IFS= read -r ip; do ips+=("$ip"); done < <(_topology_ips)
     echo "[sweep:$tag] probing SSH (180×10s = up to 30min) on ${#ips[@]} hosts" \
         | tee -a "$cell_log"
     local SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
@@ -148,11 +156,8 @@ rebuild_benchmarks() {
     local cell_log="$LOG_DIR/$tag.log"
     local key
     key=$(jq -r '.ssh_key_path' "$HERE/topology.json")
-    local -a ips
-    ips+=( "$(jq -r '.sender.primary_ip' "$HERE/topology.json")" )
-    while IFS= read -r ip; do ips+=("$ip"); done < <(
-        jq -r '.subscriber_hosts[].primary_ip' "$HERE/topology.json"
-    )
+    local -a ips=()
+    while IFS= read -r ip; do ips+=("$ip"); done < <(_topology_ips)
     local SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
                     -o ConnectTimeout=15 -o ServerAliveInterval=15
                     -o ServerAliveCountMax=8 -i "$key")
@@ -181,8 +186,11 @@ for H in "${CELLS[@]}"; do
     echo "[sweep] CELL $tag  (num-subscriber-hosts=$H)"
     echo "============================================================"
 
+    deploy_az_args=()
+    [[ -n "$SINGLE_AZ" ]] && deploy_az_args=(--single-az "$SINGLE_AZ")
     run_step "$tag" deploy \
         --topology "$TOPOLOGY" \
+        ${deploy_az_args[@]+"${deploy_az_args[@]}"} \
         --sender-type "$SENDER_TYPE" \
         --receiver-type "$RECEIVER_TYPE" \
         --ami-id "$AMI" --key "$KEY" \

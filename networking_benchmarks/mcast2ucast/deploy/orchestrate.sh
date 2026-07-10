@@ -21,6 +21,7 @@ DEFAULT_PPS=1000
 DEFAULT_COUNT=1000
 DEFAULT_PAYLOAD=64
 DEFAULT_RUN_TIMEOUT_S=30
+DEFAULT_MCAST_GROUP="224.0.0.101"  # recorded in topology.json; single source of truth
 
 # The variables above are consumed by cmd_* implementations in Tasks 11-16.
 # Reference them here so shellcheck does not flag them as unused while the
@@ -73,6 +74,19 @@ require_tools() {
     done
 }
 
+require_positive_int() {
+    # require_positive_int <field-name> <value>
+    #
+    # jq prints "null" for absent keys, and `for ((i=0; i<null; i++))` is a
+    # silent no-op — so a malformed topology.json could false-pass a run/verify
+    # or produce an empty collect. Guard every count read out of topology.json.
+    local name="$1" val="$2"
+    if ! [[ "$val" =~ ^[0-9]+$ ]] || [ "$val" -lt 1 ]; then
+        err "topology.json: $name is '$val' — not a positive integer"
+        exit 30
+    fi
+}
+
 ssh_to() {
     # ssh_to <host_ip> <ssh_key_path> <remote-cmd-string>
     #
@@ -91,6 +105,14 @@ scp_to() {
     scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=60 -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
         -i "$key" "$local_path" ec2-user@"$ip":"$remote_path"
+}
+
+scp_from() {
+    # scp_from <host_ip> <ssh_key_path> <remote_path> <local_path>
+    local ip="$1" key="$2" remote_path="$3" local_path="$4"
+    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=60 -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
+        -i "$key" ec2-user@"$ip":"$remote_path" "$local_path"
 }
 
 # ---- subcommands -----------------------------------------------------
@@ -189,26 +211,28 @@ cmd_deploy() {
 
     o() { echo "$out_json" | jq -r --arg k "$1" '.[] | select(.OutputKey==$k) | .OutputValue'; }
 
-    local sender_instance_id sender_primary_ip sender_secondary_eni sender_secondary_ip
+    local sender_instance_id sender_primary_ip sender_secondary_eni sender_secondary_ip sender_az_out
     sender_instance_id=$(o SenderInstanceId)
     sender_primary_ip=$(o SenderPublicIp)
     sender_secondary_eni=$(o SenderSecondaryEniId)
     sender_secondary_ip=$(o SenderSecondaryIp)
+    sender_az_out=$(o SenderAz)
 
-    for v in sender_instance_id sender_primary_ip sender_secondary_eni sender_secondary_ip; do
+    for v in sender_instance_id sender_primary_ip sender_secondary_eni sender_secondary_ip sender_az_out; do
         if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then
             err "missing CFN output for $v"; exit 21
         fi
     done
 
-    local -a sub_instance_ids sub_primary_ips sub_secondary_enis sub_secondary_ips sub_secondary_macs
+    local -a sub_instance_ids sub_primary_ips sub_secondary_enis sub_secondary_ips sub_secondary_macs sub_azs
     for ((i=0; i<num_hosts; i++)); do
         sub_instance_ids[i]=$(o "Subscriber${i}InstanceId")
         sub_primary_ips[i]=$(o "Subscriber${i}PublicIp")
         sub_secondary_enis[i]=$(o "Subscriber${i}SecondaryEniId")
         sub_secondary_ips[i]=$(o "Subscriber${i}SecondaryIp")
+        sub_azs[i]=$(o "Subscriber${i}Az")
         for val in "${sub_instance_ids[i]}" "${sub_primary_ips[i]}" \
-                   "${sub_secondary_enis[i]}" "${sub_secondary_ips[i]}"; do
+                   "${sub_secondary_enis[i]}" "${sub_secondary_ips[i]}" "${sub_azs[i]}"; do
             if [ -z "$val" ] || [ "$val" = "null" ]; then
                 err "missing/null CFN output for a Subscriber${i}* key"; exit 21
             fi
@@ -237,12 +261,10 @@ cmd_deploy() {
     done
 
     echo "[deploy] writing $TOPOLOGY_JSON"
-    local sender_az_resolved="$single_az"
-    local receiver_az_resolved="$single_az"
-    if [ "$topology" = "multi-az" ]; then
-        sender_az_resolved="$sender_az"
-        receiver_az_resolved="$receiver_az"
-    fi
+    # AZs come from the CDK outputs (authoritative per-host), not re-derived
+    # from the CLI flags — for spread-az each subscriber lands in a distinct
+    # AZ that a single scalar cannot represent.
+    local sender_az_resolved="$sender_az_out"
 
     # Note: env-var prefix is a command-prefix assignment, not a `local`
     # declaration, so SC2155 does not apply here. Newlines (not NULs!) are
@@ -250,6 +272,7 @@ cmd_deploy() {
     # mandate, so `printf '%s\0'` would silently concatenate elements.
     NUM_HOSTS="$num_hosts" \
     NUM_DAEMONS="$num_daemons" \
+    MCAST_GROUP="$DEFAULT_MCAST_GROUP" \
     TOPOLOGY="$topology" \
     KEY_NAME="$key" \
     SSH_KEY_PATH="$ssh_key_path" \
@@ -263,12 +286,12 @@ cmd_deploy() {
     SENDER_SECONDARY_IP="$sender_secondary_ip" \
     SENDER_SECONDARY_MAC="$sender_secondary_mac" \
     RECEIVER_TYPE="$receiver_type" \
-    RECEIVER_AZ="$receiver_az_resolved" \
     SUB_INSTANCE_IDS="$(printf '%s\n' "${sub_instance_ids[@]}")" \
     SUB_PRIMARY_IPS="$(printf '%s\n' "${sub_primary_ips[@]}")" \
     SUB_SECONDARY_ENIS="$(printf '%s\n' "${sub_secondary_enis[@]}")" \
     SUB_SECONDARY_IPS="$(printf '%s\n' "${sub_secondary_ips[@]}")" \
     SUB_SECONDARY_MACS="$(printf '%s\n' "${sub_secondary_macs[@]}")" \
+    SUB_AZS="$(printf '%s\n' "${sub_azs[@]}")" \
     DEPLOYED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     python3 - "$TOPOLOGY_JSON" <<'PYEOF'
 import json, sys, os
@@ -284,6 +307,7 @@ sub_primary_ips = os.environ["SUB_PRIMARY_IPS"].splitlines()[:num_hosts]
 sub_secondary_enis = os.environ["SUB_SECONDARY_ENIS"].splitlines()[:num_hosts]
 sub_secondary_ips = os.environ["SUB_SECONDARY_IPS"].splitlines()[:num_hosts]
 sub_secondary_macs = os.environ["SUB_SECONDARY_MACS"].splitlines()[:num_hosts]
+sub_azs = os.environ["SUB_AZS"].splitlines()[:num_hosts]
 
 ports = list(range(5001, 5001 + num_daemons))
 
@@ -296,6 +320,7 @@ doc = {
     "region": os.environ["REGION"],
     "num_subscriber_hosts": num_hosts,
     "num_subscriber_daemons_per_host": num_daemons,
+    "mcast_group": os.environ["MCAST_GROUP"],
     "sender": {
         "instance_id": os.environ["SENDER_INSTANCE_ID"],
         "instance_type": os.environ["SENDER_TYPE"],
@@ -311,7 +336,7 @@ doc = {
             "index": i,
             "instance_id": sub_instance_ids[i],
             "instance_type": os.environ["RECEIVER_TYPE"],
-            "az": os.environ["RECEIVER_AZ"],
+            "az": sub_azs[i],
             "primary_ip": sub_primary_ips[i],
             "secondary_eni_id": sub_secondary_enis[i],
             "secondary_ip": sub_secondary_ips[i],
@@ -349,8 +374,10 @@ cmd_setup() {
     local sender_ip sender_tap
     sender_ip=$(jq -r '.sender.primary_ip' "$TOPOLOGY_JSON")
     sender_tap=$(jq -r '.sender.tap_ip' "$TOPOLOGY_JSON")
-    local num_hosts
+    local num_hosts mcast_group
     num_hosts=$(jq -r '.num_subscriber_hosts' "$TOPOLOGY_JSON")
+    require_positive_int num_subscriber_hosts "$num_hosts"
+    mcast_group=$(jq -r ".mcast_group // \"$DEFAULT_MCAST_GROUP\"" "$TOPOLOGY_JSON")
 
     # Build the sender's deploy.conf with H*D subscriber lines and SCP it
     # ahead of running setup_instance.sh on the sender host. setup_instance.sh
@@ -363,7 +390,11 @@ cmd_setup() {
     # OR: pre-generate the file and pass it as an arg. Chose the SCP-then-skip
     # approach because the file content is wholly client-derived from
     # topology.json and doesn't depend on any host-side state.
-    local deploy_conf="/tmp/orch-sender-deploy.conf"
+    # Per-run temp dir so concurrent orchestrate invocations on one workstation
+    # don't clobber each other's deploy.conf / setup logs mid-scp.
+    local tmpdir
+    tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/orch-setup.XXXXXX")
+    local deploy_conf="$tmpdir/sender-deploy.conf"
     {
         echo "# Auto-generated by orchestrate.sh — sender side, H*D fan-out."
         local i d
@@ -372,13 +403,13 @@ cmd_setup() {
             sip=$(jq -r ".subscriber_hosts[$i].secondary_ip" "$TOPOLOGY_JSON")
             mac=$(jq -r ".subscriber_hosts[$i].secondary_mac" "$TOPOLOGY_JSON")
             for d in $(jq -r ".subscriber_hosts[$i].daemon_ports[]" "$TOPOLOGY_JSON"); do
-                echo "subscriber 224.0.0.101 $sip $d $mac"
+                echo "subscriber $mcast_group $sip $d $mac"
             done
         done
     } > "$deploy_conf"
 
     local total_subs
-    total_subs=$(wc -l < "$deploy_conf")
+    total_subs=$(grep -c '^subscriber ' "$deploy_conf")
     echo "[setup] deploy.conf has $total_subs lines (H=$num_hosts, D=$(jq -r '.num_subscriber_daemons_per_host' "$TOPOLOGY_JSON"))"
 
     setup_host() {
@@ -444,7 +475,7 @@ cmd_setup() {
 
     # Launch sender + all subscriber hosts in parallel
     setup_host sender "$sender_ip" "$sender_tap" "$first_sub_tap" "$first_sub_ip" "$first_sub_mac" \
-        > /tmp/orch-setup-sender.log 2>&1 &
+        > "$tmpdir/setup-sender.log" 2>&1 &
     local pids=($!)
 
     local i
@@ -453,7 +484,7 @@ cmd_setup() {
         sub_ip=$(jq -r ".subscriber_hosts[$i].primary_ip" "$TOPOLOGY_JSON")
         sub_tap=$(jq -r ".subscriber_hosts[$i].tap_ip" "$TOPOLOGY_JSON")
         setup_host subscriber "$sub_ip" "$sub_tap" "$sender_tap" "" "" \
-            > "/tmp/orch-setup-sub-$i.log" 2>&1 &
+            > "$tmpdir/setup-sub-$i.log" 2>&1 &
         pids+=($!)
     done
 
@@ -462,11 +493,11 @@ cmd_setup() {
         wait "$pid" || { rc=$?; }
     done
 
-    echo "----- /tmp/orch-setup-sender.log (tail 30) -----"
-    tail -n 30 /tmp/orch-setup-sender.log || true
+    echo "----- $tmpdir/setup-sender.log (tail 30) -----"
+    tail -n 30 "$tmpdir/setup-sender.log" || true
     for ((i=0; i<num_hosts; i++)); do
-        echo "----- /tmp/orch-setup-sub-$i.log (tail 30) -----"
-        tail -n 30 "/tmp/orch-setup-sub-$i.log" || true
+        echo "----- $tmpdir/setup-sub-$i.log (tail 30) -----"
+        tail -n 30 "$tmpdir/setup-sub-$i.log" || true
     done
 
     if [ "$rc" -ne 0 ]; then
@@ -491,13 +522,7 @@ cmd_verify() {
     local key_path num_hosts
     key_path=$(jq -r '.ssh_key_path' "$TOPOLOGY_JSON")
     num_hosts=$(jq -r '.num_subscriber_hosts' "$TOPOLOGY_JSON")
-    # Guard against missing/malformed key — jq prints "null" for absent
-    # keys and `for ((i=0; i<null; i++))` is a silent no-op that would
-    # let a corrupt topology.json produce a false-pass verify result.
-    if ! [[ "$num_hosts" =~ ^[0-9]+$ ]] || [ "$num_hosts" -lt 1 ]; then
-        err "topology.json: num_subscriber_hosts is '$num_hosts' — not a positive integer"
-        exit 30
-    fi
+    require_positive_int num_subscriber_hosts "$num_hosts"
 
     local nic_flag=""
     [ -n "$primary_nic" ] && nic_flag="--primary-nic $primary_nic"
@@ -575,24 +600,15 @@ cmd_run() {
     [ "$expected_s" -lt 1 ] && expected_s=1
     local recv_timeout_s=$(( DEFAULT_RUN_TIMEOUT_S > expected_s * 2 ? DEFAULT_RUN_TIMEOUT_S : expected_s * 2 ))
 
-    local key_path sender_ip num_hosts num_daemons
+    local key_path sender_ip num_hosts num_daemons mcast_group
     key_path=$(jq -r '.ssh_key_path'         "$TOPOLOGY_JSON")
     sender_ip=$(jq -r '.sender.primary_ip'   "$TOPOLOGY_JSON")
     num_hosts=$(jq -r '.num_subscriber_hosts' "$TOPOLOGY_JSON")
     num_daemons=$(jq -r '.num_subscriber_daemons_per_host' "$TOPOLOGY_JSON")
+    mcast_group=$(jq -r ".mcast_group // \"$DEFAULT_MCAST_GROUP\"" "$TOPOLOGY_JSON")
 
-    if ! [[ "$num_hosts" =~ ^[0-9]+$ ]] || [ "$num_hosts" -lt 1 ]; then
-        err "topology.json: num_subscriber_hosts is '$num_hosts' — not a positive integer"
-        exit 30
-    fi
-    # Without this guard a malformed topology.json yielding "null" for D
-    # would silently spawn zero receivers per host, the sender would fire,
-    # and cmd_run would exit 0 with no error — producing an empty/corrupt
-    # collect.
-    if ! [[ "$num_daemons" =~ ^[0-9]+$ ]] || [ "$num_daemons" -lt 1 ]; then
-        err "topology.json: num_subscriber_daemons_per_host is '$num_daemons' — not a positive integer"
-        exit 30
-    fi
+    require_positive_int num_subscriber_hosts "$num_hosts"
+    require_positive_int num_subscriber_daemons_per_host "$num_daemons"
 
     local now
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -624,7 +640,7 @@ cmd_run() {
             local tap_ip
             tap_ip=$(jq -r ".subscriber_hosts[$i].tap_ip" "$TOPOLOGY_JSON")
             ssh_to "$sub_ip" "$key_path" "nohup taskset -c $cpu /home/ec2-user/mcast2ucast/benchmarks/latency_receiver \
-                -g 224.0.0.101 -I $tap_ip -p $port -c $count -t $recv_timeout_s \
+                -g $mcast_group -I $tap_ip -p $port -c $count -t $recv_timeout_s \
                 --csv-out /tmp/recv-h${i}-p${port}.csv \
                 > /tmp/recv-h${i}-p${port}.log 2>&1 & echo \$! > /tmp/recv-h${i}-p${port}.pid" &
         done
@@ -645,7 +661,7 @@ cmd_run() {
         done
     }
     ssh_to "$sender_ip" "$key_path" "taskset -c 6 /home/ec2-user/mcast2ucast/benchmarks/latency_sender \
-        -I mcast0 -g 224.0.0.101 -p 5001 \
+        -I mcast0 -g $mcast_group -p 5001 \
         -c $count -i $interval_us -s $payload \
         > /tmp/sender.log 2>&1" \
         || {
@@ -703,14 +719,8 @@ cmd_collect() {
     num_hosts=$(jq -r '.num_subscriber_hosts'  "$TOPOLOGY_JSON")
     num_daemons=$(jq -r '.num_subscriber_daemons_per_host' "$TOPOLOGY_JSON")
 
-    if ! [[ "$num_hosts" =~ ^[0-9]+$ ]] || [ "$num_hosts" -lt 1 ]; then
-        err "topology.json: num_subscriber_hosts is '$num_hosts' — not a positive integer"
-        exit 30
-    fi
-    if ! [[ "$num_daemons" =~ ^[0-9]+$ ]] || [ "$num_daemons" -lt 1 ]; then
-        err "topology.json: num_subscriber_daemons_per_host is '$num_daemons' — not a positive integer"
-        exit 30
-    fi
+    require_positive_int num_subscriber_hosts "$num_hosts"
+    require_positive_int num_subscriber_daemons_per_host "$num_daemons"
 
     local ts run_dir
     ts=$(date -u +%Y%m%dT%H%M%SZ)
@@ -718,11 +728,9 @@ cmd_collect() {
     mkdir -p "$run_dir"
 
     echo "[collect] scp sender logs"
-    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$key_path" \
-        ec2-user@"$sender_ip":/tmp/sender.log "$run_dir/sender-stdout.log" \
+    scp_from "$sender_ip" "$key_path" /tmp/sender.log "$run_dir/sender-stdout.log" \
         || { err "scp sender.log failed"; exit 60; }
-    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$key_path" \
-        ec2-user@"$sender_ip":/tmp/mcast2ucast.log "$run_dir/sender-mcast2ucast.log" \
+    scp_from "$sender_ip" "$key_path" /tmp/mcast2ucast.log "$run_dir/sender-mcast2ucast.log" \
         || true
 
     echo "[collect] scp $((num_hosts * num_daemons)) receiver logs + CSVs"
@@ -731,16 +739,13 @@ cmd_collect() {
         sub_ip=$(jq -r ".subscriber_hosts[$i].primary_ip" "$TOPOLOGY_JSON")
         for ((d=0; d<num_daemons; d++)); do
             port=$(( 5001 + d ))
-            scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$key_path" \
-                ec2-user@"$sub_ip":/tmp/recv-h"$i"-p"$port".log "$run_dir/recv-h$i-p$port.log" \
+            scp_from "$sub_ip" "$key_path" "/tmp/recv-h$i-p$port.log" "$run_dir/recv-h$i-p$port.log" \
                 || { err "scp recv h$i p$port log failed"; exit 60; }
-            scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$key_path" \
-                ec2-user@"$sub_ip":/tmp/recv-h"$i"-p"$port".csv "$run_dir/recv-h$i-p$port.csv" \
+            scp_from "$sub_ip" "$key_path" "/tmp/recv-h$i-p$port.csv" "$run_dir/recv-h$i-p$port.csv" \
                 || { err "scp recv h$i p$port csv failed"; exit 60; }
         done
         # Best-effort daemon log per host
-        scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$key_path" \
-            ec2-user@"$sub_ip":/tmp/mcast2ucast.log "$run_dir/sub$i-mcast2ucast.log" \
+        scp_from "$sub_ip" "$key_path" /tmp/mcast2ucast.log "$run_dir/sub$i-mcast2ucast.log" \
             || true
     done
 
@@ -790,7 +795,7 @@ PYEOF
 
     echo "[collect] running analyze_spread.py"
     local spread_json
-    spread_json=$(python3 "$SCRIPTS_DIR/analyze_spread.py" "$run_dir/topology.json" "$run_dir") \
+    spread_json=$(python3 "$SCRIPTS_DIR/analyze_spread.py" "$run_dir/topology.json" "$run_dir" "$count") \
         || { err "analyze_spread.py failed"; exit 61; }
 
     # Compose summary.json

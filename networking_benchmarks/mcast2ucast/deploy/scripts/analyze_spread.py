@@ -54,12 +54,18 @@ def percentile(sorted_vals: list[float], p: float) -> float:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        sys.stderr.write("usage: analyze_spread.py <topology.json> <run_dir>\n")
+    if len(sys.argv) not in (3, 4):
+        sys.stderr.write(
+            "usage: analyze_spread.py <topology.json> <run_dir> [sent_count]\n")
         return 2
 
     topology_path = Path(sys.argv[1])
     run_dir = Path(sys.argv[2])
+    # Authoritative packet count the sender emitted, when known. Deriving the
+    # expected count from max(received) instead lets one over-receiving
+    # receiver (duplicate delivery, stale CSV) inflate every other receiver's
+    # loss tally.
+    sent_count = int(sys.argv[3]) if len(sys.argv) == 4 else None
 
     with open(topology_path) as f:
         topo = json.load(f)
@@ -68,7 +74,6 @@ def main() -> int:
 
     # Map (host_index, port) -> {seq: rx_ns}
     per_recv: dict[tuple[int, int], dict[int, int]] = {}
-    per_recv_received: dict[tuple[int, int], int] = {}
 
     for host_idx, host in enumerate(topo["subscriber_hosts"]):
         for port in host["daemon_ports"]:
@@ -86,9 +91,11 @@ def main() -> int:
                             continue
                         d[seq] = rx_ns
             per_recv[(host_idx, port)] = d
-            per_recv_received[(host_idx, port)] = len(d)
 
-    expected_count = max(per_recv_received.values()) if per_recv_received else 0
+    if sent_count is not None:
+        expected_count = sent_count
+    else:
+        expected_count = max((len(d) for d in per_recv.values()), default=0)
     # Find the union of seqs received by ANY receiver, then keep only those
     # received by ALL receivers.
     all_seqs: set[int] = set()
@@ -125,7 +132,7 @@ def main() -> int:
     per_sub_loss = []
     for host_idx, host in enumerate(topo["subscriber_hosts"]):
         for port in host["daemon_ports"]:
-            received = per_recv_received[(host_idx, port)]
+            received = len(per_recv[(host_idx, port)])
             lost = max(0, expected_count - received)
             per_sub_loss.append({
                 "host_index": host_idx,

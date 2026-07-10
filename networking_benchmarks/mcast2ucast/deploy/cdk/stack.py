@@ -26,6 +26,13 @@ class StackConfig:
     num_subscriber_hosts: int = 1
     num_subscriber_daemons_per_host: int = 1
 
+    def __post_init__(self) -> None:
+        # spread-az round-robins subscribers across receiver_azs; an empty
+        # list would divide by zero at synth. Fail with a clear message
+        # regardless of how the config was constructed (app.py or a test).
+        if self.topology == "spread-az" and not self.receiver_azs:
+            raise ValueError("spread-az topology requires a non-empty receiver_azs")
+
     def sender_az_resolved(self) -> str:
         if self.topology in ("multi-az", "spread-az"):
             if self.sender_az is None:
@@ -65,7 +72,9 @@ class Mcast2UcastBenchStack(Stack):
         sender_inst, sender_eni = self._build_host(
             "sender", self.config.sender_instance_type, self._sender_subnet
         )
-        self._emit_host_outputs("sender", sender_inst, sender_eni)
+        self._emit_host_outputs(
+            "sender", sender_inst, sender_eni, self.config.sender_az_resolved()
+        )
 
         for i in range(self.config.num_subscriber_hosts):
             if self.config.topology == "spread-az":
@@ -75,12 +84,13 @@ class Mcast2UcastBenchStack(Stack):
                 sub_subnet = self._receiver_az_subnets[az]
             else:
                 sub_subnet = self._receiver_subnet
+                az = self.config.receiver_az_resolved()
             sub_inst, sub_eni = self._build_host(
                 f"subscriber{i}",
                 self.config.receiver_instance_type,
                 sub_subnet,
             )
-            self._emit_host_outputs(f"subscriber{i}", sub_inst, sub_eni)
+            self._emit_host_outputs(f"subscriber{i}", sub_inst, sub_eni, az)
 
         CfnOutput(self, "NumSubscriberHosts", value=str(self.config.num_subscriber_hosts))
         CfnOutput(self, "NumSubscriberDaemonsPerHost", value=str(self.config.num_subscriber_daemons_per_host))
@@ -179,12 +189,8 @@ class Mcast2UcastBenchStack(Stack):
         """
         receiver_azs: list[str] = self.config.receiver_azs or []
         # Deduplicate while preserving order so CIDR assignment is stable.
-        seen: set[str] = set()
-        unique_azs: list[str] = []
-        for az in receiver_azs:
-            if az not in seen:
-                seen.add(az)
-                unique_azs.append(az)
+        # dict.fromkeys keeps first-seen order in CPython 3.7+.
+        unique_azs: list[str] = list(dict.fromkeys(receiver_azs))
 
         # Sender subnet occupies 10.200.0.0/20 (third octet 0).
         # Receiver subnets start at 10.200.16.0/20, stepping by 16 per AZ:
@@ -327,11 +333,15 @@ class Mcast2UcastBenchStack(Stack):
         role: str,
         instance: ec2.CfnInstance,
         secondary_eni: ec2.CfnNetworkInterface,
+        az: str,
     ) -> None:
         prefix = role.capitalize()
         CfnOutput(self, f"{prefix}InstanceId", value=instance.ref)
         CfnOutput(self, f"{prefix}PrimaryIp", value=instance.attr_private_ip)
         CfnOutput(self, f"{prefix}PublicIp", value=instance.attr_public_ip)
+        # Per-host AZ so the orchestrator records the true AZ of each host —
+        # for spread-az each subscriber lands in a different AZ.
+        CfnOutput(self, f"{prefix}Az", value=az)
         CfnOutput(self, f"{prefix}SecondaryEniId", value=secondary_eni.ref)
         CfnOutput(
             self,

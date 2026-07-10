@@ -137,7 +137,11 @@ build_unicast_pkt(struct rte_mbuf *data, int use_clone,
 	if (udp == NULL)
 		goto fail;
 	*udp = *orig_udp;
-	udp->dst_port = sub->unicast_port; /* per-subscriber fan-out port */
+	/* Rewrite dst_port for static fan-out subscribers. Local (TAP) delivery
+	 * subscribers from IGMP joins carry unicast_port == 0; leave their port
+	 * unchanged so the kernel doesn't drop the frame on UDP port 0. */
+	if (sub->unicast_port != 0)
+		udp->dst_port = sub->unicast_port; /* per-subscriber fan-out port */
 	uint16_t orig_udp_len = rte_be_to_cpu_16(orig_udp->dgram_len);
 	udp->dgram_len = rte_cpu_to_be_16(
 		orig_udp_len + sizeof(struct m2u_tunnel_hdr));

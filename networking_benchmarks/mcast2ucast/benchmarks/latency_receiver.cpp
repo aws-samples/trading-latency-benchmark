@@ -96,6 +96,10 @@ int main(int argc, char *argv[])
 	}
 
 	signal(SIGINT, sig_handler);
+	// orchestrate.sh's cleanup path sends SIGTERM (pkill); handle it the
+	// same way so the receive loop breaks cleanly and the CSV buffer is
+	// flushed/closed below instead of being lost to default termination.
+	signal(SIGTERM, sig_handler);
 
 	int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (fd < 0) { perror("socket"); return 1; }

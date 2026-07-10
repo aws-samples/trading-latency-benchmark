@@ -54,15 +54,19 @@ if ! systemctl is-active --quiet chronyd; then
     exit 2
 fi
 
+# Snapshot chronyd state once — the Leap-status and offset checks below both
+# read it, and a second `chronyc tracking` would fork chronyd's socket RPC again.
+TRACKING=$(chronyc tracking)
+
 # 3. Leap status
-if ! chronyc tracking | grep -q '^Leap status.*Normal'; then
+if ! echo "$TRACKING" | grep -q '^Leap status.*Normal'; then
     echo "FAIL: chronyc Leap status not Normal" >&2
-    chronyc tracking >&2
+    echo "$TRACKING" >&2
     exit 3
 fi
 
 # 4. Offset (absolute value, in microseconds)
-OFFSET_S=$(chronyc tracking | awk -F': *' '/^System time/ {print $2}' | awk '{print $1}')
+OFFSET_S=$(echo "$TRACKING" | awk -F': *' '/^System time/ {print $2}' | awk '{print $1}')
 if [ -z "$OFFSET_S" ]; then
     echo "FAIL: could not parse 'System time' from chronyc tracking" >&2
     exit 5
