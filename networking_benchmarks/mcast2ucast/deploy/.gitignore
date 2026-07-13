@@ -1,0 +1,24 @@
+# Per-run output
+results/
+
+# CDK artifacts
+cdk/cdk.out/
+cdk/.cdk.staging/
+
+# Lifecycle state
+topology.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+
+# Editor
+.vscode/
+.idea/
+
+# Secrets / keys (never commit private keys)
+*.pem
+*.key

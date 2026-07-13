@@ -6,16 +6,18 @@
 #include <getopt.h>
 #include <arpa/inet.h>
 #include <rte_log.h>
+#include <rte_ether.h>
 
 #define RTE_LOGTYPE_M2U RTE_LOGTYPE_USER1
 
 static const struct option long_options[] = {
-	{"rx-port",   required_argument, NULL, 'r'},
-	{"tx-port",   required_argument, NULL, 'x'},
-	{"config",    required_argument, NULL, 'c'},
-	{"tap",       required_argument, NULL, 't'},
-	{"local-ip",  required_argument, NULL, 'l'},
-	{"ctrl-port", required_argument, NULL, 'p'},
+	{"rx-port",      required_argument, NULL, 'r'},
+	{"tx-port",      required_argument, NULL, 'x'},
+	{"config",       required_argument, NULL, 'c'},
+	{"tap",          required_argument, NULL, 't'},
+	{"local-ip",     required_argument, NULL, 'l'},
+	{"ctrl-port",    required_argument, NULL, 'p'},
+	{"gateway-mac",  required_argument, NULL, 'g'},
 	{NULL, 0, NULL, 0}
 };
 
@@ -39,7 +41,7 @@ config_parse_args(int argc, char **argv, struct app_config *cfg)
 
 	config_set_defaults(cfg);
 
-	while ((opt = getopt_long(argc, argv, "r:x:c:t:l:p:",
+	while ((opt = getopt_long(argc, argv, "r:x:c:t:l:p:g:",
 				  long_options, &opt_idx)) != -1) {
 		switch (opt) {
 		case 'r':
@@ -68,12 +70,22 @@ config_parse_args(int argc, char **argv, struct app_config *cfg)
 		case 'p':
 			cfg->ctrl_port = (uint16_t)atoi(optarg);
 			break;
+		case 'g':
+			if (rte_ether_unformat_addr(optarg,
+						    &cfg->gateway_mac) != 0) {
+				RTE_LOG(ERR, M2U,
+					"Invalid gateway MAC: %s\n", optarg);
+				return -1;
+			}
+			cfg->use_gateway_mac = 1;
+			break;
 		default:
 			RTE_LOG(ERR, M2U,
 				"Usage: mcast2ucast [EAL opts] -- "
 				"--rx-port <id> --tx-port <id> "
 				"--config <file> [--tap <name>] "
-				"[--local-ip <ip>] [--ctrl-port <port>]\n");
+				"[--local-ip <ip>] [--ctrl-port <port>] "
+				"[--gateway-mac AA:BB:CC:DD:EE:FF]\n");
 			return -1;
 		}
 	}

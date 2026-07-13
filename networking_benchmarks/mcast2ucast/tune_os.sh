@@ -112,8 +112,8 @@ net.core.netdev_budget = 600
 net.core.busy_poll = 50
 net.core.busy_read = 50
 
-# Eliminate TX queueing delay
-net.core.default_qdisc = noqueue
+# NOTE: default_qdisc is set at runtime via tc (see section 10), not here.
+# Persisting it in sysctl breaks NIC init on fresh boots.
 
 # UDP buffer tuning
 net.ipv4.udp_rmem_min = 8192

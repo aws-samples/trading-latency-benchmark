@@ -378,7 +378,14 @@ App options:
   --tap <name>         Create TAP interface with this name (enables TAP mode)
   --local-ip <ip>      Local IP for producer notifications
   --ctrl-port <port>   Control port for SUBSCRIBE/UNSUBSCRIBE (default: 9000)
+  --gateway-mac <mac>  Rewrite unicast dst MAC to this gateway (cross-subnet/multi-AZ
+                       fan-out). Ignored when --tx-port is a TAP device (kernel
+                       delivery uses the TAP MAC instead).
 ```
+
+The `latency_receiver` benchmark tool takes `-g <group>` (multicast group to
+join), `-I <iface_ip>` (local interface for the join), and `--csv-out <path>`
+(per-packet `seq,rx_ns` CSV); run `latency_receiver -h` for the full list.
 
 ## Running
 
@@ -568,7 +575,7 @@ All benchmarks: 1000 iterations, 200-iteration warmup pass, 0% packet loss. Full
 
 ### Metal Instances + Cluster Placement Group (Recommended)
 
-Measured on `m8a.metal-24xl` (96 cores, AMD EPYC) in a cluster placement group, same AZ. Instances are physically co-located on the same rack with no hypervisor overhead.
+Measured on `m8a.metal-24xl` (96 cores, AMD EPYC) in a cluster placement group, same AZ. Instances are physically co-located with no hypervisor overhead.
 
 **64-byte payload (1 publisher → 2 subscribers):**
 
@@ -636,7 +643,7 @@ sudo ./tune_os.sh                        # runtime tuning
 
 ### OS Tuning for Low Latency
 
-The `tune_os.sh` script applies comprehensive OS-level tuning inspired by the [tune_os.yaml](../deployment/ansible/playbooks/tune_os.yaml) playbook in this repo. It reduced mcast2ucast e2e P50 from 38.7µs to 33.7µs and kernel UDP P99 from 75.2µs to 32.4µs.
+The `tune_os.sh` script applies comprehensive OS-level tuning inspired by the [tune_os.yaml](../../deployment/ansible/tune_os.yaml) playbook in this repo. It reduced mcast2ucast e2e P50 from 38.7µs to 33.7µs and kernel UDP P99 from 75.2µs to 32.4µs.
 
 ```bash
 # Apply runtime tuning only (no reboot needed):
@@ -678,6 +685,8 @@ done
 This must be done on **both** instances after boot. The `setup_ena_bypass.sh` script does this automatically.
 
 ### Reproducing Benchmarks
+
+#### Manual (from scratch)
 
 Full step-by-step guide to reproduce the latency numbers from scratch on two AWS EC2 instances.
 
@@ -815,6 +824,26 @@ for irq in $(grep <primary-nic> /proc/interrupts | awk '{print $1}' | tr -d ':')
 done
 ```
 
+#### Automated: deploy/sweep.sh
+
+`deploy/sweep.sh` reproduces the whole fan-out sweep end-to-end against a pre-baked
+AMI — runs the benchmark, collects results, and tears down.
+
+```bash
+cd deploy
+
+# One-time: bake a tuned AMI (prints the new AMI ID on its last line)
+./tools/bake_ami.sh --base-ami <al2023-ami> --key <keypair> \
+  --subnet-id <subnet> --security-group-id <sg> --region us-east-1
+
+# Sweep subscriber counts; one summary.json per cell under deploy/results/
+./sweep.sh --ami-id <baked-ami-id> 1 2 4 8 10
+```
+
+See [deploy/README.md](deploy/README.md) for all flags, topology modes, and how to
+find the required resource IDs. The manual steps below are the from-scratch
+equivalent for environments where the harness can't be used.
+
 #### Troubleshooting
 
 - **Inflated kernel UDP latency (250+µs)**: NIC IRQs on DPDK cores. Run `cat /proc/interrupts | grep <primary-nic>` — if CPUs 0-2 show high counts, re-pin IRQs. `tune_os.sh` and `setup_ena_bypass.sh` both handle this.
@@ -855,4 +884,14 @@ mcast2ucast/
   build_igb_uio.sh          Build igb_uio kernel module from dpdk-kmods
   tune_os.sh                Ultra-low latency OS tuning (sysctl, GRUB, IRQ, THP, etc.)
   end_to_end_ptp.sh         Configure PTP-grade time sync for latency testing
+  deploy/
+    orchestrate.sh          Step-by-step lifecycle: deploy/setup/verify/run/collect/teardown
+    sweep.sh                Multi-cell subscriber-count sweep driver — wraps orchestrate.sh
+                            with SSH readiness probing and on-host benchmark rebuild
+    tools/bake_ami.sh       Build a tuned AMI from a stock AL2023 base
+    scripts/setup_instance.sh    Per-host idempotent setup (igb_uio, TAP, mcast2ucast)
+    scripts/verify_ptp_hwtstamp.sh  Chrony/PTP offset gate before run
+    scripts/analyze_spread.py    Fan-out spread stats from per-receiver CSVs
+    cdk/                    CDK stack: VPC, CPG, H+1 EC2 instances, secondary ENIs
+    results/                Per-run output (summary.json, CSVs, daemon logs)
 ```

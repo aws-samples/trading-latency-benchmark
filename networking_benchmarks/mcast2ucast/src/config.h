@@ -53,6 +53,10 @@ struct app_config {
 
 	/* Config file path */
 	char config_file[256];
+
+	/* Gateway MAC override (for cross-subnet / multi-AZ delivery) */
+	int use_gateway_mac;
+	struct rte_ether_addr gateway_mac;
 };
 
 int config_parse_args(int argc, char **argv, struct app_config *cfg);

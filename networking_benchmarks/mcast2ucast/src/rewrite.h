@@ -32,11 +32,16 @@ void rewrite_cleanup(void);
  * The original packet is consumed (freed or ref-managed internally).
  * Produced packets are written to tx_pkts[0..return-1].
  * Returns the number of unicast packets produced.
+ *
+ * override_dst_mac: if non-NULL, ALL output packets use this as dst_mac
+ *                   instead of the per-subscriber MAC.  Pass NULL for the
+ *                   default same-subnet behaviour (uses sub->dst_mac).
  */
 int rewrite_mcast_to_ucast(struct rte_mbuf *pkt,
 			    const struct subscriber_list *subs,
 			    struct rte_mbuf **tx_pkts,
-			    int max_tx_pkts);
+			    int max_tx_pkts,
+			    const struct rte_ether_addr *override_dst_mac);
 
 struct rte_mempool *rewrite_get_packet_pool(void);
 

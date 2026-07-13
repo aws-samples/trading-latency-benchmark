@@ -167,8 +167,18 @@ try_reverse_path(struct rte_mbuf *pkt)
 /*
  * Process a burst of packets from any RX source.
  * Classifies: multicast UDP -> rewrite, IGMP -> control plane, else drop.
+ *
+ * Returns the number of INPUT multicast packets that were successfully
+ * fanned out to at least one unicast output.  Also writes the total
+ * number of unicast output packets enqueued to *nb_tx_out (may be NULL).
+ *
+ * This avoids the broken nic_tx.count delta approach: enqueue_tx() flushes
+ * the TX buffer internally whenever count reaches MAX_PKT_BURST, resetting
+ * count to 0 mid-burst.  When total fanout (nb_rx * H_subs) is a multiple
+ * of MAX_PKT_BURST the delta comes out zero even though every packet was
+ * forwarded, causing false "drop" accounting and skipping the post-burst flush.
  */
-static inline void
+static inline uint16_t
 process_rx_burst(struct rte_mbuf **pkts, uint16_t nb_rx,
 		 struct rte_ring *ctrl_ring,
 		 struct tx_lcore_buf *tx_buf,
@@ -177,9 +187,13 @@ process_rx_burst(struct rte_mbuf **pkts, uint16_t nb_rx,
 		 int tx_is_tap,
 		 struct tx_lcore_buf *tap_tx_buf,
 		 const struct rte_ether_addr *tap_mac,
-		 uint16_t tap_port)
+		 uint16_t tap_port,
+		 const struct rte_ether_addr *gateway_mac,
+		 uint32_t *nb_tx_out)
 {
 	struct rte_mbuf *tx_out[TX_BURST_MAX];
+	uint16_t nb_mcast = 0;
+	uint32_t total_tx = 0;
 
 	for (uint16_t i = 0; i < nb_rx; i++) {
 		struct rte_ether_hdr *eth = rte_pktmbuf_mtod(
@@ -229,7 +243,7 @@ process_rx_burst(struct rte_mbuf **pkts, uint16_t nb_rx,
 		}
 
 		int nb_out = rewrite_mcast_to_ucast(
-			pkts[i], subs, tx_out, TX_BURST_MAX);
+			pkts[i], subs, tx_out, TX_BURST_MAX, gateway_mac);
 
 		/*
 		 * Fix MACs for the TX port:
@@ -237,6 +251,8 @@ process_rx_burst(struct rte_mbuf **pkts, uint16_t nb_rx,
 		 * - dst MAC = TX port's MAC when TX is a TAP/TUN, so the kernel
 		 *   accepts the frame (otherwise dropped as PACKET_OTHERHOST).
 		 *   The kernel then routes it and resolves the real dst MAC via ARP.
+		 *   This intentionally overrides any --gateway-mac for TAP TX: the
+		 *   gateway rewrite only applies to hardware/wire TX ports.
 		 */
 		for (int j = 0; j < nb_out; j++) {
 			struct rte_ether_hdr *out_eth = rte_pktmbuf_mtod(
@@ -247,7 +263,15 @@ process_rx_burst(struct rte_mbuf **pkts, uint16_t nb_rx,
 		}
 
 		enqueue_tx(tx_buf, tx_out, nb_out, tx_port, 0);
+		if (nb_out > 0) {
+			nb_mcast++;
+			total_tx += (uint32_t)nb_out;
+		}
 	}
+
+	if (nb_tx_out != NULL)
+		*nb_tx_out = total_tx;
+	return nb_mcast;
 }
 
 int
@@ -266,6 +290,8 @@ dataplane_loop(void *arg)
 	struct tx_lcore_buf tap_tx = { .count = 0 };
 	struct rte_ether_addr tx_mac;
 	struct rte_ether_addr tap_mac;
+	const struct rte_ether_addr *gateway_mac =
+		cfg->use_gateway_mac ? &cfg->gateway_mac : NULL;
 	uint64_t drain_tsc;
 	uint64_t prev_tsc = 0;
 	unsigned int lcore_id = rte_lcore_id();
@@ -296,6 +322,16 @@ dataplane_loop(void *arg)
 			tx_is_tap = 1;
 	}
 	RTE_LOG(INFO, M2U, "TX port %u is_tap=%d\n", tx_port, tx_is_tap);
+	if (gateway_mac != NULL)
+		RTE_LOG(INFO, M2U,
+			"Gateway MAC override enabled: "
+			"%02x:%02x:%02x:%02x:%02x:%02x\n",
+			gateway_mac->addr_bytes[0],
+			gateway_mac->addr_bytes[1],
+			gateway_mac->addr_bytes[2],
+			gateway_mac->addr_bytes[3],
+			gateway_mac->addr_bytes[4],
+			gateway_mac->addr_bytes[5]);
 
 	drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S *
 		    DRAIN_INTERVAL_US;
@@ -334,22 +370,32 @@ dataplane_loop(void *arg)
 						  MAX_PKT_BURST);
 		if (nb_rx > 0) {
 			atomic_fetch_add(&g_stats.rx_packets, nb_rx);
-			uint16_t before_nic = nic_tx.count;
-			uint16_t before_tap = tap_tx.count;
-			process_rx_burst(pkts, nb_rx, ctrl_ring,
+			/*
+			 * Use the return value of process_rx_burst (count of
+			 * input multicast packets that produced at least one
+			 * unicast output) rather than the nic_tx.count delta.
+			 * The delta is unreliable: enqueue_tx() flushes the TX
+			 * buffer internally whenever count reaches MAX_PKT_BURST,
+			 * resetting count to 0 mid-burst.  When the total fanout
+			 * (nb_rx * H_subs) is a multiple of MAX_PKT_BURST the
+			 * delta comes out zero even though every packet was
+			 * forwarded, causing false "drop" accounting and skipping
+			 * the post-burst flush.
+			 */
+			uint32_t nb_tx = 0;
+			uint16_t nb_mcast = process_rx_burst(pkts, nb_rx, ctrl_ring,
 					 &nic_tx, &tx_mac, tx_port,
 					 tx_is_tap,
 					 use_tap ? &tap_tx : NULL,
-					 &tap_mac, tap_port);
-			uint16_t produced = (nic_tx.count - before_nic) +
-					    (tap_tx.count - before_tap);
-			if (produced > 0) {
-				atomic_fetch_add(&g_stats.tx_packets, produced);
-				atomic_fetch_add(&g_stats.mcast_packets, nb_rx);
-				/* Flush immediately for low latency */
-				flush_tx(&nic_tx, tx_port, 0);
-				if (use_tap)
-					flush_tx(&tap_tx, tap_port, 0);
+					 &tap_mac, tap_port,
+					 gateway_mac, &nb_tx);
+			/* Always flush after processing — low-latency path */
+			flush_tx(&nic_tx, tx_port, 0);
+			if (use_tap)
+				flush_tx(&tap_tx, tap_port, 0);
+			if (nb_mcast > 0) {
+				atomic_fetch_add(&g_stats.mcast_packets, nb_mcast);
+				atomic_fetch_add(&g_stats.tx_packets, nb_tx);
 			} else {
 				atomic_fetch_add(&g_stats.drop_packets, nb_rx);
 			}
@@ -361,18 +407,21 @@ dataplane_loop(void *arg)
 				tap_pkts, MAX_PKT_BURST);
 			if (nb_tap > 0) {
 				atomic_fetch_add(&g_stats.rx_packets, nb_tap);
-				uint16_t before = nic_tx.count;
-				/* No reverse path for TAP RX — these are local */
-				process_rx_burst(tap_pkts, nb_tap, ctrl_ring,
+				/* No reverse path for TAP RX — these are local.
+				 * Use the process_rx_burst return value (multicast
+				 * hit count) to avoid the broken nic_tx.count delta. */
+				uint32_t nb_tx = 0;
+				uint16_t nb_mcast = process_rx_burst(
+						 tap_pkts, nb_tap, ctrl_ring,
 						 &nic_tx, &tx_mac, tx_port,
 						 tx_is_tap,
-						 NULL, NULL, 0);
-				uint16_t produced = nic_tx.count - before;
-				if (produced > 0) {
-					atomic_fetch_add(&g_stats.tx_packets, produced);
-					atomic_fetch_add(&g_stats.mcast_packets, nb_tap);
-					/* Flush immediately for low latency */
-					flush_tx(&nic_tx, tx_port, 0);
+						 NULL, NULL, 0,
+						 gateway_mac, &nb_tx);
+				/* Always flush for low latency */
+				flush_tx(&nic_tx, tx_port, 0);
+				if (nb_mcast > 0) {
+					atomic_fetch_add(&g_stats.mcast_packets, nb_mcast);
+					atomic_fetch_add(&g_stats.tx_packets, nb_tx);
 				} else {
 					atomic_fetch_add(&g_stats.drop_packets, nb_tap);
 				}

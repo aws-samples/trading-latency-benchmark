@@ -394,6 +394,7 @@ cdk.out/
 
 # CDK asset staging and manifest temp files
 **/cdk/cdk.*
+!**/cdk/cdk.json
 
 ### Java/Maven ###
 *.class

@@ -86,7 +86,8 @@ build_unicast_pkt(struct rte_mbuf *data, int use_clone,
 		  const struct rte_udp_hdr *orig_udp,
 		  uint32_t group_ip,
 		  const struct subscriber *sub,
-		  const struct rte_ether_addr *src_mac)
+		  const struct rte_ether_addr *src_mac,
+		  const struct rte_ether_addr *override_dst_mac)
 {
 	struct rte_mbuf *hdr;
 	struct rte_mbuf *payload;
@@ -110,7 +111,9 @@ build_unicast_pkt(struct rte_mbuf *data, int use_clone,
 		rte_pktmbuf_append(hdr, sizeof(struct rte_ether_hdr));
 	if (eth == NULL)
 		goto fail;
-	rte_ether_addr_copy(&sub->dst_mac, &eth->dst_addr);
+	const struct rte_ether_addr *dst_mac =
+		(override_dst_mac != NULL) ? override_dst_mac : &sub->dst_mac;
+	rte_ether_addr_copy(dst_mac, &eth->dst_addr);
 	rte_ether_addr_copy(src_mac, &eth->src_addr);
 	eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
 
@@ -128,12 +131,17 @@ build_unicast_pkt(struct rte_mbuf *data, int use_clone,
 	ip->hdr_checksum = 0;
 	ip->hdr_checksum = rte_ipv4_cksum(ip);
 
-	/* Write UDP header — copy from original, adjust length */
+	/* Write UDP header — copy from original, adjust length, rewrite dst_port */
 	struct rte_udp_hdr *udp = (struct rte_udp_hdr *)
 		rte_pktmbuf_append(hdr, sizeof(struct rte_udp_hdr));
 	if (udp == NULL)
 		goto fail;
 	*udp = *orig_udp;
+	/* Rewrite dst_port for static fan-out subscribers. Local (TAP) delivery
+	 * subscribers from IGMP joins carry unicast_port == 0; leave their port
+	 * unchanged so the kernel doesn't drop the frame on UDP port 0. */
+	if (sub->unicast_port != 0)
+		udp->dst_port = sub->unicast_port; /* per-subscriber fan-out port */
 	uint16_t orig_udp_len = rte_be_to_cpu_16(orig_udp->dgram_len);
 	udp->dgram_len = rte_cpu_to_be_16(
 		orig_udp_len + sizeof(struct m2u_tunnel_hdr));
@@ -165,7 +173,8 @@ int
 rewrite_mcast_to_ucast(struct rte_mbuf *pkt,
 			const struct subscriber_list *subs,
 			struct rte_mbuf **tx_pkts,
-			int max_tx_pkts)
+			int max_tx_pkts,
+			const struct rte_ether_addr *override_dst_mac)
 {
 	struct rte_ether_hdr *eth_hdr;
 	struct rte_ipv4_hdr orig_ip;
@@ -219,7 +228,8 @@ rewrite_mcast_to_ucast(struct rte_mbuf *pkt,
 		if (use_clone && i == n - 1) {
 			out = build_unicast_pkt(pkt, 0,
 						&orig_ip, &orig_udp, group_ip,
-						&subs->entries[i], &src_mac);
+						&subs->entries[i], &src_mac,
+						override_dst_mac);
 			if (out != NULL) {
 				tx_pkts[nb_tx++] = out;
 				pkt_consumed = 1;
@@ -227,7 +237,8 @@ rewrite_mcast_to_ucast(struct rte_mbuf *pkt,
 		} else {
 			out = build_unicast_pkt(pkt, use_clone,
 						&orig_ip, &orig_udp, group_ip,
-						&subs->entries[i], &src_mac);
+						&subs->entries[i], &src_mac,
+						override_dst_mac);
 			if (out != NULL)
 				tx_pkts[nb_tx++] = out;
 			else if (!use_clone)
