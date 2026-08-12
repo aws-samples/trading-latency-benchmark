@@ -44,7 +44,7 @@ Dev/iteration tooling lives outside deploy/, under af_xdp/dev/:
 
 ## Quick Start (recommended - `afxdpctl`)
 
-The `afxdpctl` CLI (at `control-plane/cmd/afxdpctl`) is the recommended single entrypoint for the full lifecycle:
+The `afxdpctl` CLI (at `control_plane/cmd/afxdpctl`) is the recommended single entrypoint for the full lifecycle:
 
 ```bash
 # 1. Deploy everything (control-plane + optional AMI bake + fleet)
@@ -55,8 +55,7 @@ afxdpctl up --key virginia --git-repo <repo-url> --git-ref main \
 afxdpctl sync --key ~/.ssh/virginia.pem --region us-east-1
 
 # 3. Run a benchmark
-afxdpctl run ucast kernel           # single variation
-afxdpctl run ucast all              # all variations (kernel, xdp-tx, xdp-rx, xdp-txrx)
+afxdpctl run ucast kernel           # or: xdp (AF_XDP zero-copy TX)
 afxdpctl run mcast copy,inplace,kernel
 
 # 4. Generate report

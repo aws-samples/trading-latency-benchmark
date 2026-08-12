@@ -92,7 +92,7 @@
   <!-- Run benchmark -->
   <rect x="490" y="238" width="170" height="75" rx="5" fill="#fff" stroke="#0891b2" stroke-width="1.2"/>
   <text x="575" y="258" text-anchor="middle" font-size="10" font-weight="bold" fill="#155e75">run benchmark</text>
-  <text x="575" y="275" text-anchor="middle" font-size="8" fill="#64748b" font-family="monospace">afxdpctl run ucast all</text>
+  <text x="575" y="275" text-anchor="middle" font-size="8" fill="#64748b" font-family="monospace">afxdpctl run ucast kernel</text>
   <text x="575" y="289" text-anchor="middle" font-size="8" fill="#64748b">— or —</text>
   <text x="575" y="303" text-anchor="middle" font-size="8" fill="#64748b" font-family="monospace">run_ucast.yaml</text>
 

@@ -3,8 +3,8 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  *
- * POC use case: mock exchange instance sends real UDP multicast (224.x.x.x)
- * carried inside a plain unicast UDP packet to the feeder's private IP, tagged
+ * A sender instance sends real UDP multicast (224.x.x.x)
+ * carried inside a plain unicast UDP packet to a replicator's private IP, tagged
  * with a light 8-byte "m2u" tunnel header { magic, group }.  This program
  * intercepts that frame on eth0 and redirects it to AF_XDP, preserving
  * XDP_ZEROCOPY on the ENA physical NIC.

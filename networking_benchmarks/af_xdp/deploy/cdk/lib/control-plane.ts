@@ -12,6 +12,9 @@ export interface ControlPlaneStackProps extends cdk.StackProps {
   /** CIDR allowed to reach NATS (4222) + web (8080). Default: anywhere (agents live
    *  in other VPCs/regions). Restrict in production and add NATS auth/TLS. */
   clientCidr?: string;
+  /** Allow 8080 and 22 from this address only. Omitted: 8080 is closed and
+   *  reached over SSM port forwarding. */
+  adminCidr?: string;
   /** Optional Route53: both required to create a DNS A record for the web/NATS host. */
   hostedZoneId?: string;
   zoneName?: string;
@@ -52,9 +55,22 @@ export class ControlPlaneStack extends cdk.Stack {
     const sg = new ec2.SecurityGroup(this, 'Sg', {
       vpc, description: 'control plane: ssh + nats + web', allowAllOutbound: true,
     });
-    sg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), 'SSH');
+    // The web UI and API are not exposed. The instance role carries
+    // AmazonSSMManagedInstanceCore, so reach them over Session Manager:
+    //   aws ssm start-session --target <id> \
+    //     --document-name AWS-StartPortForwardingSession \
+    //     --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+    // Set adminCidr to also allow direct access from one address.
+    const adminCidr = props.adminCidr;
+    if (adminCidr) {
+      sg.addIngressRule(ec2.Peer.ipv4(adminCidr), ec2.Port.tcp(8080), 'web + API (admin)');
+      sg.addIngressRule(ec2.Peer.ipv4(adminCidr), ec2.Port.tcp(22), 'SSH (admin)');
+    } else {
+      sg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), 'SSH');
+    }
+    // Agents dial in from every region a fleet spans, including over the public
+    // internet when the fleet is cross-region, so this follows clientCidr.
     sg.addIngressRule(ec2.Peer.ipv4(clientCidr), ec2.Port.tcp(4222), 'NATS (agents)');
-    sg.addIngressRule(ec2.Peer.ipv4(clientCidr), ec2.Port.tcp(8080), 'web + API');
 
     // ── IAM: SSM core + publish the NATS endpoint parameter ───────────────────
     const role = new iam.Role(this, 'Role', {
@@ -81,7 +97,7 @@ export class ControlPlaneStack extends cdk.Stack {
       'export PATH=/usr/local/go/bin:$PATH GOFLAGS="-mod=mod -buildvcs=false" GOCACHE=/tmp/gocache GOPATH=/tmp/go',
       'mkdir -p /opt/af-xdp-cp',
       `git clone --depth 1 --branch ${gitRef} ${gitRepo} /opt/cp-src`,
-      'CP=/opt/cp-src/networking_benchmarks/af_xdp/control-plane',
+      'CP=/opt/cp-src/networking_benchmarks/af_xdp/control_plane',
       '( cd "$CP" && go build -o /opt/af-xdp-cp/afxdp-backend ./backend ) && echo "backend built"',
       '( cd "$CP/web" && npm install && npm run build && cp -r dist /opt/af-xdp-cp/web-dist ) || echo "web build failed (check /var/log/cp-setup.log)"',
       'NATSVER=v2.10.22',

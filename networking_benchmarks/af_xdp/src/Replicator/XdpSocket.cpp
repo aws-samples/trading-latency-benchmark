@@ -645,9 +645,15 @@ int XdpSocket::reserveTxRing(int count, uint32_t* tx_idx) {
     // The batched path (sendPackets) has always carried the equivalent ena-xdp
     // check `outstanding_tx_ > TX_FRAMES - TX_BATCH_SIZE`; it was never ported to
     // this single-packet path, which is the one the replicator hot path uses.
-    if (outstanding_tx_ >= static_cast<uint32_t>(TX_FRAMES)) {
+    // The guard must cover the WHOLE reservation: a fan-out reserves K slots at
+    // once, so checking only that one frame is free lets a K-slot reserve wrap onto
+    // frames still being DMA'd (e.g. 2040 outstanding + 24 reserved > 2048 frames),
+    // which puts torn frames on the wire that AWS VPC drops without any local
+    // counter moving.
+    const uint32_t need = static_cast<uint32_t>(count);
+    if (outstanding_tx_ + need > static_cast<uint32_t>(TX_FRAMES)) {
         pollTxCompletions();
-        if (outstanding_tx_ >= static_cast<uint32_t>(TX_FRAMES))
+        if (outstanding_tx_ + need > static_cast<uint32_t>(TX_FRAMES))
             return 0;   // caller kicks + retries, then falls back to the kernel socket
     }
     return xsk_ring_prod__reserve(&wrapper_->tx, count, tx_idx);

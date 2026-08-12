@@ -125,15 +125,29 @@ private:
     // Protected by destinations_mutex_.
     std::unordered_map<std::string, Destination> all_destinations_;
     
-    // Thread-local destination cache: valid for 100 ms, rebuilt on expiry.
-    struct alignas(64) ThreadLocalDestCache {
+    // Immutable fan-out snapshot, published by the refresher thread and read by
+    // the packet threads. The hot path only does one acquire load: no clock read,
+    // no mutex, and no ARP resolution, all of which used to run inline on the RX
+    // thread every 100 ms and stalled it.
+    struct DestSnapshot {
         // Maps multicast group NBO → destinations interested in that group.
         std::unordered_map<uint32_t, std::vector<Destination>> group_dests;
-        std::chrono::steady_clock::time_point last_update;
-        bool valid{false};
-        static constexpr std::chrono::milliseconds CACHE_TIMEOUT{100};
     };
-    static thread_local ThreadLocalDestCache dest_cache_;
+    // Retired snapshots stay alive for RETAIN generations before their slot is
+    // reused. A reader holds a snapshot pointer only for the duration of one
+    // packet, so RETAIN x 100 ms is an ample grace period and lets readers run
+    // without any reference counting.
+    static constexpr size_t SNAPSHOT_RETAIN = 8;
+    std::array<std::shared_ptr<DestSnapshot>, SNAPSHOT_RETAIN> snapshot_ring_;
+    size_t snapshot_ring_pos_{0};
+    std::atomic<const DestSnapshot*> dest_snapshot_{nullptr};
+    std::unique_ptr<std::thread> dest_refresh_thread_;
+    static constexpr std::chrono::milliseconds DEST_REFRESH_INTERVAL{100};
+    // Per-thread memo of the last {snapshot, group} lookup, so a steady stream
+    // keyed by one group skips the hash lookup entirely.
+    static thread_local const DestSnapshot* tls_memo_snap_;
+    static thread_local uint32_t tls_memo_group_;
+    static thread_local const std::vector<Destination>* tls_memo_vec_;
     
     // CPU cores assigned to packet-processing threads.
     std::vector<int> cpu_cores_;
@@ -387,6 +401,20 @@ private:
      */
     bool patchHeadersInPlace(const Destination& destination, uint8_t* frame, size_t frame_len);
 
+    // Fan-out snapshot publisher: rebuilds off the RX thread and publishes.
+    void destRefreshLoop();
+    void publishDestSnapshot();
+
+    // Sum of the invariant IPv4 header words for this payload size, with daddr
+    // and check as zero. Each copy then folds in only its own daddr.
+    uint32_t ipCsumInvariantBase(size_t payloadLen) const;
+
+    // Build one fan-out copy into `buffer`, reusing the batch's checksum base and
+    // TX timestamp. Returns the frame length, or 0 if it would not fit.
+    size_t buildCopyFrame(const Destination& destination, const uint8_t* payload, size_t payloadLen,
+                          uint8_t* buffer, size_t bufferSize,
+                          uint32_t ipCsumBase, uint64_t txNsBe);
+
     /**
      * Populate/clear the kernel XDP_TX forward target (REPLICATOR_FWD_MODE=kernel)
      * for the config_map slot of `group_nbo`, so mcast.o forwards this group's
@@ -481,7 +509,6 @@ private:
      * mcast mode: from group_destinations_.
      * Unicast mode: from all_destinations_ keyed by listen_ip_nbo_.
      */
-    void updateDestinationCache();
 };
 
 #endif // PACKET_REPLICATOR_HPP

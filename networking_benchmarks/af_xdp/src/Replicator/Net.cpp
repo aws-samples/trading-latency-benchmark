@@ -199,7 +199,7 @@ void Replicator::triggerArpResolution(const std::string& ip_address) {
         // Poll /proc/net/arp at 1ms intervals instead of a fixed sleep.
         // AWS VPC same-AZ ARP resolves in ~3-5ms; cross-AZ up to ~15ms.
         // Cap at 100ms — if unresolved by then, addDestination() stores broadcast MAC
-        // and the self-healing path in updateDestinationCache() retries every 100ms.
+        // and the refresher thread retries every 100ms.
         static constexpr int POLL_INTERVAL_MS = 3;
         static constexpr int MAX_WAIT_MS      = 100;
         uint8_t mac[6];

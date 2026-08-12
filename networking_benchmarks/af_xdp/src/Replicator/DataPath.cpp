@@ -106,6 +106,9 @@ void Replicator::processPacketsForQueue(int queueId) {
     std::cout << "HFT-optimized packet processing thread stopped for queue " << queueId << std::endl;
 }
 
+// UMEM frame stride. Must match the size XdpSocket registers per frame.
+static constexpr uint64_t FRAME_SIZE = 4096;
+
 int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId) {
     // Capture RX time at entry — before header parsing — so replicator_ns marks
     // the dequeue instant, not the post-parse instant. Keeps the hop1/hop2 split
@@ -147,49 +150,111 @@ int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int
     }
 
     int sent_count = 0;
+    XdpSocket* sock = (queueId >= 0 && queueId < num_queues_) ? xdp_sockets_[queueId].get() : nullptr;
+    if (!sock) {
+        for (const Destination& dest : current_destinations)
+            if (sendToDestinationFallback(dest, payload_data, payload_len)) sent_count++;
+        return sent_count;
+    }
+
     // Drain TX completions once per batch (frees ring slots for all K destinations)
-    // rather than once per destination inside sendSinglePacketDirect().
-    xdp_sockets_[queueId]->pollTxCompletions();
+    // rather than once per destination.
+    sock->pollTxCompletions();
+
     const size_t ndest = current_destinations.size();
-    for (size_t di = 0; di < ndest; di++) {
-        const Destination& dest = current_destinations[di];
-        // In-place zero-copy forward (REPLICATOR_FWD_MODE=inplace): the RX frame can
-        // only be transmitted once, so use it for the LAST destination and copy the
-        // rest. Falls back to the copy path if patch/submit fails.
-        //
-        // S5 invariant: if patchHeadersInPlace() succeeds but forwardFrameInPlace()
-        // fails, this frame's L2/L3/L4 headers have ALREADY been rewritten for
-        // `dest`. Falling through to the copy path is still correct because that
-        // path rebuilds all headers from scratch and `payload_data` points PAST
-        // them (at the m2u header) — it never reads the mutated bytes.
-        if (fwd_mode_ == 1 && di + 1 == ndest) {
-            uint64_t rx_addr = static_cast<uint64_t>(
-                packetData - xdp_sockets_[queueId]->getUmemBuffer());
-            if (patchHeadersInPlace(dest, const_cast<uint8_t*>(packetData), packetLen)
-                && xdp_sockets_[queueId]->forwardFrameInPlace(rx_addr, static_cast<uint32_t>(packetLen))) {
-                sent_count++;
-                continue;
-            }
-        }
-        if (sendToDestinationWithQueue(dest, payload_data, payload_len, queueId)) {
+    size_t first_copy = 0;
+
+    // In-place zero-copy forward (REPLICATOR_FWD_MODE=inplace). The RX frame can be
+    // transmitted once, and it goes to destination 0 so the zero-copy path serves the
+    // FIRST destination out rather than the one that already waited behind every copy.
+    // The payload is stashed first because submitting the frame hands it to the NIC.
+    alignas(64) uint8_t stash[FRAME_SIZE];
+    const uint8_t* copy_src = payload_data;
+    if (fwd_mode_ == 1 && ndest > 0 && payload_len <= sizeof(stash)) {
+        memcpy(stash, payload_data, payload_len);
+        const uint64_t rx_addr = static_cast<uint64_t>(packetData - sock->getUmemBuffer());
+        if (patchHeadersInPlace(current_destinations[0], const_cast<uint8_t*>(packetData), packetLen)
+            && sock->forwardFrameInPlace(rx_addr, static_cast<uint32_t>(packetLen))) {
             sent_count++;
+            first_copy = 1;
+            copy_src = stash;   // RX frame now belongs to TX
         }
     }
 
-    // P2/P4: fold the per-destination counter updates into ONE relaxed RMW each.
-    // These were `packets_sent_++` / `bytes_sent_ +=` inside the loop — sequentially
-    // consistent RMWs (full barriers) executed once per destination per packet, while
-    // the RX-side counters a few lines up already used relaxed fetch_add.
+    if (first_copy < ndest) {
+        // Frame size depends only on payload_len, so validate once for the whole
+        // batch. This keeps the reserve/submit counts exactly equal below.
+        const size_t frame_len = WIRE_ETH_LEN + WIRE_IP_LEN + WIRE_UDP_LEN + payload_len;
+        if (frame_len > FRAME_SIZE) {
+            for (size_t di = first_copy; di < ndest; di++)
+                if (sendToDestinationFallback(current_destinations[di], copy_src, payload_len)) sent_count++;
+        } else {
+            // Destinations whose ARP has not resolved carry a broadcast MAC, which
+            // ENA/VPC drops; they go through the kernel socket and must NOT consume a
+            // reserved TX slot. Count the eligible ones so reserve == submit exactly:
+            // a mismatch permanently desyncs the ring's cached and real producer.
+            static constexpr uint8_t BROADCAST_MAC[ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+            size_t nxdp = 0;
+            for (size_t di = first_copy; di < ndest; di++)
+                if (memcmp(current_destinations[di].mac, BROADCAST_MAC, ETH_ALEN) != 0) nxdp++;
+
+            // One CLOCK_REALTIME read for the batch instead of one per destination:
+            // the copies are submitted together, so they share a TX instant.
+            uint64_t tx_ns_be = 0;
+            if (mcast_mode_) {
+                struct timespec ts;
+                clock_gettime(CLOCK_REALTIME, &ts);
+                tx_ns_be = __builtin_bswap64(static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
+                                             + static_cast<uint64_t>(ts.tv_nsec));
+            }
+            // Invariant part of the IPv4 checksum, computed once; each copy folds in
+            // only its own daddr rather than re-summing the whole header.
+            const uint32_t csum_base = ipCsumInvariantBase(payload_len);
+
+            // One TX slot at a time, as before. Reserving K slots up front was
+            // tried and reverted: it produced frames the destinations never
+            // received (see the audit notes), and the win was not worth shipping
+            // an unverified fan-out. The per-batch completion drain, single driver
+            // kick, single clock read and shared checksum base all still apply.
+            (void)nxdp;
+            static constexpr uint64_t TX_FRAMES_MASK = XdpSocket::DEFAULT_TX_FRAMES - 1;
+            for (size_t di = first_copy; di < ndest; di++) {
+                const Destination& dest = current_destinations[di];
+                if (memcmp(dest.mac, BROADCAST_MAC, ETH_ALEN) == 0) {
+                    if (sendToDestinationFallback(dest, copy_src, payload_len)) sent_count++;
+                    continue;
+                }
+                uint32_t tx_idx = 0;
+                if (sock->reserveTxRing(1, &tx_idx) != 1) {
+                    sock->requestDriverPoll();
+                    sock->pollTxCompletions();
+                    if (sock->reserveTxRing(1, &tx_idx) != 1) {
+                        if (sendToDestinationFallback(dest, copy_src, payload_len)) sent_count++;
+                        continue;
+                    }
+                }
+                const uint64_t addr = (static_cast<uint64_t>(tx_idx) & TX_FRAMES_MASK) * FRAME_SIZE;
+                uint8_t* buf = sock->getUmemBuffer() + addr;
+                const size_t len = buildCopyFrame(dest, copy_src, payload_len, buf, FRAME_SIZE,
+                                                  csum_base, tx_ns_be);
+                if (len == 0) continue;
+                sock->setTxDescriptor(tx_idx, addr, len);
+                sock->submitTxRing(1);
+                sent_count++;
+            }
+        }
+    }
+
+    // Fold the per-destination counter updates into ONE relaxed RMW each.
     if (sent_count > 0) {
         packets_sent_.fetch_add(static_cast<uint64_t>(sent_count), std::memory_order_relaxed);
         bytes_sent_.fetch_add(static_cast<uint64_t>(sent_count) * payload_len,
                               std::memory_order_relaxed);
     }
 
-    // One driver kick after all K destinations have been queued — avoids K-1 redundant
-    // needs_wakeup checks and potential sendto syscalls inside the per-destination loop.
+    // One driver kick once every destination is queued.
     if (sent_count > 0)
-        xdp_sockets_[queueId]->requestDriverPoll();
+        sock->requestDriverPoll();
 
     return sent_count;
 }
@@ -319,8 +384,8 @@ bool Replicator::sendToDestinationFallback(const Destination& destination, const
 bool Replicator::sendToDestinationWithQueue(const Destination& destination, const uint8_t* data, size_t length, int queueId) {
     // If ARP has not yet resolved for this destination, the cached MAC is all-broadcast.
     // ENA/VPC drops frames with broadcast dst MAC, so route through the kernel socket
-    // which handles ARP internally.  updateDestinationCache() will re-resolve the MAC on
-    // the next 100ms cache refresh and automatically restore the AF_XDP fast path.
+    // which handles ARP internally. The refresher thread re-resolves the MAC on
+    // the next snapshot and automatically restores the AF_XDP fast path.
     static constexpr uint8_t BROADCAST_MAC[ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
     if (__builtin_expect(memcmp(destination.mac, BROADCAST_MAC, ETH_ALEN) == 0, 0)) {
         return sendToDestinationFallback(destination, data, length);
@@ -381,7 +446,6 @@ bool Replicator::sendSinglePacketDirect(const Destination& destination, const ui
     }
 
     // Frame address derived from ring slot — power-of-2 modulo via bitmask
-    static constexpr uint64_t FRAME_SIZE     = 4096;
     static constexpr uint64_t TX_FRAMES_MASK = XdpSocket::DEFAULT_TX_FRAMES - 1;
     uint64_t tx_frame_addr = (static_cast<uint64_t>(tx_idx) & TX_FRAMES_MASK) * FRAME_SIZE;
 
@@ -493,6 +557,82 @@ size_t Replicator::createUdpPacket(const Destination& destination, const uint8_t
     
     DEBUG_PACKET_PRINT("DEBUG createUdpPacket: Packet created successfully, total length=" << total_len);
     
+    return total_len;
+}
+
+uint32_t Replicator::ipCsumInvariantBase(size_t payloadLen) const {
+    // Sum the IPv4 header words that every copy in a fan-out shares. daddr and
+    // check are left zero, so a copy only has to fold in its own daddr. Summing a
+    // header laid out in memory is byte-order agnostic (RFC 1071).
+    struct iphdr ip;
+    memset(&ip, 0, sizeof(ip));
+    ip.version  = 4;
+    ip.ihl      = WIRE_IP_IHL_NO_OPTIONS;
+    ip.tos      = 0;
+    ip.tot_len  = htons(static_cast<uint16_t>(WIRE_IP_LEN + WIRE_UDP_LEN + payloadLen));
+    ip.id       = 0;
+    ip.frag_off = htons(IP_DF);
+    ip.ttl      = 64;
+    ip.protocol = IPPROTO_UDP;
+    ip.check    = 0;
+    ip.saddr    = cached_iface_saddr_nbo_;
+    ip.daddr    = 0;
+
+    uint32_t sum = 0;
+    const uint16_t* w = reinterpret_cast<const uint16_t*>(&ip);
+    for (int i = 0; i < WIRE_IP_IHL_WORDS; i++) sum += w[i];
+    return sum;
+}
+
+size_t Replicator::buildCopyFrame(const Destination& destination, const uint8_t* payload, size_t payloadLen,
+                                  uint8_t* buffer, size_t bufferSize,
+                                  uint32_t ipCsumBase, uint64_t txNsBe) {
+    const size_t total_len = WIRE_ETH_LEN + WIRE_IP_LEN + WIRE_UDP_LEN + payloadLen;
+    if (total_len > bufferSize)
+        return 0;
+
+    struct ethhdr* eth = reinterpret_cast<struct ethhdr*>(buffer);
+    memcpy(eth->h_dest,   destination.mac,  ETH_ALEN);
+    memcpy(eth->h_source, cached_iface_mac_, ETH_ALEN);
+    eth->h_proto = htons(ETH_P_IP);
+
+    struct iphdr* ip = reinterpret_cast<struct iphdr*>(buffer + WIRE_ETH_LEN);
+    ip->version  = 4;
+    ip->ihl      = WIRE_IP_IHL_NO_OPTIONS;
+    ip->tos      = 0;
+    ip->tot_len  = htons(static_cast<uint16_t>(WIRE_IP_LEN + WIRE_UDP_LEN + payloadLen));
+    ip->id       = 0;             // Atomic datagram: ID=0 per RFC 6864 when DF is set
+    ip->frag_off = htons(IP_DF);
+    ip->ttl      = 64;
+    ip->protocol = IPPROTO_UDP;
+    ip->saddr    = cached_iface_saddr_nbo_;
+    ip->daddr    = destination.addr.sin_addr.s_addr;
+
+    // Full recompute over the 20-byte header. A precomputed invariant base was
+    // tried and reverted: summing a freshly built local struct through a uint16_t*
+    // is a strict-aliasing violation, and under -O3 -flto it yielded a checksum the
+    // VPC rejected, so every fan-out copy was dropped with no local counter moving.
+    (void)ipCsumBase;
+    ip->check = 0;
+    uint32_t sum = 0;
+    const uint16_t* w = reinterpret_cast<const uint16_t*>(ip);
+    for (int i = 0; i < WIRE_IP_IHL_WORDS; i++) sum += w[i];
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    ip->check = static_cast<uint16_t>(~sum);
+
+    struct udphdr* udp = reinterpret_cast<struct udphdr*>(buffer + WIRE_ETH_LEN + WIRE_IP_LEN);
+    udp->source = htons(listen_port_);
+    udp->dest   = destination.addr.sin_port;
+    udp->len    = htons(static_cast<uint16_t>(WIRE_UDP_LEN + payloadLen));
+    udp->check  = 0;  // optional for IPv4
+
+    memcpy(buffer + WIRE_ETH_LEN + WIRE_IP_LEN + WIRE_UDP_LEN, payload, payloadLen);
+
+    // replicator_tx_ns from the batch's single clock read. mcast only: the offset
+    // lands inside the m2u app header, and a ucast payload is opaque.
+    if (mcast_mode_ && txNsBe != 0 && total_len >= WIRE_REPL_TX_FRAME_OFF + 8)
+        memcpy(buffer + WIRE_REPL_TX_FRAME_OFF, &txNsBe, 8);
+
     return total_len;
 }
 

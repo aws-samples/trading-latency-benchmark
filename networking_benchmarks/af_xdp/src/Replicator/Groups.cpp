@@ -97,9 +97,14 @@ void Replicator::updateKernelFwdTarget(uint32_t group_nbo, const Destination& de
     if (fwd_mode_ != 2 || fwd_map_fd_ < 0) return;
 
     // Kernel forward mode (REPLICATOR_FWD_MODE=kernel) forwards 1:1 via XDP_TX.
-    // Fan-out to multiple destinations is not possible in this mode; refuse to
-    // enable it when more than one destination has joined the group. Use copy or
-    // inplace mode for multi-destination workloads.
+    // XDP is one-packet-in/one-packet-out and has no clone helper, so fan-out to
+    // several destinations is impossible in the kernel; userspace has to do it.
+    //
+    // A target enabled while the group had ONE destination must be DISABLED as soon
+    // as a second joins. XDP_TX consumes the frame, so leaving it enabled means the
+    // frame never reaches the XSK and every destination except the enabled one gets
+    // nothing at all. Disabling makes mcast.o fall through to bpf_redirect_map and
+    // the userspace fan-out serves all of them.
     if (enable) {
         size_t ndest = 0;
         {
@@ -108,13 +113,13 @@ void Replicator::updateKernelFwdTarget(uint32_t group_nbo, const Destination& de
             if (git != group_destinations_.end()) ndest = git->second.size();
         }
         if (ndest > 1) {
-            std::cerr << "[mcast] REFUSING kernel fwd target: " << ndest
-                      << " destinations joined this group, but REPLICATOR_FWD_MODE=kernel"
-                         " (XDP_TX) can only forward to ONE destination — the others would"
-                         " silently receive nothing.\n"
-                         "        Use REPLICATOR_FWD_MODE=copy or inplace for fan-out to"
-                         " multiple destinations." << std::endl;
-            return;
+            std::cerr << "[mcast] kernel fwd DISABLED for this group: " << ndest
+                      << " destinations joined, and REPLICATOR_FWD_MODE=kernel (XDP_TX)"
+                         " can only forward to ONE.\n"
+                         "        Falling back to the userspace fan-out so every"
+                         " destination is served; results for this run reflect the copy"
+                         " path, not kernel forwarding." << std::endl;
+            enable = false;   // clear any target already enabled for this slot
         }
     }
 

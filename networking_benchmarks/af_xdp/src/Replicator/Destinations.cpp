@@ -106,22 +106,33 @@ std::vector<Replicator::Destination> Replicator::getDestinations() const {
     return result;
 }
 
-// Thread-local destination cache definition
-thread_local Replicator::ThreadLocalDestCache Replicator::dest_cache_;
+// Per-thread lookup memo definitions.
+thread_local const Replicator::DestSnapshot* Replicator::tls_memo_snap_ = nullptr;
+thread_local uint32_t Replicator::tls_memo_group_ = 0;
+thread_local const std::vector<Replicator::Destination>* Replicator::tls_memo_vec_ = nullptr;
 
 const std::vector<Replicator::Destination>& Replicator::getCachedGroupDestinations(uint32_t group_nbo) {
-    auto now = std::chrono::steady_clock::now();
-    if (!dest_cache_.valid ||
-        (now - dest_cache_.last_update) > ThreadLocalDestCache::CACHE_TIMEOUT) {
-        updateDestinationCache();
-    }
     static const std::vector<Destination> empty;
-    auto it = dest_cache_.group_dests.find(group_nbo);
-    if (it == dest_cache_.group_dests.end()) return empty;
-    return it->second;  // const ref — zero copy on hot path
+    // One acquire load. The refresher thread owns rebuilding; nothing here can
+    // block, allocate, read a clock, or touch /proc.
+    const DestSnapshot* snap = dest_snapshot_.load(std::memory_order_acquire);
+    if (__builtin_expect(snap == nullptr, 0))
+        return empty;
+    if (snap == tls_memo_snap_ && group_nbo == tls_memo_group_ && tls_memo_vec_)
+        return *tls_memo_vec_;
+    auto it = snap->group_dests.find(group_nbo);
+    if (it == snap->group_dests.end())
+        return empty;
+    tls_memo_snap_  = snap;
+    tls_memo_group_ = group_nbo;
+    tls_memo_vec_   = &it->second;
+    return it->second;
 }
 
-void Replicator::updateDestinationCache() {
+// Rebuild the fan-out set and publish it. Runs on the refresher thread only.
+void Replicator::publishDestSnapshot() {
+    auto snap = std::make_shared<DestSnapshot>();
+
     std::unordered_map<uint32_t, std::unordered_map<std::string, Destination>> gd_copy;
     std::unordered_map<std::string, Destination> all_copy;
     {
@@ -130,34 +141,45 @@ void Replicator::updateDestinationCache() {
         all_copy = all_destinations_;
     }
 
-    dest_cache_.group_dests.clear();
-
-    // mcast mode: per-group fan-out from group_destinations_
     for (const auto& [group_nbo, subs] : gd_copy) {
-        auto& vec = dest_cache_.group_dests[group_nbo];
+        auto& vec = snap->group_dests[group_nbo];
         vec.reserve(subs.size());
         for (const auto& [ip, dest] : subs)
             vec.push_back(dest);
     }
-
-    // Unicast mode: all_destinations_ destinations keyed by listen_ip_nbo_
     if (!mcast_mode_ && !all_copy.empty()) {
-        auto& vec = dest_cache_.group_dests[listen_ip_nbo_];
+        auto& vec = snap->group_dests[listen_ip_nbo_];
         vec.reserve(all_copy.size());
         for (const auto& [ip, dest] : all_copy)
             vec.push_back(dest);
     }
 
-    // Re-resolve any broadcast MACs (ARP not yet resolved at add time).
-    // Once resolved the fast path resumes without removeDestination/addDestination.
+    // ARP resolution reads /proc/net/arp, so it belongs here and never on a
+    // packet thread. Until a MAC resolves the destination keeps the broadcast
+    // address and the fan-out routes it through the kernel socket.
     static constexpr uint8_t BROADCAST_MAC[ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-    for (auto& [group_nbo, dests] : dest_cache_.group_dests) {
+    for (auto& [group_nbo, dests] : snap->group_dests) {
         for (auto& dest : dests) {
             if (memcmp(dest.mac, BROADCAST_MAC, ETH_ALEN) == 0)
                 getDestinationMac(dest.ip_address, dest.mac);
         }
     }
 
-    dest_cache_.last_update = std::chrono::steady_clock::now();
-    dest_cache_.valid = true;
+    // Keep the retired snapshot reachable for SNAPSHOT_RETAIN generations so a
+    // reader that already loaded its pointer never sees freed memory.
+    snapshot_ring_[snapshot_ring_pos_] = snap;
+    snapshot_ring_pos_ = (snapshot_ring_pos_ + 1) % SNAPSHOT_RETAIN;
+    dest_snapshot_.store(snap.get(), std::memory_order_release);
+}
+
+void Replicator::destRefreshLoop() {
+    publishDestSnapshot();   // publish once up front so the first packet has a set
+    while (running_.load(std::memory_order_relaxed)) {
+        // Short sleeps so stop() is responsive without shortening the interval.
+        for (int i = 0; i < 10 && running_.load(std::memory_order_relaxed); i++)
+            std::this_thread::sleep_for(DEST_REFRESH_INTERVAL / 10);
+        if (!running_.load(std::memory_order_relaxed))
+            break;
+        publishDestSnapshot();
+    }
 }

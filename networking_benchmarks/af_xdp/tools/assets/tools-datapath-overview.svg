@@ -10,49 +10,49 @@
   <text x="40" y="80" font-size="11" fill="#555">Single-clock round-trip — no cross-host clock sync required</text>
 
   <!-- rtt client box -->
-  <rect x="40" y="96" width="400" height="220" rx="8" fill="#e3f2fd" stroke="#1565c0" stroke-width="1.5"/>
-  <text x="240" y="114" text-anchor="middle" font-weight="bold" fill="#0d47a1">rtt CLIENT  (one host)</text>
+  <rect x="40" y="96" width="470" height="228" rx="8" fill="#e3f2fd" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="275" y="116" text-anchor="middle" font-weight="bold" fill="#0d47a1">rtt CLIENT  (one host)</text>
 
   <!-- TX section -->
-  <rect x="56" y="124" width="368" height="80" rx="4" fill="#bbdefb" stroke="#1976d2" stroke-width="1"/>
-  <text x="64" y="140" font-weight="600" fill="#1a1a1a">TX (send thread, pinned send_cpu, SCHED_FIFO 80)</text>
-  <text x="64" y="156" fill="#333">Default: kernel sendto()  — CLOCK_REALTIME stamp before send</text>
-  <text x="64" y="172" fill="#333">--xdp-tx: AF_XDP zero-copy TX frame (pre-built UMEM),</text>
-  <text x="64" y="188" fill="#333">  stamps CLOCK_REALTIME + CLOCK_MONOTONIC, then submit+kick</text>
-  <text x="64" y="200" font-size="10" fill="#666">Startup prints "(zero-copy)" or "(COPY/SKB fallback)"</text>
+  <rect x="56" y="128" width="438" height="82" rx="4" fill="#bbdefb" stroke="#1976d2" stroke-width="1"/>
+  <text x="68" y="145" font-weight="600" fill="#1a1a1a">TX (send thread, pinned send_cpu, SCHED_FIFO 80)</text>
+  <text x="68" y="161" fill="#333">Default: kernel sendto()  — CLOCK_REALTIME stamp before send</text>
+  <text x="68" y="177" fill="#333">--xdp-tx: AF_XDP zero-copy TX frame (pre-built UMEM),</text>
+  <text x="68" y="192" fill="#333">  stamps CLOCK_REALTIME + CLOCK_MONOTONIC, then submit+kick</text>
+  <text x="68" y="205" font-size="10" fill="#666">Startup prints "(zero-copy)" or "(COPY/SKB fallback)"</text>
 
   <!-- RX section -->
-  <rect x="56" y="212" width="368" height="92" rx="4" fill="#bbdefb" stroke="#1976d2" stroke-width="1"/>
-  <text x="64" y="228" font-weight="600" fill="#1a1a1a">RX (recv thread, pinned recv_cpu, busy-poll recvmsg)</text>
-  <text x="64" y="244" fill="#333">Default: SO_TIMESTAMPING kernel-SW (NAPI, CLOCK_REALTIME)</text>
-  <text x="64" y="260" fill="#333">--xdp-rx: bpf_ktime_get_ns at XDP ingress (CLOCK_MONOTONIC)</text>
-  <text x="64" y="276" fill="#333">  read from payload; TX also stamps MONOTONIC to match</text>
-  <text x="64" y="292" font-size="10" fill="#666">RTT = RX_stamp − TX_stamp  (same clock domain per mode)</text>
+  <rect x="56" y="218" width="438" height="94" rx="4" fill="#bbdefb" stroke="#1976d2" stroke-width="1"/>
+  <text x="68" y="235" font-weight="600" fill="#1a1a1a">RX (recv thread, pinned recv_cpu, busy-poll recvmsg)</text>
+  <text x="68" y="251" fill="#333">Default: SO_TIMESTAMPING kernel-SW (NAPI, CLOCK_REALTIME)</text>
+  <text x="68" y="267" fill="#333">--xdp-rx: bpf_ktime_get_ns at XDP ingress (CLOCK_MONOTONIC)</text>
+  <text x="68" y="283" fill="#333">  read from payload; TX also stamps MONOTONIC to match</text>
+  <text x="68" y="300" font-size="10" fill="#666">RTT = RX_stamp − TX_stamp  (same clock domain per mode)</text>
 
   <!-- Replicator box -->
-  <rect x="540" y="140" width="360" height="100" rx="8" fill="#fff3e0" stroke="#e65100" stroke-width="1.5"/>
-  <text x="720" y="162" text-anchor="middle" font-weight="bold" fill="#e65100">REPLICATOR  (AF_XDP)</text>
-  <text x="556" y="182" fill="#333">ucast.o (XDP prog) → AF_XDP redirect</text>
-  <text x="556" y="198" fill="#333">Fan-out: echoes frame back to client</text>
-  <text x="556" y="214" fill="#333">--xdp-rx stamps bpf_ktime into payload</text>
-  <text x="556" y="230" font-size="10" fill="#666">Ctrl port: UDP 12345 (env AFXDP_CONTROL_PORT)</text>
+  <rect x="590" y="144" width="330" height="100" rx="8" fill="#fff3e0" stroke="#e65100" stroke-width="1.5"/>
+  <text x="755" y="166" text-anchor="middle" font-weight="bold" fill="#e65100">REPLICATOR  (AF_XDP)</text>
+  <text x="606" y="186" fill="#333">ucast.o (XDP prog) → AF_XDP redirect</text>
+  <text x="606" y="202" fill="#333">Fan-out: echoes frame back to client</text>
+  <text x="606" y="218" fill="#333">--xdp-rx stamps bpf_ktime into payload</text>
+  <text x="606" y="234" font-size="10" fill="#666">Ctrl port: UDP 12345 (env AFXDP_CONTROL_PORT)</text>
 
   <!-- Arrows A -->
   <defs>
     <marker id="arrowR" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
       <path d="M0,0 L8,3 L0,6 Z" fill="#1565c0"/>
     </marker>
-    <marker id="arrowL" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto">
-      <path d="M8,0 L0,3 L8,6 Z" fill="#1565c0"/>
+    <marker id="arrowL" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1565c0"/>
     </marker>
     <marker id="arrowO" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
       <path d="M0,0 L8,3 L0,6 Z" fill="#e65100"/>
     </marker>
   </defs>
-  <line x1="440" y1="168" x2="536" y2="168" stroke="#1565c0" stroke-width="2" marker-end="url(#arrowR)"/>
-  <text x="470" y="162" font-size="10" fill="#1565c0">probe</text>
-  <line x1="536" y1="210" x2="440" y2="260" stroke="#1565c0" stroke-width="2" marker-end="url(#arrowL)"/>
-  <text x="470" y="244" font-size="10" fill="#1565c0">echo</text>
+  <line x1="510" y1="164" x2="586" y2="164" stroke="#1565c0" stroke-width="2" marker-end="url(#arrowR)"/>
+  <text x="513" y="157" font-size="10" fill="#1565c0">probe</text>
+  <line x1="586" y1="224" x2="510" y2="278" stroke="#1565c0" stroke-width="2" marker-end="url(#arrowL)"/>
+  <text x="513" y="256" font-size="10" fill="#1565c0">echo</text>
 
   <!-- ===== PATH B: Multicast One-Way (bottom half) ===== -->
   <text x="40" y="350" font-size="14" font-weight="bold" fill="#2e7d32">B. Multicast One-Way  (mcast_send → replicator → mcast_receive)</text>

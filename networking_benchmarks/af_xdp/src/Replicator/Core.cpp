@@ -19,6 +19,7 @@
 // ReplicatorCore.cpp — object lifecycle (construction/destruction/move),
 // thread start/stop orchestration, statistics reporting, and CPU affinity.
 
+#include <algorithm>
 #include "Internal.hpp"
 
 // Replicator implementation
@@ -173,6 +174,10 @@ void Replicator::start() {
             std::cout << "Started HFT-optimized packet processing thread for queue " << queue_id << std::endl;
         }
         
+        // Publish the fan-out snapshot off the packet threads: rebuilding it inline
+        // took a mutex and resolved ARP on the RX path every 100 ms.
+        dest_refresh_thread_ = std::make_unique<std::thread>(&Replicator::destRefreshLoop, this);
+
         // Start control protocol thread (don't bind to specific core to avoid interference)
         control_thread_ = std::make_unique<std::thread>(&Replicator::handleControlProtocol, this);
 
@@ -200,6 +205,14 @@ void Replicator::stop() {
         packet_processor_threads_.clear();
         
         // Wait for control thread to finish
+        if (dest_refresh_thread_ && dest_refresh_thread_->joinable()) {
+            dest_refresh_thread_->join();
+            dest_refresh_thread_.reset();
+        }
+        // Readers are stopped, so retired snapshots can go.
+        dest_snapshot_.store(nullptr, std::memory_order_release);
+        for (auto& s : snapshot_ring_) s.reset();
+
         if (control_thread_ && control_thread_->joinable()) {
             control_thread_->join();
             control_thread_.reset();
@@ -347,7 +360,7 @@ static std::vector<int> readOnlineCpus() {
 // /proc/irq/N/smp_affinity_list). Poll threads must avoid these — but we must
 // use the REAL placement, not an assumption (the IRQ usually sits on CPU 0 with
 // the OS, not on the first isolated core).
-static std::vector<int> readEnaIrqCpus() {
+static std::vector<int> readEnaIrqCpus(size_t online_count) {
     std::vector<int> cpus;
     std::ifstream f("/proc/interrupts");
     if (!f.is_open()) return cpus;
@@ -361,8 +374,14 @@ static std::vector<int> readEnaIrqCpus() {
         irqTok.pop_back();
         std::ifstream af("/proc/irq/" + irqTok + "/smp_affinity_list");
         std::string al;
-        if (std::getline(af, al))
-            for (int c : parseCpuList(al)) cpus.push_back(c);
+        if (!std::getline(af, al)) continue;
+        std::vector<int> mask = parseCpuList(al);
+        // An IRQ left at the default affinity spans every online CPU (the ENA admin
+        // queue does this) and says nothing about placement. Counting it would
+        // exclude every isolated core and collapse the pool, so only a strict
+        // subset counts as a real pin.
+        if (online_count && mask.size() >= online_count) continue;
+        for (int c : mask) cpus.push_back(c);
     }
     return cpus;
 }
@@ -396,12 +415,25 @@ void Replicator::initializeCpuCores() {
         // rtt recv core (collision). Skip the REAL IRQ cores + any offline core.
         std::vector<int> isol = readIsolatedCpus();
         std::vector<int> online = readOnlineCpus();
-        std::vector<int> irq = readEnaIrqCpus();
+        std::vector<int> irq = readEnaIrqCpus(online.size());
         auto has = [](const std::vector<int>& v, int x) { for (int e : v) if (e == x) return true; return false; };
         for (int c : isol)
             if ((online.empty() || has(online, c)) && !has(irq, c)) pool.push_back(c);
         if (!pool.empty())
             std::cout << "CPU pool = isolated ∩ online − ENA-IRQ cores: " << pool.size() << " cores" << std::endl;
+    }
+    if (pool.empty()) {
+        // Isolation exists but every isolated core looked like an IRQ core. Keep the
+        // isolated set rather than dropping to the legacy fallback, which pins the
+        // poll thread to a shared core and shows up as tail-latency outliers.
+        std::vector<int> isol = readIsolatedCpus();
+        std::vector<int> online = readOnlineCpus();
+        for (int c : isol)
+            if (online.empty() || std::find(online.begin(), online.end(), c) != online.end())
+                pool.push_back(c);
+        if (!pool.empty())
+            std::cout << "CPU pool = isolated \u2229 online (ENA-IRQ exclusion would have emptied it): "
+                      << pool.size() << " cores" << std::endl;
     }
     if (pool.empty()) {
         for (int i = 1; i <= num_queues_; ++i) pool.push_back(i);  // legacy fallback

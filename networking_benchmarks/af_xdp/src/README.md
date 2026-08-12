@@ -1,7 +1,7 @@
 # src/ - AF_XDP replicator engine
 
 Core of the benchmark: an **AF_XDP zero-copy UDP packet replicator** plus a
-echo-mode fallback echo server. Paired with the `tools/` clients (`rtt`,
+echo-mode fallback server. Paired with the `tools/` clients (`rtt`,
 `mcast_send`, `mcast_receive`, `replicator_ctl`) it measures point-to-point
 (unicast) and fan-out (multicast-over-m2u) latency between EC2 instances with
 sub-microsecond timing resolution.
@@ -32,7 +32,8 @@ sub-microsecond timing resolution.
 ```bash
 make all          # full AF_XDP build (needs libxdp, libbpf) - EC2
 make full         # all + multicast tools (mcast_send/receive)
-make echo-mode  # -DECHO_MODE_ONLY, no libxdp - containers / CI / macOS
+make mcast        # multicast tools (mcast_send/receive), xdp
+make echo-mode    # -DECHO_MODE_ONLY, no libxdp - containers / CI / macOS
 ```
 `#ifdef ECHO_MODE_ONLY` guards exclude all XDP/BPF code paths (and the AF_XDP TX sender inlined in `tools/rtt.cpp`)
 so the control-protocol + echo logic can be unit-tested without root or a NIC.
@@ -120,7 +121,7 @@ to the replicator, intercepted by XDP. No kernel tunnel device is involved.
 2. **m2u framing** - `mcast_send` builds the frame in userspace and sends it via
    AF_XDP zero-copy straight to the replicator (`-D <replicator_ip>`). Frame on
    the wire: `Eth / IPv4 (proto 17=UDP) / UDP / m2u{magic(4), group(4)} / payload`
-   (50 B of headers, vs 66 B for the old encapsulation). Inspired by [mcast2ucast](../../mcast2ucast/).
+   (50 B of headers, vs 66 B for the GRE encapsulation). Inspired by [mcast2ucast](../../mcast2ucast/).
 3. **Replicator (mcast mode)** - loads `mcast.o` instead of `ucast.o`. It parses
    `Eth/IP/UDP` + the 8-byte m2u tag, reads the group from the header, and matches
    `{group, dst port}` against `config_map`; match → redirect to the AF_XDP socket
@@ -146,8 +147,8 @@ to the replicator, intercepted by XDP. No kernel tunnel device is involved.
   bursts; `gro=200µs` makes the backstop the primary path → ~200µs/hop.)
 - **Fan-out hot path** (`Replicator::replicatePacket` → `createUdpPacket`) - the
   source IP is parsed once at `initialize()` (`cached_iface_saddr_nbo_`), not per
-  packet (`inet_aton` was on the hot path); TX completions are drained once per
-  fan-out batch (not per destination); one driver kick covers all K destinations.
+  packet; TX completions are drained once per fan-out batch (not per destination);
+  one driver kick covers all K destinations.
 - **CPU layout** - the busy-poll thread is pinned to an isolated CPU and the ENA
   hard IRQ to a *different* isolated CPU (see `deploy/ansible/run_mcast.yaml` /
   `ena-irq-affinity.service`), so the IRQ never preempts the poll loop.
@@ -166,11 +167,11 @@ Two send backends, selected by `rtt --xdp-tx`:
   is built **once into every UMEM frame** at startup (dst MAC via ARP); per
   packet it writes only the 10 ASCII sequence digits and stamps the TX timestamp
   immediately before submitting to the TX ring. This removes the kernel TX stack
-  from the measured leg. A/B measured: p99.9 −14.5 µs (~21%), max 488→82 µs.
+  from the measured leg.
 
 ---
 
-## How latency is measured
+## How unicast (round-trip-time) latency is measured
 
 **TX timestamp - `CLOCK_REALTIME`.** On the send hot path the tool reads
 `clock_gettime(CLOCK_REALTIME)` immediately before the send (kernel `sendto`, or the
@@ -190,7 +191,7 @@ is used.
 Hardware PHC RX timestamps are **not** used for the RTT - they live in a separate
 wall-clock epoch; PHC is only for the one-way multicast path below.
 
-**`--xdp-rx` (optional).** The RX time is instead stamped at the **XDP ingress hook**
+**`--xdp-rx` (ucast, optional).** The RX time is instead stamped at the **XDP ingress hook**
 by the ucast XDP program via `bpf_ktime_get_ns()` (`CLOCK_MONOTONIC`), written into the
 echo payload; the client reads it and stamps TX with `CLOCK_MONOTONIC` to match. **This is
 not an AF_XDP RX datapath** - the echo still traverses the full kernel stack to the UDP
@@ -255,7 +256,7 @@ unicast round-trip (single-host `CLOCK_REALTIME`) path.
 
 ## Optimizations
 
-- **Zero-copy AF_XDP** (DRV mode) - packets DMA'd straight into the UMEM; the
+- **Zero-copy AF_XDP** - packets DMA'd straight into the UMEM; the
   replicator reads/echoes in place, no copies.
 - **Lock-free slot array** - sequence-indexed timing store; no map/mutex on the
   hot path.
@@ -280,11 +281,10 @@ unicast round-trip (single-host `CLOCK_REALTIME`) path.
   RX timestamp (~µs, stamped in the NAPI path). No TSC or PHC is used in the RTT.
 - **Unicast:** round-trip on a single host's clock → no sync error. RX stamped in the
   NAPI `netif_receive_skb` path (before the socket queue) removes queueing/scheduling
-  jitter from the RX leg. Measured intra-cluster p50 ≈ 24–30 µs; loss driven to 0
-  after the rmem fix.
+  jitter from the RX leg. Measured intra-cluster p50 ≈ 24–30 µs.
 - **Multicast:** one-way source→dest, so accuracy is bounded by **clock sync**.
   Nodes sync to the Nitro PHC (`/dev/ptp0`) via chrony refclock (±50–500 ns) plus
-  a tight NTP fallback; sub-µs skew was verified before runs.
+  a tight NTP fallback; sub-µs skew is verified before runs.
 - **AF_XDP TX vs kernel** (A/B on 2× c7i.2xlarge): p50 −2 µs (~6%), p99 −3 µs,
   p99.9 −14.5 µs (~21%), max 488→82 µs.
 
@@ -298,7 +298,7 @@ unicast round-trip (single-host `CLOCK_REALTIME`) path.
   userspace at runtime (`config_map_fd_`).
 - **Timestamping** - `SO_TIMESTAMPING` (SW+HW), `SO_TIMESTAMP` fallback.
 - **`SO_BUSY_POLL`**, **`SCHED_FIFO`**, **`mlockall`**, **`SO_RCVBUF`/`SO_RCVTIMEO`**.
-- **Core isolation** - `isolcpus`/`nohz_full`/`rcu_nocbs`/`nosmt` grub cmdline.
+- **Core isolation** - `isolcpus`/`nohz_full`/`rcu_nocbs`/`nosmt` via grub.
 
 ## AWS / ENA specifics
 

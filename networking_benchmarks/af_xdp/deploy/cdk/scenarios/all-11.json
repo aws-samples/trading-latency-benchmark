@@ -1,0 +1,11 @@
+[
+  {"role": "source", "tenancy":"host", "az": "a", "pgName": "cpg-a", "pgType": "cluster"},
+  {"role": "source", "tenancy":"host", "az": "a", "pgName": "cpg-a", "pgType": "cluster"},
+  {"role": "replicator", "az": "a", "pgName": "cpg-a", "pgType": "cluster"},
+  {"role": "replicator", "az": "a"},
+  {"role": "replicator", "az": "b"},
+  {"count": 3, "role": "destination", "az": "a", "pgName": "cpg-a", "pgType": "cluster"},
+  {"role": "destination", "az": "a"},
+  {"role": "destination", "az": "b"},
+  {"region": "eu-west-2", "role": "destination", "az": "a", "pgType": "cluster"}
+]

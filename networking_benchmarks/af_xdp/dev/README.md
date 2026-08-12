@@ -7,9 +7,9 @@ Developer iteration tooling - separate from production `deploy/`. Used to build,
 ```
 dev/
 ├── Dockerfile              Local build + test harness (mirrors the AMI bake)
-├── roadmap/                Development design docs (pair-selection, generalization, etc.)
 └── ansible/                Dev playbooks + shared-inventory symlink
-    ├── sync.yaml           rsync local source → EC2s, rebuild, restart (+ Go agent)
+    ├── sync.yaml           rsync local source → fleet EC2s + control-plane, rebuild, restart
+    ├── ansible.cfg         Enables amazon.aws.aws_ec2 inventory plugin + disables SSH multiplexing
     ├── provision.yaml      Full install on stock AL2023 (no baked AMI)
     ├── run_tests.yaml      Run the pytest suite on the fleet
     └── inventory.aws_ec2.yml → symlink to ../../deploy/ansible/inventory.aws_ec2.yml
@@ -17,7 +17,7 @@ dev/
 
 ## Recommended: `afxdpctl sync`
 
-The `afxdpctl` CLI (at `control-plane/cmd/afxdpctl`) wraps the dev ansible for the common hot-deploy case:
+The `afxdpctl` CLI (at `control_plane/cmd/afxdpctl`) wraps the dev ansible for the common hot-deploy case:
 
 ```bash
 # Hot-deploy local code to all fleet nodes (rsync → make → agent rebuild → restart):
@@ -61,7 +61,8 @@ A fleet must be running and tagged by `Role` (deployed via CDK or manually tagge
 
 ### sync.yaml - Hot-deploy Local Code Changes
 
-Syncs the local `af_xdp/` tree to all fleet nodes, rebuilds, and restarts:
+Syncs the local `af_xdp/` tree to all nodes, rebuilds, and restarts. Two
+different paths run depending on the target host's group:
 
 ```bash
 cd dev/ansible
@@ -69,20 +70,43 @@ ansible-playbook -i inventory.aws_ec2.yml sync.yaml
 
 # Limit to specific role:
 ansible-playbook -i inventory.aws_ec2.yml sync.yaml --limit replicator
+
+# Limit to the control-plane only:
+ansible-playbook -i inventory.aws_ec2.yml sync.yaml --limit control_plane
 ```
 
-**What it does:**
+**Fleet path** (`source`/`replicator`/`destination` hosts):
 1. `rsync` local source → `/home/ec2-user/af_xdp/` (excludes `.git`, `node_modules`, `cdk.out`, `*.o`, `*.d`, binaries)
 2. `make clean && make full` on each node
 3. Verify the built replicator supports AF_XDP (not echo-mode-only)
 4. Copy binaries to `/opt/af-xdp/`
-5. **Build the control-plane Go agent** from the synced source (uses baked Go toolchain at `/usr/local/go`)
-6. **Restart `afxdp-agent.service`** (enables it if not already enabled)
-7. Detach stale XDP programs, reset interface, set RSS to queue 0
-8. Restart `replicator.service`
-9. Verify the replicator is active
+5. **Build the fleet node's Go agent** from the synced source (uses baked Go toolchain at `/usr/local/go`; skips cleanly if the `control_plane/agent` dir or toolchain is absent)
+6. **Fix source tree ownership back to `ec2-user`** - the build steps above run under `become: yes`, so their output would otherwise leave root-owned files that block the *next* sync's unprivileged rsync
+7. **Restart `afxdp-agent.service`** (enables it if not already enabled)
+8. Detach stale XDP programs, reset interface, set RSS to queue 0
+9. Restart `replicator.service`
+10. Verify the replicator is active
+
+**Control-plane path** (the single `XdpStack-ControlPlane` host, matched by its
+CFN stack-name tag - it carries no `Role` tag, so it's not covered by the fleet
+groups above): after the same rsync, it instead builds `afxdp-backend` (`go
+build ./backend`), rebuilds the web dist (`npm run build` in `control-plane/web`),
+fixes ownership the same way, and restarts `cp-backend.service` - none of the
+fleet-only C++/XDP/replicator steps apply to this host.
 
 The rsync excludes build artifacts (`*.o`, `*.d`, binaries) to prevent a stale host-compiled object (e.g. one with `-DECHO_MODE_ONLY`) from contaminating the remote build.
+
+**`dev/ansible/ansible.cfg`** carries two fixes that make this playbook actually
+work, both non-obvious from the task list above:
+- `[inventory] enable_plugins` explicitly enables the `amazon.aws.aws_ec2`
+  dynamic-inventory plugin - without it, `ansible-core` silently falls back to
+  treating `inventory.aws_ec2.yml` as a static, unreachable host and the whole
+  playbook "succeeds" against zero real hosts.
+- `[ssh_connection] ssh_args` disables SSH connection multiplexing
+  (`ControlMaster=no`, `ControlPersist=0`). Some local SSH client wrappers
+  intermittently choke on the reused control socket mid-playbook; a fresh
+  connection per task is slower but was reliable across repeated full runs
+  where multiplexing was not.
 
 ### provision.yaml - Full Provision on Stock AL2023
 
@@ -155,6 +179,6 @@ afxdpctl sync --key ~/.ssh/virginia.pem
 cd dev/ansible && ansible-playbook -i inventory.aws_ec2.yml run_tests.yaml
 
 # 5. Run benchmarks:
-afxdpctl run ucast all
+afxdpctl run ucast kernel
 afxdpctl report -o run.html
 ```

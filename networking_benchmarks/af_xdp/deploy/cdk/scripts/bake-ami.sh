@@ -83,7 +83,7 @@ chown -R ec2-user:ec2-user /opt/af-xdp /tmp/build-src 2>/dev/null || true
 # driven by the central control plane. Uses the latest stable Go from go.dev.
 # FATAL on failure: a baked AMI without a working agent silently breaks the
 # control plane, so we fail the bake (CFN gets a FAILURE signal) instead.
-CP_DIR=/tmp/build-src/networking_benchmarks/af_xdp/control-plane
+CP_DIR=/tmp/build-src/networking_benchmarks/af_xdp/control_plane
 if [ -d "$CP_DIR/agent" ]; then
   echo "=== Step 3b: build control-plane agent ==="
   [ -f "$CP_DIR/go.mod" ] || { echo "FATAL: $CP_DIR/go.mod missing (gitignored?) — cannot build agent"; exit 1; }

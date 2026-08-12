@@ -246,8 +246,8 @@
 
     - name: Run report generator (heatmap + fleet.json for the web viewer)
       ansible.builtin.shell: |
-        python3 {{ playbook_dir }}/../../control-plane/gen/report.py {{ latest_dir.stdout | trim }}
-        python3 {{ playbook_dir }}/../../control-plane/gen/fleet_json.py {{ latest_dir.stdout | trim }}
+        python3 {{ playbook_dir }}/../../control_plane/gen/report.py {{ latest_dir.stdout | trim }}
+        python3 {{ playbook_dir }}/../../control_plane/gen/fleet_json.py {{ latest_dir.stdout | trim }}
       register: report_output
       ignore_errors: yes
 
@@ -265,5 +265,5 @@
         msg: >-
           Reports: {{ latest_dir.stdout | trim }}/
           [matrix_report.html, fleet.json, matrix_summary.json]  —
-          view fleet.json in control-plane/web (2D/3D)
+          view fleet.json in control_plane/web (2D/3D)
       when: report_output.rc == 0

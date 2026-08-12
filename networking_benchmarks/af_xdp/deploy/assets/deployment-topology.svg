@@ -29,7 +29,7 @@
 
   <!-- Builder EC2 -->
   <rect x="50" y="85" width="120" height="50" rx="4" fill="#fff" stroke="#d97706" stroke-width="1"/>
-  <text x="110" y="107" text-anchor="middle" font-size="10" fill="#92400e">EC2 (c7i.xlarge)</text>
+  <text x="110" y="107" text-anchor="middle" font-size="10" fill="#92400e">EC2 (c7i.4xlarge)</text>
   <text x="110" y="121" text-anchor="middle" font-size="9" fill="#78716c">bake-ami.sh</text>
 
   <!-- Lambda -->
@@ -74,7 +74,7 @@
 
   <!-- ═══ Fleet Stack(s) ═══ -->
   <rect x="30" y="270" width="840" height="320" rx="6" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5" stroke-dasharray="4,3"/>
-  <text x="450" y="290" text-anchor="middle" font-size="11" fill="#166534" font-weight="bold">FLEET STACK (per scenario — single or cross-region)</text>
+  <text x="450" y="290" text-anchor="middle" font-size="11" fill="#166534" font-weight="bold">FLEET STACK</text>
 
   <!-- VPC box (primary) -->
   <rect x="50" y="305" width="370" height="260" rx="4" fill="#fff" stroke="#16a34a" stroke-width="1"/>
@@ -94,10 +94,13 @@
   <rect x="245" y="362" width="160" height="30" rx="3" fill="#fff" stroke="#16a34a" stroke-width="0.8"/>
   <text x="325" y="381" text-anchor="middle" font-size="9" fill="#374151">Node2 (no PG, az-b)</text>
 
-  <!-- Agent icon in each node -->
-  <text x="200" y="379" font-size="8" fill="#2563eb">🔗agent</text>
-  <text x="200" y="417" font-size="8" fill="#2563eb">🔗agent</text>
-  <text x="395" y="379" font-size="8" fill="#2563eb">🔗agent</text>
+  <!-- Agent badge on each node (small corner tag, no text overlap) -->
+  <rect x="204" y="365" width="10" height="10" rx="2" fill="#dbeafe" stroke="#2563eb" stroke-width="0.6"/>
+  <text x="209" y="373" text-anchor="middle" font-size="7" fill="#2563eb">A</text>
+  <rect x="204" y="403" width="10" height="10" rx="2" fill="#dbeafe" stroke="#2563eb" stroke-width="0.6"/>
+  <text x="209" y="411" text-anchor="middle" font-size="7" fill="#2563eb">A</text>
+  <rect x="399" y="365" width="10" height="10" rx="2" fill="#dbeafe" stroke="#2563eb" stroke-width="0.6"/>
+  <text x="404" y="373" text-anchor="middle" font-size="7" fill="#2563eb">A</text>
 
   <!-- Security Group -->
   <rect x="65" y="450" width="340" height="40" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="0.8"/>
@@ -109,23 +112,23 @@
   <text x="240" y="244" font-size="8" fill="#4d7c0f">AMI from SSM</text>
 
   <!-- Agent → NATS arrows -->
-  <line x1="340" y1="362" x2="405" y2="232" stroke="#2563eb" stroke-width="1" marker-end="url(#arrow-blue)" stroke-dasharray="3,2"/>
-  <text x="380" y="252" font-size="8" fill="#1e40af">NATS outbound</text>
-  <text x="380" y="262" font-size="8" fill="#1e40af">(SSM discovery)</text>
+  <line x1="325" y1="362" x2="405" y2="232" stroke="#2563eb" stroke-width="1" marker-end="url(#arrow-blue)" stroke-dasharray="3,2"/>
+  <text x="368" y="256" font-size="8" fill="#1e40af">NATS outbound</text>
+  <text x="368" y="266" font-size="8" fill="#1e40af">(SSM discovery)</text>
 
   <!-- VPC box (secondary — optional) -->
-  <rect x="460" y="305" width="390" height="210" rx="4" fill="#fff" stroke="#16a34a" stroke-width="1" stroke-dasharray="3,3"/>
-  <text x="655" y="322" text-anchor="middle" font-size="10" fill="#166534">VPC (eu-west-2, optional) — 10.62.0.0/16</text>
+  <rect x="520" y="305" width="330" height="210" rx="4" fill="#fff" stroke="#16a34a" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="685" y="322" text-anchor="middle" font-size="10" fill="#166534">VPC (eu-west-2, optional) — 10.62.0.0/16</text>
 
   <!-- Cross-region node -->
-  <rect x="480" y="362" width="160" height="30" rx="3" fill="#fff" stroke="#7c3aed" stroke-width="0.8"/>
-  <text x="560" y="381" text-anchor="middle" font-size="9" fill="#374151">Node3 c7i.2xlarge</text>
-  <rect x="480" y="400" width="160" height="30" rx="3" fill="#fff" stroke="#7c3aed" stroke-width="0.8"/>
-  <text x="560" y="419" text-anchor="middle" font-size="9" fill="#374151">Node4 c7i.2xlarge</text>
+  <rect x="540" y="362" width="160" height="30" rx="3" fill="#fff" stroke="#7c3aed" stroke-width="0.8"/>
+  <text x="620" y="381" text-anchor="middle" font-size="9" fill="#374151">Node3 c7i.4xlarge</text>
+  <rect x="540" y="400" width="160" height="30" rx="3" fill="#fff" stroke="#7c3aed" stroke-width="0.8"/>
+  <text x="620" y="419" text-anchor="middle" font-size="9" fill="#374151">Node4 c7i.4xlarge</text>
 
   <!-- VPC Peering -->
-  <line x1="420" y1="420" x2="478" y2="420" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrow-green)"/>
-  <text x="449" y="435" text-anchor="middle" font-size="8" fill="#166534">VPC Peering</text>
+  <line x1="420" y1="410" x2="518" y2="410" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <text x="469" y="403" text-anchor="middle" font-size="8" fill="#166534">VPC Peering</text>
 
   <!-- Operator box -->
   <rect x="610" y="50" width="260" height="100" rx="6" fill="#fdf4ff" stroke="#a855f7" stroke-width="1.5"/>

@@ -53,7 +53,7 @@ void Replicator::initialize(bool useZeroCopy) {
               << (mcast_mode_ ? " (m2u multicast mode)" : "") << std::endl;
     XdpSocket::loadXdpProgram(listen_interface_, xdp_program_path, useZeroCopy);
 
-    // Cache listen_ip_ as NBO for use by configureXdpProgram() and updateDestinationCache()
+    // Cache listen_ip_ as NBO for use by configureXdpProgram() and publishDestSnapshot()
     listen_ip_nbo_ = parseIpAddress(listen_ip_);
 
     // Configure XDP program with target IP and port

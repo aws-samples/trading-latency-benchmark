@@ -270,7 +270,7 @@
 # ── Generate report (local) — heatmap + fleet.json for the web viewer ─────────
 # Mirrors run_ucast.yaml Play 4: the per-pair <src_ip>-<dst_ip>.json files (one-way
 # source->destination latency in the service_rtt_us schema) + <ip>_metadata.json
-# feed the same gen scripts, so the web app (control-plane/web) renders mcast identically.
+# feed the same gen scripts, so the web app (control_plane/web) renders mcast identically.
 - name: Generate report
   hosts: localhost
   become: false
@@ -283,8 +283,8 @@
 
     - name: Run report generator (heatmap + fleet.json)
       ansible.builtin.shell: |
-        python3 {{ playbook_dir }}/../../control-plane/gen/report.py {{ latest_dir }}
-        python3 {{ playbook_dir }}/../../control-plane/gen/fleet_json.py {{ latest_dir }}
+        python3 {{ playbook_dir }}/../../control_plane/gen/report.py {{ latest_dir }}
+        python3 {{ playbook_dir }}/../../control_plane/gen/fleet_json.py {{ latest_dir }}
       register: report_output
       changed_when: true
 
@@ -301,5 +301,5 @@
       ansible.builtin.debug:
         msg: >-
           Wrote matrix_report.html, fleet.json, matrix_summary.json to
-          {{ latest_dir }} — view fleet.json in control-plane/web (2D/3D)
+          {{ latest_dir }} — view fleet.json in control_plane/web (2D/3D)
       when: report_output.rc == 0

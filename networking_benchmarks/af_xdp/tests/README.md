@@ -239,7 +239,7 @@ Argument-parsing layer of `mcast_receive` (runs before XDP attach).
 
 ## MCP Integration Tests (`test_mcp_integration.py`, 21 tests)
 
-End-to-end tests for the read-only **MCP server** (`control-plane/mcp/`). These
+End-to-end tests for the read-only **MCP server** (`control_plane/mcp/`). These
 build the Go binary, create a fixture SQLite database from the DDL in
 `backend/store.go`, and drive the server over stdio JSON-RPC - covering the
 protocol layer the Go unit tests cannot reach.

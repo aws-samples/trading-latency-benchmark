@@ -613,12 +613,14 @@ next:
 			fprintf(jf, "    \"max\": %" PRIu64 "\n", max_lat / 1000);
 			fprintf(jf, "  },\n");
 			if (has_replicator_ts && !latencies_hop1.empty()) {
-				fprintf(jf, "  \"hop1_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
-				        pct(latencies_hop1, 50) / 1000, pct(latencies_hop1, 99) / 1000);
+				fprintf(jf, "  \"hop1_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 ", \"p999\": %" PRIu64 " },\n",
+				        pct(latencies_hop1, 50) / 1000, pct(latencies_hop1, 99) / 1000,
+				        (latencies_hop1[(latencies_hop1.size() - 1) * 999 / 1000]) / 1000);
 			}
 			if (has_replicator_ts && !latencies_hop2.empty()) {
-				fprintf(jf, "  \"hop2_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
-				        pct(latencies_hop2, 50) / 1000, pct(latencies_hop2, 99) / 1000);
+				fprintf(jf, "  \"hop2_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 ", \"p999\": %" PRIu64 " },\n",
+				        pct(latencies_hop2, 50) / 1000, pct(latencies_hop2, 99) / 1000,
+				        (latencies_hop2[(latencies_hop2.size() - 1) * 999 / 1000]) / 1000);
 			}
 			if (has_tx_ts && !latencies_proc.empty()) {
 				fprintf(jf, "  \"hop2_proc_ns\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",

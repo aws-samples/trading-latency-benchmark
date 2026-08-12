@@ -1,5 +1,0 @@
-[
-  {"role": "source",      "type": "c7i.2xlarge", "pgName": "us-a-cpg-src", "pgType": "cluster"},
-  {"role": "replicator",  "type": "c7i.2xlarge", "pgName": "us-a-cpg-src", "pgType": "cluster"},
-  {"role": "destination", "type": "c7i.2xlarge", "region": "eu-west-2"}
-]

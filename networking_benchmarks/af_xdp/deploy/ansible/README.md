@@ -162,4 +162,4 @@ afxdpctl run mcast copy,inplace   # triggers mcast benchmark
 afxdpctl report -o results.html   # generates HTML report
 ```
 
-See `control-plane/cmd/afxdpctl` for the full CLI reference.
+See `control_plane/cmd/afxdpctl` for the full CLI reference.

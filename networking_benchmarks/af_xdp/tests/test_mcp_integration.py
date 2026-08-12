@@ -26,7 +26,7 @@ import pytest
 pytestmark = pytest.mark.no_cpp_binaries
 
 AF_XDP_DIR = Path(__file__).parent.parent
-CP_DIR = AF_XDP_DIR / "control-plane"
+CP_DIR = AF_XDP_DIR / "control_plane"
 def _find_store_go() -> Path:
     """Locate the Go file declaring the measurements schema.
 

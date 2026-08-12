@@ -19,6 +19,7 @@ the same AMI/code adapts to any size.
 | `u-cpg-3.json` | Same AZ (a), single cluster PG | 3 | Standard ucast triangle |
 | `u-xaz-xcpg-10.json` | Cross AZ (a+b): 2 CPGs + 2 SPGs + 2 unplaced | 10 | Full placement matrix |
 | `u-cpg-22.json` | Same AZ (b), single cluster PG (eu-central-1) | 22 | Large CPG: source + replicator + 20 destinations |
+| `u-m8azn-metal-5.json` | 2 same cluster PG (az a) + 1 same AZ (a, unplaced) + 1 other AZ (b) + 1 other region (eu-west-1) | 5 | `m8azn.metal-12xl` bare metal - cross-region requires the AMI baked in eu-west-1 |
 
 ## mcast/ - Multicast fan-out benchmarks
 

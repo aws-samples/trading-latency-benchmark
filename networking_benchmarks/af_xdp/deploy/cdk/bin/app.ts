@@ -124,7 +124,7 @@ switch (deploymentType) {
     // (serves web + API). Fleet agents connect outbound to its EIP:4222.
     //   cdk deploy --context deploymentType=control-plane \
     //     --context keyPairName=<key> --context gitRepo=<repo> --context gitRef=<branch> \
-    //     [--context clientCidr=1.2.3.4/32] \
+    //     [--context clientCidr=1.2.3.4/32] [--context adminCidr=1.2.3.4/32] \
     //     [--context hostedZoneId=Z... --context zoneName=example.com --context recordName=bench.example.com]
     new ControlPlaneStack(app, `${stackName}-ControlPlane`, {
       env: { account: process.env.CDK_DEFAULT_ACCOUNT, region },
@@ -133,6 +133,7 @@ switch (deploymentType) {
       gitRepo: app.node.tryGetContext('gitRepo') || undefined,
       gitRef: app.node.tryGetContext('gitRef') || undefined,
       clientCidr: app.node.tryGetContext('clientCidr') || undefined,
+      adminCidr: app.node.tryGetContext('adminCidr') || undefined,
       hostedZoneId: app.node.tryGetContext('hostedZoneId') || undefined,
       zoneName: app.node.tryGetContext('zoneName') || undefined,
       recordName: app.node.tryGetContext('recordName') || undefined,

@@ -82,6 +82,15 @@ JSON array of `FleetEntry` objects - all fields optional with sensible defaults:
 | `pgType` | string | none | Placement strategy: `cluster`, `spread`, or `partition` |
 | `pgName` | string | auto | Group label - entries with the same name share a placement group |
 | `region` | string | stack region | AWS region - entries with a different region trigger cross-region peering |
+| `tenancy` | string | `shared` | EC2 tenancy: `shared` (default multi-tenant host), `instance` (Dedicated Instance - single-tenant hardware, no placement control), or `host` (Dedicated Host - see below) |
+| `hostId` | string | none | Only with `tenancy:"host"`. A real AWS host ID (`h-...`, 17 hex chars) targets that exact pre-existing host (no `CfnHost` created); any other string is a logical alias - every entry sharing the alias gets ONE newly-allocated host, even without a real ID. Omit to auto-allocate one host per `(type, AZ)` combination instead. |
+
+`tenancy:"instance"` is compatible with `cluster`/`partition` placement groups,
+not `spread` (AWS restricts spread PGs to default tenancy). `tenancy:"host"`
+has the same restriction. A host-tenancy entry pins its instance(s) to a
+specific physical server via `affinity=host` + `hostId` - the only tenancy
+option with real placement control, as opposed to `instance` tenancy, which
+gives hardware isolation with no visibility into or control over placement.
 
 ### Loading a fleet spec
 
