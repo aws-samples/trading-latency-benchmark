@@ -78,8 +78,10 @@ void Replicator::handleUpstreamControl() {
     producer_addr.sin_port   = htons(producer_port_);
     inet_aton(producer_ip_.c_str(), &producer_addr.sin_addr);
 
-    // 1-second recv timeout so the loop checks running_ regularly
-    struct timeval tv{1, 0};
+    // 100ms recv timeout so the loop checks running_ promptly. stop() joins this
+    // thread, so the timeout bounds how long shutdown blocks here. Not in the
+    // packet path, so the extra idle wakeups cost nothing measurable.
+    struct timeval tv{0, 100000};
     setsockopt(ctrl_multicast_socket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     std::vector<uint8_t> buf(65535);
@@ -115,10 +117,11 @@ void Replicator::handleControlProtocol() {
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
     
-    // Set socket timeout
+    // 100ms recv timeout so the loop checks running_ promptly; stop() joins this
+    // thread, so this bounds how long shutdown blocks here.
     struct timeval timeout;
-    timeout.tv_sec = 1;
-    timeout.tv_usec = 0;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 100000;
     if (setsockopt(control_socket_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
         std::cerr << "Failed to set control socket timeout: " << strerror(errno) << std::endl;
     }

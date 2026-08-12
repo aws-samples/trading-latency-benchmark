@@ -120,14 +120,34 @@ func (a *agent) setState(st, cmdID string) {
 	a.mu.Unlock()
 }
 
-// onCommand handles a Command: dispatch, then publish a CommandResult (and, for
-// measurement commands, a Telemetry sample).
+// onCommand handles a Command. The NATS client dispatches a subscription's
+// callbacks SEQUENTIALLY, so this returns immediately and does the work in a
+// goroutine; otherwise a long blocking command (CmdMcastReceive runs for the
+// whole receive) would stall every later command on the same subscription,
+// including read-only status probes. execMu below still serialises real work.
 func (a *agent) onCommand(m *nats.Msg) {
 	var c proto.Command
 	if err := json.Unmarshal(m.Data, &c); err != nil {
 		log.Printf("bad command: %v", err)
 		return
 	}
+	go a.handleCommand(c)
+}
+
+func (a *agent) handleCommand(c proto.Command) {
+	// Read-only status queries answer WITHOUT taking execMu. They touch no shared
+	// state and need no AF_XDP queue, and the command they report on is itself
+	// holding the lock: CmdMcastReceive blocks for the whole receive, so a probe
+	// that waited for the lock could never be answered while it mattered.
+	if c.Type == proto.CmdMcastRxReady {
+		res := proto.CommandResult{CmdID: c.CmdID, InstanceID: a.node.InstanceID, OK: true}
+		if !a.run.McastRxReady() {
+			res.Fail("mcast_receive not listening yet")
+		}
+		a.publish(proto.SubjectResult(a.node.InstanceID), res)
+		return
+	}
+
 	// Serialize: the node has ONE AF_XDP queue and fixed /tmp result files, so
 	// two commands must never execute concurrently (NATS delivers cmd.all /
 	// cmd.role / cmd.agent on separate goroutines).

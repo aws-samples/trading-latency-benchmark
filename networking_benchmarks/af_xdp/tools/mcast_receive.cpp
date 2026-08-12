@@ -370,6 +370,11 @@ int main(int argc, char *argv[])
 	printf("AF_XDP listening on %s queue %d  inner UDP dst port=%d  "
 	       "expect=%d  timeout=%ds\n\n",
 	       iface, queue, port, count, timeout);
+	// Flush explicitly: stdout is redirected to a file by the agent, so libc
+	// picks full buffering and this line would otherwise sit in the buffer until
+	// exit. The orchestrator polls for it as the receiver's readiness signal and
+	// starts the source send only once every receiver has reported it.
+	fflush(stdout);
 
 	struct timespec t0;
 	clock_gettime(CLOCK_MONOTONIC, &t0);

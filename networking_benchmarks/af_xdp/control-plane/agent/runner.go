@@ -27,9 +27,11 @@ func NewRunner(binDir string) *Runner { return &Runner{binDir: binDir} }
 
 func (r *Runner) bin(name string) string { return r.binDir + "/" + name }
 
-// sh runs a bash snippet, returning combined output.
+// sh runs a bash snippet, returning combined output. Uses a non-login shell:
+// the scripts reference absolute paths, so sourcing /etc/profile and every
+// profile.d entry on each of the ~hundreds of calls per campaign is pure cost.
 func sh(script string) (string, error) {
-	out, err := exec.Command("bash", "-lc", script).CombinedOutput()
+	out, err := exec.Command("bash", "-c", script).CombinedOutput()
 	return string(out), err
 }
 
@@ -77,12 +79,21 @@ func (r *Runner) ClockSync() (float64, error) {
 // stale XDP. Safe to call on source/destination (NOT the replicator, whose XDP
 // must stay) — the caller decides.
 func (r *Runner) FreeQueue() error {
-	_, err := sh(`sudo pkill -9 -x mcast_receive 2>/dev/null || true;
-		sudo pkill -9 -x mcast_send 2>/dev/null || true; sleep 1;
-		IFACE=$(ip -4 route show default | awk '{print $5}' | head -1);
-		sudo ip link set "$IFACE" xdp off 2>/dev/null || true;
-		sudo ip link set "$IFACE" xdpgeneric off 2>/dev/null || true;
-		sudo xdp-loader unload "$IFACE" --all 2>/dev/null || true`)
+	// ONE sudo for the whole sequence: each sudo from this service context costs
+	// ~125ms, so the previous five-invocation form dominated per-mode cleanup.
+	// Polls for the killed processes to disappear rather than sleeping a flat
+	// second; SIGKILL reaping is sub-10ms in the normal case.
+	_, err := sh(`sudo bash -c '
+		pkill -9 -x mcast_receive 2>/dev/null || true
+		pkill -9 -x mcast_send 2>/dev/null || true
+		for i in $(seq 1 100); do
+			pgrep -x mcast_receive >/dev/null 2>&1 || pgrep -x mcast_send >/dev/null 2>&1 || break
+			sleep 0.02
+		done
+		IFACE=$(ip -4 route show default | awk "{print \$5}" | head -1)
+		ip link set "$IFACE" xdp off 2>/dev/null || true
+		ip link set "$IFACE" xdpgeneric off 2>/dev/null || true
+		xdp-loader unload "$IFACE" --all 2>/dev/null || true'`)
 	return err
 }
 
@@ -95,8 +106,10 @@ func (r *Runner) SetFwdMode(mode string) error {
 		script = fmt.Sprintf(`sudo sed -i '/^REPLICATOR_FWD_MODE=/d' /etc/default/replicator;
 			echo REPLICATOR_FWD_MODE=%s | sudo tee -a /etc/default/replicator >/dev/null`, mode)
 	}
-	_, err := sh(script + `; sudo systemctl restart replicator; sleep 6`)
-	return err
+	if _, err := sh(script + `; sudo systemctl restart replicator`); err != nil {
+		return err
+	}
+	return r.waitReplicator(true, 30*time.Second)
 }
 
 // SetMode sets REPLICATOR_MODE (ucast|mcast|kernel) and the fan-out FWD_MODE
@@ -109,8 +122,10 @@ func (r *Runner) SetMode(mode, fwd string) error {
 	if fwd != "" && fwd != "copy" {
 		script += fmt.Sprintf(`; echo REPLICATOR_FWD_MODE=%s | sudo tee -a /etc/default/replicator >/dev/null`, fwd)
 	}
-	_, err := sh(script + `; sudo systemctl restart replicator; sleep 6`)
-	return err
+	if _, err := sh(script + `; sudo systemctl restart replicator`); err != nil {
+		return err
+	}
+	return r.waitReplicator(true, 30*time.Second)
 }
 
 // ReplicatorSvc stop|start|restarts replicator.service. Stopping it on a source
@@ -121,8 +136,10 @@ func (r *Runner) ReplicatorSvc(action string) error {
 	default:
 		return fmt.Errorf("bad svc action %q", action)
 	}
-	_, err := sh(fmt.Sprintf(`sudo systemctl %s replicator; sleep 3`, action))
-	return err
+	if _, err := sh(fmt.Sprintf(`sudo systemctl %s replicator`, action)); err != nil {
+		return err
+	}
+	return r.waitReplicator(action != "stop", 30*time.Second)
 }
 
 // JoinGroup registers this node as an mcast destination with the replicator.
@@ -210,19 +227,14 @@ func (r *Runner) RunRTT(p proto.RTTParams) (proto.Metrics, string, error) {
 		flags += " --xdp-rx"
 	}
 
-	// ── Readiness probe: verify the target replicator responds to a control
-	// message before launching the full measurement. A replicator that just
-	// (re)started needs 1-3s for AF_XDP socket bind + XDP attach; subscribing
-	// too early gives rtt a timeout or "connection refused" exit. The probe
-	// sends a lightweight UDP `list` command (same control channel rtt uses to
-	// subscribe) and retries up to 4× with 600ms sleeps — total worst-case
-	// 2.4s, which covers the longest observed replicator startup. Zero-cost on
-	// the happy path (~1ms single UDP round-trip).
-	probeScript := fmt.Sprintf(
-		`for i in 1 2 3 4; do sudo %s %s list >/dev/null 2>&1 && exit 0; sleep 0.6; done; exit 1`,
-		r.bin("replicator_ctl"), p.TargetIP)
-	if _, err := sh(probeScript); err != nil {
-		return proto.Metrics{}, "", fmt.Errorf("target %s replicator not ready after 2.4s (not running?)", p.TargetIP)
+	// Readiness confirm: one control round-trip to the target so a measurement is
+	// never launched against a replicator that cannot echo. The orchestrator
+	// already waits for the target's restore to finish, so this is a backstop.
+	// replicator_ctl carries its own multi-second receive timeout, so retrying
+	// here would cost seconds per miss.
+	probe := fmt.Sprintf(`sudo %s %s list >/dev/null 2>&1`, r.bin("replicator_ctl"), p.TargetIP)
+	if _, err := sh(probe); err != nil {
+		return proto.Metrics{}, "", fmt.Errorf("target %s replicator did not answer its control port", p.TargetIP)
 	}
 
 	_ = os.Remove("/tmp/rtt_results.json")
@@ -377,6 +389,9 @@ func parseCPUList(s string) []int {
 func (r *Runner) RunMcastReceive(p proto.McastParams) (proto.Metrics, error) {
 	_, recv := derivePins()
 	_ = os.Remove("/tmp/mcast_results.json")
+	// Clear the previous run's log so McastRxReady cannot read a stale
+	// "listening" line from an earlier mode as readiness for this one.
+	_ = os.Remove(mcastRxLog)
 	cmd := fmt.Sprintf(`sudo timeout %d taskset -c %d %s -I %s -g %s -p %d -c %d -t %d -j /tmp/mcast_results.json >/tmp/mcast_receive.log 2>&1`,
 		p.TimeoutSec+5, recv, r.bin("mcast_receive"), iface(), p.Group, p.DataPort, p.Count, p.TimeoutSec)
 	if _, err := sh(cmd); err != nil {
@@ -406,3 +421,19 @@ func (r *Runner) RunMcastSend(p proto.McastParams) error {
 
 // nowUnix is a tiny helper.
 func nowUnix() int64 { return time.Now().Unix() }
+
+// mcastRxLog is where the agent captures mcast_receive's stdout; its "AF_XDP
+// listening" line is the receiver's readiness signal.
+const mcastRxLog = "/tmp/mcast_receive.log"
+
+// McastRxReady reports whether a local mcast_receive is running AND has attached
+// its XDP program and bound its socket. Both conditions are required: the process
+// alone is not ready yet, and the log alone could be stale from a previous mode.
+// This replaces a blind settle sleep before the source starts sending.
+func (r *Runner) McastRxReady() bool {
+	if _, err := sh(`pgrep -x mcast_receive >/dev/null 2>&1`); err != nil {
+		return false
+	}
+	_, err := sh(fmt.Sprintf(`grep -q "AF_XDP listening" %s 2>/dev/null`, mcastRxLog))
+	return err == nil
+}
