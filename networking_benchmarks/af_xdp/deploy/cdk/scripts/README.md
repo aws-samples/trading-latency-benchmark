@@ -10,19 +10,19 @@ Runs on a temporary c7i.xlarge instance, takes ~9-10 minutes, produces a univers
 
 | Step | Duration | Action |
 |------|----------|--------|
-| 0 | — | Register `trap cleanup EXIT` (signals CFN + stops instance on any exit) |
+| 0 | - | Register `trap cleanup EXIT` (signals CFN + stops instance on any exit) |
 | 1 | ~90s | Install build toolchain (gcc, clang, libbpf-devel, kernel-headers, etc.) |
 | 2 | ~120s | Build xdp-tools from source (with AL2023 stdbool.h patch) |
 | 3 | ~60s | Clone repo (`$GIT_REPO` @ `$GIT_REF`) + `make full` → install binaries to `/opt/af-xdp/` |
-| 3b | ~30s | **Build control-plane agent (Go)** — downloads latest Go, builds `./agent` → `/opt/af-xdp/afxdp-agent`. **FATAL on failure** (AMI without a working agent breaks the control plane silently). |
-| 4 | — | Write system configs (sysctl, chrony, modprobe, grub cmdline, profile) |
-| 5 | — | Install + enable systemd units |
-| 6 | — | Cleanup (remove build artifacts, dnf cache) |
-| 7 | — | Mark `BAKE_EXIT=0` (trap signals CFN SUCCESS + stops instance) |
+| 3b | ~30s | **Build control-plane agent (Go)** - downloads latest Go, builds `./agent` → `/opt/af-xdp/afxdp-agent`. **FATAL on failure** (AMI without a working agent breaks the control plane silently). |
+| 4 | - | Write system configs (sysctl, chrony, modprobe, grub cmdline, profile) |
+| 5 | - | Install + enable systemd units |
+| 6 | - | Cleanup (remove build artifacts, dnf cache) |
+| 7 | - | Mark `BAKE_EXIT=0` (trap signals CFN SUCCESS + stops instance) |
 
 ### Key Behavior Changes (current)
 
-- **Agent build is FATAL:** Step 3b exits non-zero (which trips `set -e` → triggers the cleanup trap → CFN FAILURE signal) if the Go agent doesn't compile. This is intentional — a baked AMI without `afxdp-agent` silently breaks control-plane-driven operation.
+- **Agent build is FATAL:** Step 3b exits non-zero (which trips `set -e` → triggers the cleanup trap → CFN FAILURE signal) if the Go agent doesn't compile. This is intentional - a baked AMI without `afxdp-agent` silently breaks control-plane-driven operation.
 - **Preflight retries SSM:** The baked `afxdp-agent-preflight.sh` retries SSM lookups for up to 60 seconds (30 × 2s) so that fleet nodes can tolerate the control-plane still booting when they come up.
 - **Binary-less fallback:** If the git clone fails (private repo, wrong ref), the bake continues *without* benchmark binaries (xdp-tools still installed) and prints a warning. Binaries can be deployed at runtime via ansible `sync.yaml`. The agent build is still attempted if the clone *partially* succeeded.
 
@@ -31,7 +31,7 @@ Runs on a temporary c7i.xlarge instance, takes ~9-10 minutes, produces a univers
 | File | Purpose |
 |------|---------|
 | `/etc/modprobe.d/ena-phc.conf` | ENA PHC + LLQ enable (activates `/dev/ptp0` on boot) |
-| `/etc/chrony.d/aws-phc.conf` | chrony refclock PHC — ±50-500ns clock sync via Nitro hypervisor |
+| `/etc/chrony.d/aws-phc.conf` | chrony refclock PHC - ±50-500ns clock sync via Nitro hypervisor |
 | `/etc/chrony.d/aws-ptp.conf` | Tight NTP fallback (minpoll 2, xleave, maxslewrate 500) |
 | `/etc/sysctl.d/99-bpf-xdp.conf` | BPF JIT enable, harden off |
 | `/etc/sysctl.d/99-network-bench.conf` | rp_filter off, mc_forwarding off, igmp_qrv=1, backlog 10K, rmem_max/wmem_max=16MB |
@@ -46,7 +46,7 @@ Runs on a temporary c7i.xlarge instance, takes ~9-10 minutes, produces a univers
 | Unit | Purpose |
 |------|---------|
 | `ena-coalescing.service` | Disable interrupt coalescing (`adaptive-rx off`, rx-usecs=0, tx-usecs=0) |
-| `ena-xdp-queues.service` | Pin RSS to queue 0 (`ethtool -X equal 1`) — all RX to the AF_XDP socket's queue |
+| `ena-xdp-queues.service` | Pin RSS to queue 0 (`ethtool -X equal 1`) - all RX to the AF_XDP socket's queue |
 | `ena-mtu.service` | Set MTU 3498 (ENA native XDP single-page requirement) |
 | `ena-irq-affinity.service` | Pin ENA NIC IRQs to the first isolated CPU (off contended CPU0) |
 | `cpu-performance.service` | Pin scaling governor to `performance` (no P-state ramp latency) |
@@ -82,7 +82,7 @@ Active after first boot. On a 4-physical-core `c7i.2xlarge`: core 0 = OS + house
 
 ### Error Handling
 
-- `trap cleanup EXIT` — always signals CFN + stops instance on any failure
+- `trap cleanup EXIT` - always signals CFN + stops instance on any failure
 - TAIL_LOG grep captures error/fail lines for the CFN failure reason (max 1000 chars)
 - Instance auto-stops; Lambda handles AMI creation + termination
 - If Lambda finds the bake failed, it terminates the builder and deregisters any partial AMI

@@ -2,8 +2,8 @@
 
 Integration tests for the AF_XDP benchmark suite (pytest).
 
-They exercise the **real** compiled binaries — `rtt`, `replicator_ctl`, `udp_send`,
-`mcast_send`, `mcast_receive` — and the control protocol against an **echo-mode
+They exercise the **real** compiled binaries - `rtt`, `replicator_ctl`, `udp_send`,
+`mcast_send`, `mcast_receive` - and the control protocol against an **echo-mode
 replicator** (`replicator --echo-mode`). Echo mode implements the same ADD / REMOVE /
 LIST control-port contract and UDP echo as the production AF_XDP replicator, but over
 standard kernel sockets: no root, no XDP/BPF, no NIC. That makes the suite runnable in
@@ -38,7 +38,7 @@ The control port is exported via `AFXDP_CONTROL_PORT` before any binary is spawn
 ### Prerequisites
 
 - Python 3.9+, `pytest` (`pip install pytest`)
-- Built binaries — tests skip gracefully if missing
+- Built binaries - tests skip gracefully if missing
 
 ### Locally (from the af_xdp root)
 
@@ -62,7 +62,7 @@ The Makefile targets x86_64 (`-msse4.2/-mavx2/-mfma`, `rdtsc`), so build for
 ```bash
 cd networking_benchmarks/af_xdp
 
-# Build image (compiles everything — validates AMI bake parity)
+# Build image (compiles everything - validates AMI bake parity)
 docker build --platform linux/amd64 -f dev/Dockerfile -t afxdp-test .
 
 # Run tests (default CMD)
@@ -78,7 +78,7 @@ docker run --rm --platform linux/amd64 -v "$PWD/tests:/src/tests" afxdp-test
 node. It:
 
 1. Installs `pytest` (if missing).
-2. **Stops** `replicator.service` — the production systemd unit — because the
+2. **Stops** `replicator.service` - the production systemd unit - because the
    test suite spawns its own echo-mode replicator on port 23456 (in code; the
    playbook comment mentions 12345, but the test fixtures override via
    `AFXDP_CONTROL_PORT`).
@@ -107,20 +107,25 @@ Defined in `conftest.py` (session-scoped) and `test_integration.py`
 
 ### Skip / Skip-Ahead Conditions
 
-- If `af_xdp/replicator` does not exist → **session skips** (`conftest.py`).
+- If `af_xdp/replicator` does not exist → **session skips** (`conftest.py`) for
+  tests that need C++ binaries.
+- Tests marked **`no_cpp_binaries`** (e.g. `test_mcp_integration.py`) skip the
+  binary check and run anywhere with a Go toolchain.
 - If individual tool binaries (`rtt`, `replicator_ctl`, `udp_send`, `mcast_send`,
   `mcast_receive`) do not exist → **those tests skip** individually via
   `pytest.skip(...)`.
 - If `replicator --echo-mode` exits immediately on startup → `pytest.fail()`.
 
-There are no custom pytest markers.
+Custom markers:
+- **`no_cpp_binaries`** - tests that exercise Go/SQLite surfaces only and do not
+  need compiled C++ datapath binaries. The `check_binaries` fixture respects this.
 
 ---
 
 ## Test Classes & Cases (45 tests)
 
 ### `TestBinaries` (4 tests)
-Existence checks — asserts the compiled binary is present at the expected path.
+Existence checks - asserts the compiled binary is present at the expected path.
 
 | Test | Asserts |
 |------|---------|
@@ -232,17 +237,43 @@ Argument-parsing layer of `mcast_receive` (runs before XDP attach).
 
 ---
 
+## MCP Integration Tests (`test_mcp_integration.py`, 21 tests)
+
+End-to-end tests for the read-only **MCP server** (`control-plane/mcp/`). These
+build the Go binary, create a fixture SQLite database from the DDL in
+`backend/store.go`, and drive the server over stdio JSON-RPC - covering the
+protocol layer the Go unit tests cannot reach.
+
+Marked **`no_cpp_binaries`** - they run even when the C++ datapath binaries are
+not built (e.g. on macOS arm64 where `-mfma` is rejected). The `check_binaries`
+fixture in `conftest.py` respects this marker and skips only the datapath tests.
+
+### `TestMCPProtocol` (5 tests)
+Protocol-level: handshake, tool listing, schema declarations, unknown method/tool.
+
+### `TestMCPTools` (11 tests)
+Tool invocations: `list_runs`, `query_latency`, `compare_runs`, `compare_modes`,
+`regressions`, `topology_summary` - correctness, filtering, and SQL audit trail.
+
+### `TestMCPIsReadOnly` (3 tests)
+Verifies the server cannot mutate the database and exits cleanly on a missing DB.
+
+### `TestSchemaContract` (2 tests)
+Validates that the schema the tools query matches the tables the backend creates.
+
+---
+
 ## What These Tests Do NOT Cover
 
 The following require root + AF_XDP + a real NIC (EC2 with ENA):
 
-- **Real zero-copy unicast** (`replicator <iface> <ip> <port> [zero_copy]`) —
+- **Real zero-copy unicast** (`replicator <iface> <ip> <port> [zero_copy]`) -
   validated by `deploy/ansible/run_ucast.yaml` using the `rtt` tool in `--xdp-tx` /
   `--xdp-rx` / `--xdp-txrx` modes across 1K / 10K / 100K packets.
-- **Multicast-over-unicast (m2u)** datapath — validated by
+- **Multicast-over-unicast (m2u)** datapath - validated by
   `deploy/ansible/run_mcast.yaml` using `mcast_send` and `mcast_receive` in copy /
   in-place / kernel modes across the fleet.
-- **Hardware timestamping** — separate networking benchmark
+- **Hardware timestamping** - separate networking benchmark
   (`networking_benchmarks/hw_timestamping`).
 
 ---
@@ -253,7 +284,8 @@ The following require root + AF_XDP + a real NIC (EC2 with ENA):
 tests/
 ├── __init__.py              # Package marker (empty)
 ├── conftest.py              # Session-scoped fixtures & port env export
-├── test_integration.py      # All 45 test cases (11 classes)
+├── test_integration.py      # 45 datapath test cases (11 classes)
+├── test_mcp_integration.py  # 21 MCP server tests (4 classes, marked no_cpp_binaries)
 ├── README.md                # ← you are here
 └── assets/
     └── test-execution-overview.svg   # Execution-path diagram

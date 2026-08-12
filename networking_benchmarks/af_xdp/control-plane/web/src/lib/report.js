@@ -4,7 +4,7 @@
 // without a backend report endpoint (the offline gen/report.py remains for
 // saved runs). Returns an HTML string; the caller downloads it as a Blob.
 
-import { fmtLat, latencyColor, esc } from './2d/palette.js';
+import { fmtLat, latencyColor, esc, cellColor, isCrossRegion} from './2d/palette.js';
 
 // Measurement ages section (3.3): reports oldest/newest cell and count of cells
 // older than the newest run. A scoped-run grid is a mosaic of measurement ages.
@@ -102,13 +102,22 @@ export function buildReportHTML(fleet, kind, variation) {
     return parts.map(esc).join(' · ');
   };
 
-  // Global p50 range for the heatmap colour scale.
+  // Global p50 range for the heatmap colour scale. Cross-region cells are
+  // millisecond-scale and stay out of it, so the microsecond spread between
+  // intra-region cells remains visible.
   let mn = Infinity, mx = -Infinity, pairs = 0;
+  const intraP50s = [];
   for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
     const c = matrix[i] && matrix[i][j];
-    if (c) { pairs++; if (c.p50 < mn) mn = c.p50; if (c.p50 > mx) mx = c.p50; }
+    if (!c) continue;
+    pairs++;
+    if (isCrossRegion(nodes[i], nodes[j])) continue;
+    if (c.p50 < mn) mn = c.p50; if (c.p50 > mx) mx = c.p50;
+    if (c.p50 > 0) intraP50s.push(c.p50);
   }
   if (!isFinite(mn)) { mn = 0; mx = 1; }
+  intraP50s.sort((a, b) => a - b);
+  const gold = intraP50s.length ? intraP50s[Math.floor(intraP50s.length * 0.01)] : undefined;
 
   const gen = new Date().toISOString();
   const isMcast = kind === 'mcast';
@@ -154,7 +163,7 @@ export function buildReportHTML(fleet, kind, variation) {
         + `<td>${sIp}</td><td>${rIp}</td><td>${label(n)}</td><td>${esc(n.az || '\u2014')}</td>`;
       if (c) {
         heat += head
-          + `<td style="background:${latencyColor(c.p50, mn, mx)};color:#0d1117;font-weight:700">${fmtLat(c.p50)}</td>`
+          + `<td style="background:${cellColor(c.p50, mn, mx, isCrossRegion(nodes[i], nodes[j]), gold)};color:#0d1117;font-weight:700">${fmtLat(c.p50)}</td>`
           + `<td>${fmtLat(c.p99)}</td><td>${esc(c.loss ?? 0)}%</td></tr>`;
       } else {
         heat += head + '<td class="na">\u00b7</td><td class="na">\u00b7</td><td class="na">\u00b7</td></tr>';
@@ -196,7 +205,7 @@ export function buildReportHTML(fleet, kind, variation) {
         else {
           const cellTime = c.unix ? new Date(c.unix * 1000).toISOString().replace('T', ' ').slice(0, 19) : '';
           const cellTitle = `${esc(variation)} · p99 ${fmtLat(c.p99)} · loss ${c.loss ?? 0}%${cellTime ? ' · ' + cellTime : ''}`;
-          heat += `<td${dat} style="background:${latencyColor(c.p50, mn, mx)}" title="${cellTitle}">${fmtLat(c.p50)}</td>`;
+          heat += `<td${dat} style="background:${cellColor(c.p50, mn, mx, isCrossRegion(nodes[i], nodes[j]), gold)}" title="${cellTitle}">${fmtLat(c.p50)}</td>`;
         }
       }
       heat += '</tr>';

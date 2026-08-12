@@ -1,11 +1,11 @@
-# `tools/` — measurement instruments & control CLI
+# `tools/` - measurement instruments & control CLI
 
 The instruments that drive and measure the replicator. Two measurement
 topologies are supported, each with its own timing methodology:
 
-- **Unicast RTT** (`rtt`) — a **round-trip** probe on a single host's clock →
+- **Unicast RTT** (`rtt`) - a **round-trip** probe on a single host's clock →
   no clock sync needed. Sends UDP to the replicator, which echoes it back.
-- **Multicast one-way** (`mcast_send` → replicator → `mcast_receive`) — a
+- **Multicast one-way** (`mcast_send` → replicator → `mcast_receive`) - a
   **one-way** fan-out path; timing travels in the payload and both ends read a
   PHC/NTP-disciplined `CLOCK_REALTIME`.
 
@@ -18,13 +18,13 @@ Plus two utilities: `replicator_ctl` (control-protocol CLI) and `udp_send`
 
 ![Tools Datapath Overview](assets/tools-datapath-overview.svg)
 
-### A. Unicast RTT (`rtt`) — single-clock round trip
+### A. Unicast RTT (`rtt`) - single-clock round trip
 
 ![rtt Datapath Detail](assets/rtt-datapath.svg)
 
 **Steps:**
 
-- **[R1] Self-registration** — `rtt` sends `CTRL_ADD_DESTINATION` to the
+- **[R1] Self-registration** - `rtt` sends `CTRL_ADD_DESTINATION` to the
   replicator's control port (`AFXDP_CONTROL_PORT`, default 12345) so the echo
   comes back to it. It deregisters (`CTRL_REMOVE_DESTINATION`) via an `atexit`
   handler, which also covers the SIGINT/SIGTERM path (those only clear the run
@@ -36,20 +36,20 @@ Plus two utilities: `replicator_ctl` (control-protocol CLI) and `udp_send`
   replicator fans out each received packet to *every* registered destination,
   with the intended reply sent last in the loop. One leaked registration per
   peer that ever measured against a node therefore adds a constant per-packet
-  cost to that node's echo path — which presents as a whole-distribution shift
+  cost to that node's echo path - which presents as a whole-distribution shift
   (p50 ≈ p90 ≈ p99, tight spread) that grows across consecutive campaigns and
   reaches milliseconds. Always confirm `replicator_ctl <ip> list` is empty
   before trusting a result.
-- **[R2] Pacing** — `clock_nanosleep(TIMER_ABSTIME)` fires each send at an
+- **[R2] Pacing** - `clock_nanosleep(TIMER_ABSTIME)` fires each send at an
   absolute deadline (target rate), eliminating cumulative drift/jitter that a
   relative `sleep` would accrue.
-- **[R3] TX** — the send timestamp is captured *immediately* before the send.
+- **[R3] TX** - the send timestamp is captured *immediately* before the send.
   Two backends:
   - **kernel `sendto()`** (default): simple, but the full kernel TX stack
     (~3–5 µs) is inside the measured leg.
   - **`--xdp-tx[=queue]` + `--iface`** (full builds only): a
     **TX-only AF_XDP socket** opened with `XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD`
-    (no XDP program — egress is independent of RSS). The whole
+    (no XDP program - egress is independent of RSS). The whole
     `Eth|IPv4|UDP|payload` frame is built **once into every UMEM frame** at
     startup (dst MAC via ARP); per packet it writes only the 10 ASCII sequence
     digits and stamps TX right before `submit`. Removes the kernel TX stack from
@@ -60,10 +60,10 @@ Plus two utilities: `replicator_ctl` (control-protocol CLI) and `udp_send`
     up to 10 retries to survive prior-XSK teardown races), then falls back to
     `XDP_COPY | XDP_FLAGS_SKB_MODE` if the driver (ENA version-dependent) does
     not support ZC TX.
-- **[R3] hot-path perf** — thread pinned to `send_cpu`, `SCHED_FIFO` prio 80,
+- **[R3] hot-path perf** - thread pinned to `send_cpu`, `SCHED_FIFO` prio 80,
   `mlockall` (no page faults mid-measurement). Each probe's send time is stored
   in a **lock-free, sequence-indexed slot array** (no map, no mutex).
-- **[R4] RX** — two modes:
+- **[R4] RX** - two modes:
   - **Default**: kernel software `SO_TIMESTAMPING`
     (`SOF_TIMESTAMPING_RX_SOFTWARE`), recorded in the **NAPI `netif_receive_skb`
     path** (`CLOCK_REALTIME`, before the socket receive-queue → excludes
@@ -74,12 +74,12 @@ Plus two utilities: `replicator_ctl` (control-protocol CLI) and `udp_send`
     `[4..11]`; `rtt` then also stamps TX with `CLOCK_MONOTONIC` to match the
     domain. A kernel-SW cmsg stamp is ALSO captured alongside for a dual-stamp
     cross-check reported in the output.
-- **[R5]/[R6]** — `RTT = RX − TX` on one host's clock (no sync). Warmup samples
+- **[R5]/[R6]** - `RTT = RX − TX` on one host's clock (no sync). Warmup samples
   are discarded, then min/mean/p50/p90/p95/p99/p99.9/max are written as
   `service_rtt_us` alongside `messages, warmup, rate_mps, lost, loss_pct,
   timestamp_rx, timestamp_tx, tx_path`. Exit code 1 if >10% packet loss.
 
-**Loss invalidates percentiles — treat `loss_pct` as a validity flag, not a
+**Loss invalidates percentiles - treat `loss_pct` as a validity flag, not a
 footnote.** Every percentile is computed *only* over datagrams that came back.
 A run losing X% therefore reports the latency distribution of the surviving
 (100−X)%, which is not a random sample: it silently omits exactly the packets
@@ -89,7 +89,7 @@ all, so a "slower p50" can be pure survivorship bias rather than a real cost.
 The orchestrator enforces this with a **loss gate**: `max_loss_pct` (default
 2%, `-max-loss` in `afxdpctl`, "Max loss" in the web UI) makes the agent reject
 the measurement outright when loss exceeds the threshold. A rejected pair is
-recorded as a *failure* — no metrics reach the collector — so the report shows
+recorded as a *failure* - no metrics reach the collector - so the report shows
 a blank cell and a coverage note instead of a plausible-looking wrong number.
 Set `-1` to disable, which is only appropriate when deliberately characterising
 loss itself.
@@ -113,23 +113,23 @@ loss itself.
 
 **Steps:**
 
-- **[M1] m2u framing** — `mcast_send` builds
+- **[M1] m2u framing** - `mcast_send` builds
   `Eth|IPv4(proto 17)|UDP|m2u{magic "M2CU"=0x4D324355, group}|AppHdr` as a
   **plain unicast** frame to the replicator's private IP (`-D`); the multicast
   group lives only in the m2u tag (ENA has no L2 multicast).
-- **[M2] Pacing** — `clock_nanosleep(TIMER_ABSTIME)` for intervals ≥1 ms;
+- **[M2] Pacing** - `clock_nanosleep(TIMER_ABSTIME)` for intervals ≥1 ms;
   busy-wait (`clock_gettime` spin) for sub-ms intervals.
-- **[M3] Stamp + TX** — `ts_ns = CLOCK_REALTIME` stamped in place just before
+- **[M3] Stamp + TX** - `ts_ns = CLOCK_REALTIME` stamped in place just before
   AF_XDP TX submit (zero-copy). `sfence` ensures store-ordering before NIC DMA.
   Dst MAC ARP-resolved at startup.
-- **[M4] mcast_receive setup** — attaches its **own** `mcast.o` XDP program and
+- **[M4] mcast_receive setup** - attaches its **own** `mcast.o` XDP program and
   seeds `config_map[0] = {group, port}` (`-g`/`-p`) so the NIC redirects
   matching m2u frames to its AF_XDP socket. Non-matching traffic is `XDP_PASS`ed
   to the kernel stack.
-- **[M5] AF_XDP RX** — busy-polls the RX ring (`SO_BUSY_POLL`), stamps `rx_ns`
+- **[M5] AF_XDP RX** - busy-polls the RX ring (`SO_BUSY_POLL`), stamps `rx_ns`
   (`CLOCK_REALTIME`) at dequeue, and reads `ts_ns` / `replicator_ns` /
   `replicator_tx_ns` back out of the payload.
-- **[M6]/[M7] Latency breakdown** —
+- **[M6]/[M7] Latency breakdown** -
   - **hop1** = `replicator_ns − ts_ns` (source → replicator)
   - **hop2** = `rx_ns − replicator_tx_ns` (replicator → dest)
   - **total** = `rx_ns − ts_ns` (end-to-end)
@@ -146,19 +146,19 @@ loss itself.
 
 The `rtt` tool supports four variations that control which transport is used on
 the **client side** (sender/receiver). In all cases, the remote replicator echoes
-via AF_XDP — so the variation isolates the client's TX/RX path contribution:
+via AF_XDP - so the variation isolates the client's TX/RX path contribution:
 
 | Variation | Client TX | Client RX | Remote echo | What it measures |
 |-----------|-----------|-----------|-------------|------------------|
 | `kernel` | kernel `sendto()` | kernel `recvfrom()` | AF_XDP | Full kernel socket overhead (both legs) + AF_XDP echo |
-| `xdp-tx` | AF_XDP (queue 1) | kernel `recvfrom()` | AF_XDP | XDP-bypassed TX vs kernel RX — isolates TX contribution |
-| `xdp-rx` | kernel `sendto()` | AF_XDP | AF_XDP | Kernel TX vs XDP-bypassed RX — isolates RX contribution |
-| `xdp-txrx` | AF_XDP TX | AF_XDP RX | AF_XDP | Full XDP bypass both legs — the lowest achievable RTT |
+| `xdp-tx` | AF_XDP (queue 1) | kernel `recvfrom()` | AF_XDP | XDP-bypassed TX vs kernel RX - isolates TX contribution |
+| `xdp-rx` | kernel `sendto()` | AF_XDP | AF_XDP | Kernel TX vs XDP-bypassed RX - isolates RX contribution |
+| `xdp-txrx` | AF_XDP TX | AF_XDP RX | AF_XDP | Full XDP bypass both legs - the lowest achievable RTT |
 
 **When to use each:**
-- `kernel` — baseline; represents the path a real application using standard sockets would see.
-- `xdp-tx` / `xdp-rx` — diagnostic: shows whether TX or RX dominates the kernel overhead.
-- `xdp-txrx` — floor; the minimum RTT achievable on this hardware/placement.
+- `kernel` - baseline; represents the path a real application using standard sockets would see.
+- `xdp-tx` / `xdp-rx` - diagnostic: shows whether TX or RX dominates the kernel overhead.
+- `xdp-txrx` - floor; the minimum RTT achievable on this hardware/placement.
 
 ---
 
@@ -167,14 +167,14 @@ via AF_XDP — so the variation isolates the client's TX/RX path contribution:
 | File | Binary | Build |
 |------|--------|-------|
 | `rtt.cpp` | `rtt` | full (AF_XDP TX) or echo-mode (`--xdp-tx` rejected) |
-| `mcast_send.cpp` | `mcast_send` | full only (`make full`) — needs libxdp |
-| `mcast_receive.cpp` | `mcast_receive` | full only (`make full`) — needs libxdp |
+| `mcast_send.cpp` | `mcast_send` | full only (`make full`) - needs libxdp |
+| `mcast_receive.cpp` | `mcast_receive` | full only (`make full`) - needs libxdp |
 | `replicator_ctl.cpp` | `replicator_ctl` | full or echo-mode |
 | `udp_send.cpp` | `udp_send` | full or echo-mode |
 
 ---
 
-### `rtt` — unicast RTT probe
+### `rtt` - unicast RTT probe
 
 **Purpose:** Measure round-trip latency through the packet replicator with
 minimal measurement overhead. Produces per-run statistics and a JSON summary.
@@ -220,7 +220,7 @@ Too few positional args → prints `Usage:` and exits non-zero.
 
 ---
 
-### `mcast_send` — m2u multicast source
+### `mcast_send` - m2u multicast source
 
 **Purpose:** Generate a stream of m2u-tunneled multicast packets at a controlled
 rate via AF_XDP zero-copy TX, for one-way latency measurement through the
@@ -232,7 +232,7 @@ mcast_send -D <replicator-ip> [options]
 
 | Flag | Meaning | Default |
 |------|---------|---------|
-| `-D <replicator-ip>` | Unicast tunnel destination — **REQUIRED** | — |
+| `-D <replicator-ip>` | Unicast tunnel destination - **REQUIRED** | - |
 | `-I <iface>` | Real NIC interface | `eth0` |
 | `-g <group>` | Multicast group (carried in the m2u header only) | `224.0.31.50` |
 | `-p <port>` | UDP destination port | `5000` |
@@ -240,7 +240,7 @@ mcast_send -D <replicator-ip> [options]
 | `-i <interval_us>` | Inter-packet gap in µs | `1000` |
 | `-s <size>` | Payload size in bytes (min: 32 = `WIRE_APP_HDR_LEN`) | `64` |
 | `-q <queue>` | AF_XDP TX queue (avoid queue 0 / RSS) | `1` |
-| `-h` | Print usage and exit 0 | — |
+| `-h` | Print usage and exit 0 | - |
 
 Missing `-D` → `error: -D <replicator-ip> is required` + usage, exit 1.
 Unknown option → usage, exit 1.
@@ -258,11 +258,11 @@ overwrites only `seq` (8B) and `ts_ns` (8B) per packet. Timestamps
 - Requires `CAP_NET_ADMIN` / root for AF_XDP.
 - The m2u frame is plain **unicast** to the replicator; ENA does not support L2
   multicast, so the group is only meaningful inside the m2u header.
-- No built-in RX / statistics — pair with `mcast_receive` on the destination.
+- No built-in RX / statistics - pair with `mcast_receive` on the destination.
 
 ---
 
-### `mcast_receive` — AF_XDP multicast sink
+### `mcast_receive` - AF_XDP multicast sink
 
 **Purpose:** Receive m2u-tunneled multicast frames via AF_XDP, measure one-way
 latency with per-hop breakdown, and report percentile statistics.
@@ -273,15 +273,15 @@ mcast_receive -I <iface> [options]
 
 | Flag | Meaning | Default |
 |------|---------|---------|
-| `-I <iface>` | Network interface — **REQUIRED** | — |
+| `-I <iface>` | Network interface - **REQUIRED** | - |
 | `-g <group>` | Inner multicast group to match in m2u header | `224.0.31.50` |
 | `-p <port>` | Inner UDP destination port to match | `5000` |
 | `-c <count>` | Packets to receive before stopping | `10000` |
 | `-t <timeout>` | Seconds before giving up (watchdog) | `60` |
 | `-q <queue>` | XDP/AF_XDP queue index | `0` |
 | `-r` | Print raw latencies (one per line, in ns) | off |
-| `-j <path>` | Write JSON results file | — |
-| `-h` | Print usage and exit 0 | — |
+| `-j <path>` | Write JSON results file | - |
+| `-h` | Print usage and exit 0 | - |
 
 Missing `-I` → `error: -I <iface> is required` + usage, exit 1.
 
@@ -313,7 +313,7 @@ samples. Optional `-j` JSON output.
 
 ---
 
-### `replicator_ctl` — control-protocol CLI
+### `replicator_ctl` - control-protocol CLI
 
 **Purpose:** Manually manage the replicator's destination table and multicast
 group subscriptions from the command line.
@@ -326,7 +326,7 @@ replicator_ctl <replicator_ip> <command> [args...]
 |---------|------|-------------|
 | `add` | `<dest_ip> <dest_port>` | Register destination (`CTRL_ADD_DESTINATION`) |
 | `remove` | `<dest_ip> <dest_port>` | Deregister destination (`CTRL_REMOVE_DESTINATION`) |
-| `list` | — | List all registered destinations (`CTRL_LIST_DESTINATIONS`) |
+| `list` | - | List all registered destinations (`CTRL_LIST_DESTINATIONS`) |
 | `mcast` | `<group>` | Subscribe to multicast group (`CTRL_MCAST_JOIN`) |
 | `mcast-leave` | `<group>` | Unsubscribe from group (`CTRL_MCAST_LEAVE`) |
 
@@ -349,7 +349,7 @@ orchestration.
 
 ---
 
-### `udp_send` — connectivity probe
+### `udp_send` - connectivity probe
 
 **Purpose:** Simple keep-alive / connectivity test sender. Useful to verify the
 replicator is reachable before running latency measurements, or to exercise
@@ -361,11 +361,11 @@ udp_send <target_ip> <target_port> [interval_ms] [message] [--iface <name>]
 
 | Argument | Type | Description | Default |
 |----------|------|-------------|---------|
-| `target_ip` | positional, required | Destination IP (unicast or multicast 224.x.x.x) | — |
-| `target_port` | positional, required | UDP destination port | — |
+| `target_ip` | positional, required | Destination IP (unicast or multicast 224.x.x.x) | - |
+| `target_port` | positional, required | UDP destination port | - |
 | `interval_ms` | positional, optional | Milliseconds between packets | `1000` |
 | `message` | positional, optional | Payload string | `"Test packet"` |
-| `--iface <name>` | flag | Set `IP_MULTICAST_IF` for native multicast | — |
+| `--iface <name>` | flag | Set `IP_MULTICAST_IF` for native multicast | - |
 
 No args → usage and exit 1.
 
@@ -377,7 +377,7 @@ No args → usage and exit 1.
 - Prints final statistics (count, duration, average rate).
 
 **Tradeoffs & limitations:**
-- Plain kernel UDP socket — no AF_XDP, no timestamping. Not a measurement tool.
+- Plain kernel UDP socket - no AF_XDP, no timestamping. Not a measurement tool.
 - For native multicast, `--iface` is **required** to avoid sending on the wrong
   interface. Do NOT use `--iface` with kernel tunnels (it overrides routing).
 
@@ -389,7 +389,7 @@ No args → usage and exit 1.
 |------|----------|----------|:---:|
 | `rtt` default | `CLOCK_REALTIME` before send | `SO_TIMESTAMPING` SW (NAPI, `CLOCK_REALTIME`) | No (single host round-trip) |
 | `rtt --xdp-rx` | `CLOCK_MONOTONIC` | `bpf_ktime_get_ns` at XDP ingress (`CLOCK_MONOTONIC`) | No |
-| mcast one-way | `ts_ns` `CLOCK_REALTIME` (source) | `rx_ns` `CLOCK_REALTIME` (dest, XSK dequeue) | **Yes** — PHC/chrony ~µs |
+| mcast one-way | `ts_ns` `CLOCK_REALTIME` (source) | `rx_ns` `CLOCK_REALTIME` (dest, XSK dequeue) | **Yes** - PHC/chrony ~µs |
 
 ENA provides **no TX hardware timestamp**; no TSC is used. The replicator's
 `replicator_ns`/`replicator_tx_ns` stamps (see `src/Replicator/README.md`) split

@@ -22,18 +22,18 @@ ansible-playbook -i inventory.aws_ec2.yml configure_mcast.yaml \
 ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml \
   -e replicator_private_ip=10.61.0.5
 
-# Unicast (no config needed — baked AMI is test-ready):
+# Unicast (no config needed - baked AMI is test-ready):
 ansible-playbook -i inventory.aws_ec2.yml run_ucast.yaml
 ```
 
-### 2. Without CDK — Self-hosted Instances (BYOI)
+### 2. Without CDK - Self-hosted Instances (BYOI)
 
 Use these playbooks on **any** EC2 instances you manage yourself. Requirements:
 
 1. **Tag your instances** with the `Role` tag:
-   - `Role: source` — market data origin
-   - `Role: replicator` — packet replicator node
-   - `Role: destination` — latency measurement endpoint
+   - `Role: source` - market data origin
+   - `Role: replicator` - packet replicator node
+   - `Role: destination` - latency measurement endpoint
 
 2. **Ensure connectivity:**
    - SSH access from your control machine (port 22)
@@ -68,14 +68,15 @@ Example static inventory (`hosts.ini`):
 
 | File | Purpose | When to use |
 |------|---------|-------------|
-| `run_ucast.yaml` | Unicast NxN RTT benchmark + generate report | After provisioning — serial pairwise measurement |
-| `run_mcast.yaml` | Multicast fan-out benchmark | After `configure_mcast` — source→replicator→destinations |
+| `run_ucast.yaml` | Unicast NxN RTT benchmark + generate report | After provisioning - serial pairwise measurement |
+| `run_mcast.yaml` | Multicast fan-out benchmark | After `configure_mcast` - source→replicator→destinations |
 | `configure_mcast.yaml` | Multicast setup (self-contained) | Adapts nodes, sets replicator mcast mode, registers dests |
 | `inventory.aws_ec2.yml` | Dynamic EC2 inventory by Role tag | With CDK-deployed or manually-tagged instances |
+| `inventory_secondary.aws_ec2.yml` | Secondary region dynamic inventory | Cross-region topologies (pass both `-i` flags) |
 
 ## Inventory
 
-Uses `amazon.aws.aws_ec2` plugin. Discovers instances in **both** `us-east-1` and `eu-west-2` (covers cross-region topologies; single-region runs get empty results from the other region).
+Uses `amazon.aws.aws_ec2` plugin. Discovers instances in the region set by `AWS_DEFAULT_REGION` (defaults to `us-east-1`). For cross-region topologies, use the companion `inventory_secondary.aws_ec2.yml` file alongside the primary inventory.
 
 Groups by `Role` tag:
 
@@ -87,12 +88,14 @@ Groups by `Role` tag:
 
 **Environment variables required:**
 ```bash
-export SSH_KEY_FILE=~/.ssh/virginia.pem          # primary region key
-export SSH_KEY_FILE_SECONDARY=~/.ssh/london.pem  # secondary region key (cross-region only)
-export AWS_DEFAULT_REGION=us-east-1
+export SSH_KEY_FILE=~/.ssh/virginia.pem          # SSH key for fleet nodes
+export AWS_DEFAULT_REGION=us-east-1              # primary fleet region
 ```
 
-The inventory auto-selects the correct key per node based on its AZ prefix.
+For cross-region topologies, pass both inventories:
+```bash
+ansible-playbook -i inventory.aws_ec2.yml -i inventory_secondary.aws_ec2.yml run_mcast.yaml
+```
 
 ## Workflows
 
@@ -110,7 +113,7 @@ ansible-playbook -i inventory.aws_ec2.yml run_ucast.yaml
 
 ### Multicast
 
-`configure_mcast.yaml` is self-contained — it adapts the ucast-baked source/dest nodes, wires the topology, and probes the datapath:
+`configure_mcast.yaml` is self-contained - it adapts the ucast-baked source/dest nodes, wires the topology, and probes the datapath:
 
 ```bash
 # 1. Configure topology
@@ -122,7 +125,7 @@ ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml \
   -e replicator_private_ip=10.61.0.5
 ```
 
-### `run_ucast.yaml` — Dynamic CPU Pinning
+### `run_ucast.yaml` - Dynamic CPU Pinning
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -131,7 +134,7 @@ ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml \
 
 With `auto_pin=true`: `recv = isolated[2]`, `send = isolated[3]` (above the ENA-IRQ core and the replicator-poll core). Adapts across `c7i.4xlarge` → metal.
 
-### `configure_mcast.yaml` — Plays
+### `configure_mcast.yaml` - Plays
 
 | Play | Hosts | What it does |
 |------|-------|--------------|
@@ -140,7 +143,7 @@ With `auto_pin=true`: `recv = isolated[2]`, `send = isolated[3]` (above the ENA-
 | 3 | `destination` | Stops+disables replicator, detaches XDP, registers (CTRL_MCAST_JOIN), seeds ARP |
 | 4 | `replicator` | Best-effort datapath probe: checks XDP redirect counter moved |
 
-### `configure_mcast.yaml` — Variables
+### `configure_mcast.yaml` - Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|

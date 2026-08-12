@@ -22,6 +22,12 @@ function tipHTML(ctx, i) {
 }
 
 
+// Pins live outside the mount: a live update rebuilds the view every few
+// hundred ms and a pinned table must survive that. Keyed by instance id, and
+// holding the position it was frozen at.
+const PINS = new Map();
+const nodeKey = (n) => (n && (n.instance_id || n.private_ip)) || '';
+
 export function renderNodes(ctx) {
   const { fleet, root, positions, nodeEls, W, H } = ctx;
 
@@ -43,13 +49,15 @@ export function renderNodes(ctx) {
   // ── Pinned tables ─────────────────────────────────────────────────────────
   // Map<nodeIndex → { el: HTMLElement, dispose: fn }>
   const pinned = new Map();
-  const hoverActive = () => pinned.size === 0;
+  // Hover always works - a pinned table no longer suppresses it.
+  const hoverActive = () => true;
 
   const unpin = (i) => {
     const p = pinned.get(i); if (!p) return;
     p.dispose();
     if (p.el.parentNode) p.el.parentNode.removeChild(p.el);
     pinned.delete(i);
+    PINS.delete(nodeKey(((fleet && fleet.nodes) || [])[i]));
     ctx.selected.delete(i);
     applySel(ctx, -1);                 // drop this node's persisted edge labels
     if (pinned.size === 0) ctx.deselectBtn.style.display = 'none';
@@ -57,27 +65,11 @@ export function renderNodes(ctx) {
 
   const unpinAll = () => [...pinned.keys()].forEach(unpin);
 
-  const pinNode = (i, fromRect) => {
+  const pinNode = (i, at) => {
     if (pinned.has(i)) return;
-
-    let left, top;
-
-    if (fromRect) {
-      // First pin (tooltip was visible): freeze at the hover tooltip's exact position.
-      const rootRect = root.getBoundingClientRect();
-      left = fromRect.left - rootRect.left;
-      top  = fromRect.top  - rootRect.top;
-    } else if (pinned.size > 0) {
-      // Subsequent pin: place to the right of the last panel at the same top.
-      const lastEntry = [...pinned.values()].at(-1);
-      const rootRect = root.getBoundingClientRect();
-      const lastR = lastEntry.el.getBoundingClientRect();
-      left = lastR.right - rootRect.left + PANEL_GAP;
-      top  = lastR.top   - rootRect.top;
-    } else {
-      left = PANEL_GAP * 2;
-      top  = PANEL_TOP;
-    }
+    // Freeze where the click happened, or where a restored pin was left.
+    const left = (at && at.left != null) ? at.left : PANEL_GAP * 2;
+    const top  = (at && at.top  != null) ? at.top  : PANEL_TOP;
 
     // A pinned panel is the hover tooltip frozen in place. It carries ONLY
     // placement inline; width/height/padding come from the .node-tooltip base
@@ -91,21 +83,40 @@ export function renderNodes(ctx) {
       'top:' + top + 'px',
     ].join(';');
     panelEl.innerHTML = tipHTML(ctx, i);
-    root.appendChild(panelEl);
+    (ctx.viewport || root).appendChild(panelEl);
 
-    const dispose = enhancePinned(panelEl, { left: left + 'px', top: top + 'px' });
+    const key = nodeKey(((fleet && fleet.nodes) || [])[i]);
+    const dispose = enhancePinned(panelEl, {
+      scale: () => (ctx.zoomScale && ctx.zoomScale()) || 1,
+      onMove: (l, t) => PINS.set(key, { left: l, top: t }),
+    });
     pinned.set(i, { el: panelEl, dispose });
+    PINS.set(nodeKey(((fleet && fleet.nodes) || [])[i]), { left, top });
     ctx.selected.add(i);               // pinning a node also pins its edge labels
     applySel(ctx, -1);
     ctx.deselectBtn.style.display = 'inline-block';
   };
 
-  ctx.unpinAll = () => { unpinAll(); applySel(ctx, -1); tooltip.classList.remove('visible'); };
-  ctx.disposers.push(unpinAll);
+  // Recreate pins recorded before this mount. Deferred to the caller: it must
+  // run once edges, nodes and the viewport exist.
+  ctx.restorePins = () => {
+    ((fleet && fleet.nodes) || []).forEach((n, k2) => {
+      const at = PINS.get(nodeKey(n));
+      if (at) pinNode(k2, at);
+    });
+  };
+
+  ctx.unpinAll = () => { unpinAll(); PINS.clear(); applySel(ctx, -1); tooltip.classList.remove('visible'); };
+  // Dispose detaches the DOM only; PINS keeps the pins so the next mount
+  // restores them. Only a node click or Deselect all removes a pin.
+  ctx.disposers.push(() => pinned.forEach((pn) => {
+    pn.dispose();
+    if (pn.el.parentNode) pn.el.parentNode.removeChild(pn.el);
+  }));
 
   // ── Node elements ─────────────────────────────────────────────────────────
-  const capScale = buildCapabilityScale(fleet.nodes);   // uniform blue→green over present types
-  fleet.nodes.forEach((node, i) => {
+  const capScale = buildCapabilityScale(((fleet && fleet.nodes) || []));   // uniform blue→green over present types
+  ((fleet && fleet.nodes) || []).forEach((node, i) => {
     const r = nodeRadius(node), colors = capabilityColor(node, capScale);
     const el = document.createElement('div');
     el.className = 'node' + (node.role ? ' role-' + node.role : '') + (node.online === false ? ' offline' : '');
@@ -143,6 +154,7 @@ export function renderNodes(ctx) {
     });
 
     const positionTip = (e) => {
+      // Accept both real MouseEvents and synthetic {clientX, clientY} objects.
       let tx = e.clientX + 16, ty = e.clientY - 10;
       const tw = tooltip.offsetWidth || 280, th = tooltip.offsetHeight || 200;
       if (tx + tw > W - 20) tx = e.clientX - tw - 16;
@@ -156,6 +168,9 @@ export function renderNodes(ctx) {
       if (!hoverActive()) return;
       tooltip.innerHTML = tipHTML(ctx, i);
       tooltip.classList.add('visible');
+      // Position immediately using the node's known position so the tooltip
+      // never renders at 0,0 while waiting for the first mousemove.
+      positionTip({ clientX: positions[i].x + r + 16, clientY: positions[i].y });
     });
     el.addEventListener('mousemove', (e) => { if (hoverActive()) positionTip(e); });
     el.addEventListener('mouseleave', () => {
@@ -178,12 +193,13 @@ export function renderNodes(ctx) {
           applySel(ctx, i);
         }
       } else {
-        // Attach: snapshot tooltip position before hiding it, pin a fresh panel there.
-        const rect = tooltip.classList.contains('visible')
-          ? tooltip.getBoundingClientRect()
-          : null;
+        // Freeze at the mouse position, in viewport coordinates so the table
+        // keeps its place relative to the node through zoom and pan.
+        const vp = ctx.viewport || root;
+        const vr = vp.getBoundingClientRect();
+        const sc = (ctx.zoomScale && ctx.zoomScale()) || 1;
         tooltip.classList.remove('visible');
-        pinNode(i, rect);
+        pinNode(i, { left: (e.clientX - vr.left) / sc + 12, top: (e.clientY - vr.top) / sc + 12 });
       }
     });
   });

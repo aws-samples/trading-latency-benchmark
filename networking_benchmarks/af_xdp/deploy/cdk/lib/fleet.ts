@@ -70,12 +70,15 @@ export interface FleetStackProps extends cdk.StackProps {
   dataPort?: number;
   /** Resolved fleet entries that belong to THIS stack's region. */
   entries: ResolvedEntry[];
-  /** This stack's region (explicit — env.region may be a token at synth). */
+  /** This stack's region (explicit - env.region may be a token at synth). */
   regionName: string;
-  /** Peer region VPC CIDR — opens SG ingress for cross-region data/control. */
+  /** Peer region VPC CIDR - opens SG ingress for cross-region data/control. */
   peerVpcCidr?: string;
   /** Resolve the AMI from SSM /af-xdp/ami/<region> (primary region only). */
   ssmAmi?: boolean;
+  /** Region where the control-plane publishes /af-xdp/nats-url. Set on
+   *  secondary stacks so user-data replicates the params locally. */
+  controlPlaneRegion?: string;
 }
 
 /** Resolve an AZ spec ("a" | "us-east-1a" | undefined) to a full AZ name. */
@@ -206,8 +209,11 @@ export class FleetStack extends cdk.Stack {
     sg.addIngressRule(Peer.anyIpv4(), Port.tcp(22), 'SSH');
     sg.addIngressRule(sg, Port.allTraffic(), 'All intra-group traffic');
     if (props.peerVpcCidr) {
-      sg.addIngressRule(Peer.ipv4(props.peerVpcCidr), Port.udp(dataPort), 'UDP data from peer region');
-      sg.addIngressRule(Peer.ipv4(props.peerVpcCidr), Port.udp(CONTROL_PORT), 'UDP control from peer region');
+      // Mirror the intra-group allowance for the peer VPC. An SG self-reference
+      // does not span cross-region peering, so enumerating only the data and
+      // control ports left the rtt echo port (19020) closed: requests arrived,
+      // echoes were dropped, and every cross-region pair reported 100% loss.
+      sg.addIngressRule(Peer.ipv4(props.peerVpcCidr), Port.allTraffic(), 'All traffic from peer region');
     }
     this.sg = sg;
 
@@ -230,10 +236,11 @@ export class FleetStack extends cdk.Stack {
     };
 
     // ── AMI + key pair ─────────────────────────────────────────────────────
-    // Primary region resolves the baked AMI from SSM (/af-xdp/ami/<region>,
-    // written by ami-builder). A secondary region can't read the primary's SSM
-    // param at deploy time, so it uses an explicit amiId or falls back to AL2023
-    // (bake/provision it separately). Override either with --context amiId=.
+    // Explicit --context amiId/secondaryAmiId always wins. Otherwise, resolve
+    // the baked AMI from this region's SSM /af-xdp/ami/<region> (the
+    // ami-builder publishes it in each region it bakes). If ssmAmi is false
+    // AND no explicit amiId, synth fails - never silently fall back to a
+    // stock image that lacks the agent.
     let ami: ec2.IMachineImage;
     if (props.amiId) {
       ami = MachineImage.genericLinux({ [region]: props.amiId });
@@ -241,7 +248,10 @@ export class FleetStack extends cdk.Stack {
       const ssmParam = ssm.StringParameter.valueForStringParameter(this, `/af-xdp/ami/${region}`);
       ami = MachineImage.genericLinux({ [region]: ssmParam });
     } else {
-      ami = MachineImage.latestAmazonLinux2023();
+      throw new Error(
+        `No AMI for region ${region}. Either bake an AMI there ` +
+        `(publishes /af-xdp/ami/${region} to SSM) or pass --context secondaryAmiId=<id>.`
+      );
     }
     const keyPair = KeyPair.fromKeyPairName(this, 'KeyPair', props.keyPairName);
 
@@ -266,9 +276,23 @@ export class FleetStack extends cdk.Stack {
         const prefix = `Node${globalIndex}`;
 
         // Per-node agent config: stamp the role (known here) so the baked
-        // control-plane agent knows its role. (AWS::EC2::Instance can't enable
-        // IMDS instance-tags without a launch template, so we set it directly.)
+        // control-plane agent knows its role. When this stack is in a
+        // secondary region, replicate NATS SSM params from the control-plane's
+        // region so the agent's local SSM lookup succeeds.
         const agentUd = UserData.forLinux();
+        if (props.controlPlaneRegion && props.controlPlaneRegion !== region) {
+          agentUd.addCommands(
+          // The agent preflight sources /etc/default/afxdp-agent before falling
+          // back to SSM, so writing the endpoint there is enough. Replicating the
+          // parameters into this region would need ssm:PutParameter on every node,
+          // letting any one of them repoint the whole fleet.
+            `# NATS discovery from the control-plane region (${props.controlPlaneRegion})`,
+            `NATS_URL=$(aws ssm get-parameter --region ${props.controlPlaneRegion} --name /af-xdp/nats-url --query Parameter.Value --output text)`,
+            `NATS_TOKEN=$(aws ssm get-parameter --region ${props.controlPlaneRegion} --name /af-xdp/nats-token --query Parameter.Value --output text)`,
+            `echo "AGENT_NATS_URL=$NATS_URL" >> /etc/default/afxdp-agent`,
+            `echo "AGENT_NATS_TOKEN=$NATS_TOKEN" >> /etc/default/afxdp-agent`,
+          );
+        }
         agentUd.addCommands(
           `echo "AGENT_ROLE=${role}" >> /etc/default/afxdp-agent`,
           entry.pgName ? `echo "AGENT_PG=${entry.pgName}" >> /etc/default/afxdp-agent` : '# no pgName',
@@ -288,11 +312,20 @@ export class FleetStack extends cdk.Stack {
         inst.applyRemovalPolicy(RemovalPolicy.DESTROY);
         // Disable source/dest check for replication traffic (fan-out rewrites dst IP/MAC)
         (inst.node.defaultChild as ec2.CfnInstance).sourceDestCheck = false;
-        // Let the agent preflight read the control-plane NATS URL from SSM.
+        // Read-only SSM: a secondary node receives the endpoint via user-data,
+        // so no node ever needs to write a shared parameter.
         inst.role.addToPrincipalPolicy(new iam.PolicyStatement({
           actions: ['ssm:GetParameter'],
           resources: [cdk.Arn.format({ service: 'ssm', resource: 'parameter', resourceName: 'af-xdp/*' }, this)],
         }));
+        if (props.controlPlaneRegion && props.controlPlaneRegion !== region) {
+          inst.role.addToPrincipalPolicy(new iam.PolicyStatement({
+            actions: ['ssm:GetParameter'],
+            resources: [
+              `arn:aws:ssm:${props.controlPlaneRegion}:${this.account}:parameter/af-xdp/*`,
+            ],
+          }));
+        }
         inst.role.addToPrincipalPolicy(new iam.PolicyStatement({
           actions: ['ec2:DescribeInstanceTypes'],
           resources: ['*'],

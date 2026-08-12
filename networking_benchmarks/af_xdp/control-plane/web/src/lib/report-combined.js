@@ -12,7 +12,7 @@
 //   - The overview grid, which does mix modes to show the freshest value per
 //     cell, says so, and badges every cell with the mode that produced it.
 
-import { fmtLat, latencyColor, esc } from './2d/palette.js';
+import { fmtLat, cellColor, isCrossRegion, esc, LATENCY_BEST_COLOR, latencyRange } from './2d/palette.js';
 import { buildCompareHTML } from './report.js';
 
 /** Short per-mode badge: K/X for ucast kernel/xdp, C/I/K for mcast fwd modes. */
@@ -75,7 +75,7 @@ function collate(views) {
 
 /** Mode-annotated overview: freshest value per cell, badged with its mode. */
 function overviewGrid(nodes, best, scale, tz) {
-  const { mn, mx } = scale;
+  const { mn, mx, gold } = scale;
   let h = '<table class="heat" id="overview-table"><tr><th>src \\ dst</th>'
     + nodes.map((n) => `<th data-col-ip="${esc(n.private_ip || '')}">${label(n)}</th>`).join('')
     + '</tr>';
@@ -89,7 +89,7 @@ function overviewGrid(nodes, best, scale, tz) {
       const b = best.get(`${rn.private_ip}|${cn.private_ip}`);
       if (!b) { h += `<td class="na"${dat}>\u00b7</td>`; return; }
       const tip = `${fmtLat(b.cell.p50)} \u00b7 ${b.key} \u00b7 ${stampTz(b.unix, tz)}`;
-      h += `<td${dat} style="color:${latencyColor(b.cell.p50, mn, mx)};font-weight:700"`
+      h += `<td${dat} style="color:${cellColor(b.cell.p50, mn, mx, isCrossRegion(rn, cn), gold)};font-weight:700"`
         + ` title="${esc(tip)}">${fmtLat(b.cell.p50)}`
         + `<span class="mode-badge">${badgeOf(b.key)}</span></td>`;
     });
@@ -102,7 +102,7 @@ function overviewGrid(nodes, best, scale, tz) {
 function modeHeatmap(v, scale) {
   const { nodes, matrix } = v.fleet;
   const key = modeKey(v);
-  const { mn, mx } = scale;
+  const { mn, mx, gold } = scale;
   let h = `<table class="heat" data-mode="${esc(key)}"><tr><th>src \\ dst</th>`
     + nodes.map((n) => `<th data-col-ip="${esc(n.private_ip || '')}">${label(n)}</th>`).join('')
     + '</tr>';
@@ -114,7 +114,7 @@ function modeHeatmap(v, scale) {
       const dat = ` data-row-ip="${rip}" data-col-ip="${cip}"`;
       const c = matrix[i] && matrix[i][j];
       if (!c) { h += `<td class="na"${dat}>\u00b7</td>`; return; }
-      h += `<td${dat} style="color:${latencyColor(c.p50, mn, mx)};font-weight:700"`
+      h += `<td${dat} style="color:${cellColor(c.p50, mn, mx, isCrossRegion(rn, cn), gold)};font-weight:700"`
         + ` title="${esc(fmtLat(c.p50) + ' \u00b7 ' + key)}">${fmtLat(c.p50)}</td>`;
     });
     h += '</tr>';
@@ -168,7 +168,7 @@ function latencyTable(rows, tz) {
   const colourCell = (col, val) => {
     const e = extremes[col];
     if (!e) return '';
-    if (val === e.mn) return ' style="color:green"';
+    if (val === e.mn) return ` style="color:${LATENCY_BEST_COLOR}"`;
     if (val === e.mx) return ' style="color:red"';
     return '';
   };
@@ -228,9 +228,9 @@ export const REPORT_CSS = `
   h1{font-size:19px;margin:0 0 4px}h2{font-size:15px;margin:22px 0 6px;color:#e6edf3}
   h3{font-size:13px}
   .meta{color:#8b949e;font-size:12px;margin-bottom:10px}
-  table{border-collapse:collapse;margin:8px 0 4px;font-size:12px}
-  th,td{border:1px solid #30363d;padding:3px 7px;text-align:right;white-space:nowrap}
-  th{background:#161b22;color:#8b949e;font-weight:600;cursor:pointer;user-select:none}
+  .report-view table{border-collapse:collapse;margin:8px 0 4px;font-size:12px}
+  .report-view th,.report-view td{border:1px solid #30363d;padding:3px 7px;text-align:right;white-space:nowrap}
+  .report-view th{background:#161b22;color:#8b949e;font-weight:600;cursor:pointer;user-select:none}
   .inv td,.inv th{text-align:left}
   .heat td{font-family:'SF Mono',monospace;font-weight:700;background:#0d1117}
   .heat th{font-family:'SF Mono',monospace}
@@ -261,6 +261,11 @@ export const REPORT_CSS = `
   .selbar{font-size:12px;color:#8b949e;margin:10px 0 2px}
   .selbar button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;
     padding:1px 7px;font-size:11px;cursor:pointer;margin-left:6px}
+  .report-export-bar{display:flex;gap:8px;margin-bottom:12px}
+  @media print{.report-export-bar{display:none !important}}
+  .report-toolbar-btn{background:#21262d;color:#e6edf3;border:1px solid #30363d;
+    border-radius:6px;padding:6px 14px;cursor:pointer;font:600 13px system-ui,-apple-system,sans-serif}
+  .report-toolbar-btn:hover{background:#30363d;color:#fff}
   .inv tr.sel{background:#1f2937;outline:2px solid #d29922;outline-offset:-2px}
   .heat td.sel-row,.heat td.sel-col{outline:2px solid #d29922;outline-offset:-2px}
   .heat th.sel-row,.heat th.sel-col{background:#243b53;color:#e6edf3}
@@ -283,10 +288,13 @@ export function buildCombinedReportBody(views, tz) {
   const region = vs[0].fleet.region || '?';
   const { rows, best } = collate(vs);
   const modeList = vs.map((v) => modeKey(v));
-  const allP50 = rows.map((r) => r.cell.p50).filter((v) => v != null);
+  const allP50 = rows.filter((r) => !isCrossRegion(r.src, r.dst))
+    .map((r) => r.cell.p50).filter((v) => v != null && v > 0);
+  allP50.sort((a, b) => a - b);
   const scale = {
-    mn: allP50.length ? Math.min(...allP50) : 0,
-    mx: allP50.length ? Math.max(...allP50) : 1,
+    mn: allP50.length ? allP50[0] : 0,
+    mx: allP50.length ? allP50[allP50.length - 1] : 1,
+    gold: allP50.length ? allP50[Math.floor(allP50.length * 0.01)] : undefined,
   };
 
   const sections = vs.map((v) => `
@@ -306,12 +314,14 @@ export function buildCombinedReportBody(views, tz) {
 
   const kindLabel = vs[0].kind === 'mcast' ? 'multicast' : 'unicast';
   const title = `Latency Report - ${kindLabel}`;
-  return `<h1>${esc(title)}</h1>
+  const kindsAttr = [...new Set(vs.map((v) => (v.kind === 'mcast' ? 'multicast' : 'unicast')))].join('-');
+  return `<div class="report-export-bar" data-report-kinds="${esc(kindsAttr)}"><button data-print-btn class="report-toolbar-btn">Save as PDF</button><button data-xls-btn class="report-toolbar-btn">Save as XLS</button></div>
+  <h1>${esc(title)}</h1>
   <div class="meta">Region: ${esc(region)} \u00b7 Nodes: ${nodes.length} \u00b7 Modes: ${esc(modeList.join(', '))} \u00b7 Measurements: ${rows.length} \u00b7 Timezone: ${esc(tzLabel(tz))} \u00b7 Generated: ${esc(gen)}</div>
   ${ages(rows, tz)}
 
   <div class="selbar"><span id="selinfo">Click an IP anywhere to highlight that instance everywhere.</span><button id="selclear">Clear</button></div>
-  <h2>Overview \u2014 freshest measurement per pair, badged by mode</h2>
+  <h2>Latest measurements</h2>
   ${overviewGrid(nodes, best, scale, tz)}
 
   <h2>Fleet inventory</h2>
@@ -455,6 +465,82 @@ export function reportInteractions(root) {
   var clearBtn = root.querySelector('#selclear');
   if (clearBtn) clearBtn.addEventListener('click', function() { sel.clear(); paint(); });
   paint();
+
+  // ── Save as PDF: triggers the browser print dialog ──────────────────────────
+  var printBtn = root.querySelector('[data-print-btn]');
+  if (printBtn) printBtn.addEventListener('click', function() {
+    var hook = (typeof window !== 'undefined') && window.__afxdpPrintReport;
+    if (typeof hook === 'function') hook();
+    else window.print();
+  });
+
+  // ── Save as XLS: single SpreadsheetML 2003 workbook, one sheet per table ───
+  function xmlEsc(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function sanitizeSheetName(s) {
+    return s.replace(/[:\\/?\*\[\]]/g, '').slice(0, 31) || 'Sheet';
+  }
+  function findHeadingForTable(table) {
+    var prev = table.previousElementSibling;
+    while (prev) {
+      if (/^H[1-6]$/.test(prev.tagName)) return prev.textContent.trim();
+      prev = prev.previousElementSibling;
+    }
+    return '';
+  }
+  function tableToWorksheet(table, name) {
+    var rows = [].slice.call(table.querySelectorAll('tr'));
+    var xml = '<Worksheet ss:Name="' + xmlEsc(sanitizeSheetName(name)) + '"><Table>';
+    for (var r = 0; r < rows.length; r++) {
+      xml += '<Row>';
+      var cells = [].slice.call(rows[r].querySelectorAll('th, td'));
+      for (var c = 0; c < cells.length; c++) {
+        var cc = cells[c].cloneNode(true);
+        var badges = cc.querySelectorAll('.mode-badge');
+        for (var bi = 0; bi < badges.length; bi++) badges[bi].remove();
+        var txt = cc.textContent.trim();
+        var isNum = /^-?\d+(\.\d+)?$/.test(txt);
+        var type = isNum ? 'Number' : 'String';
+        var val = isNum ? txt : xmlEsc(txt);
+        xml += '<Cell><Data ss:Type="' + type + '">' + val + '</Data></Cell>';
+      }
+      xml += '</Row>';
+    }
+    xml += '</Table></Worksheet>';
+    return xml;
+  }
+
+  var xlsBtn = root.querySelector('[data-xls-btn]');
+  if (xlsBtn) xlsBtn.addEventListener('click', function() {
+    var tables = [].slice.call(root.querySelectorAll('table'));
+    var usedNames = {};
+    var xml = '<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?>'
+      + '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"'
+      + ' xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">';
+    for (var i = 0; i < tables.length; i++) {
+      var heading = findHeadingForTable(tables[i]);
+      var name = sanitizeSheetName(heading || ('Sheet' + (i + 1)));
+      if (usedNames[name]) { name = name.slice(0, 28) + (i + 1); }
+      usedNames[name] = true;
+      xml += tableToWorksheet(tables[i], name);
+    }
+    xml += '</Workbook>';
+    var blob = new Blob([xml], { type: 'application/vnd.ms-excel' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    var bar = root.querySelector('[data-report-kinds]');
+    var kinds = (bar && bar.getAttribute('data-report-kinds')) || 'report';
+    var d = new Date(), pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    var stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
+      + '-' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+    a.download = 'latency-report-' + kinds + '-' + stamp + '.xls';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
 }
 
 /**
@@ -475,7 +561,7 @@ export function buildCombinedReportHTML(views, tz) {
 
   return `<!doctype html><html><head><meta charset="utf-8">
   <title>${docTitle}</title>
-  <style>${REPORT_CSS}</style></head><body>
+  <style>${REPORT_CSS}</style></head><body class="report-view">
   ${body}
   <script>(${reportInteractions.toString()})(document);</script></body></html>`;
 }

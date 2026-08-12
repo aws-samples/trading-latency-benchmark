@@ -23,8 +23,8 @@ export const CSS = `
 .t2d-root .node.offline::after { content: ""; position: absolute; top: 2px; right: 2px;
   width: 8px; height: 8px; background: #f85149; border-radius: 50%; border: 1.5px solid #0d1117; }
 .t2d-root .node.selected { box-shadow: 0 0 0 2px rgba(255,215,0,0.55), 0 0 10px 2px rgba(255,215,0,0.28); z-index: 30; }
-.t2d-root .node .ip { font-size: 9px; color: #b1bac4; font-family: 'SF Mono',monospace; }
-.t2d-root .node .ip-private { color: #fff; font-size: 11px; font-weight: 700; }
+.t2d-root .node .ip { font-size: 8px; color: #b1bac4; font-family: 'SF Mono',monospace; }
+.t2d-root .node .ip-private { color: #fff; font-size: 9px; font-weight: 700; }
 .t2d-root .node .ip-public { color: #8b949e; margin-top: 1px; }
 .t2d-root .node.peer-hover { box-shadow: 0 0 0 3px rgba(88,166,255,0.9), 0 0 14px 3px rgba(88,166,255,0.5); z-index: 31; }
 
@@ -71,7 +71,7 @@ export const CSS = `
 /* ── Panels (stats/legend/instance) — position:absolute within .t2d-root ── */
 /* Using absolute so they stay inside the canvas stacking context and don't  */
 /* conflict with the fixed .cp-panel control overlay.                        */
-.t2d-root .panel-caret { display: inline-block; width: 12px; margin-right: 4px; font-size: 10px; color: #8b949e; }
+.t2d-root .panel-caret { display: inline-block; width: 16px; margin-right: 4px; font-size: 16px; color: #8b949e; }
 .t2d-root .stats h3, .t2d-root .vis-legend h3, .t2d-root .instance-legend h3 {
   cursor: move; user-select: none; margin: 0; padding: 8px 12px;
   background: #0d1117; border-bottom: 1px solid #30363d; border-radius: 8px 8px 0 0;
@@ -212,4 +212,13 @@ export const CSS = `
 .t2d-root .node-tooltip .sparkline-row td { padding: 2px 6px; }
 .t2d-root .node-tooltip .sparkline-row svg.sparkline { display: block; }
 .t2d-root .node-tooltip tr[style*="dashed"] td { border-style: dashed; }
+/* Instructions fold inside the legend, with a chevron that rotates when shut. */
+.t2d-root .vis-legend .instr-head { cursor: pointer; font-weight: 700; color: #8b949e;
+  margin-top: 6px; user-select: none; display: flex; align-items: center; gap: 5px; }
+.t2d-root .vis-legend .instr-head:hover { color: #e6edf3; }
+.t2d-root .vis-legend .instr-chevron { display: inline-block; font-size: 16px; line-height: 1; transition: transform .12s; }
+.t2d-root .vis-legend .instr-head.collapsed .instr-chevron { transform: rotate(-90deg); }
+.t2d-root .panel-caret { display: inline-block; transition: transform .12s; }
+.t2d-root .folded .panel-caret,
+.t2d-root .panel-caret.collapsed { transform: rotate(-90deg); }
 `;

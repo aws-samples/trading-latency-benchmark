@@ -20,6 +20,7 @@ af_xdp/
 │   ├── backend/      Registry + NxN collector + orchestrator + HTTP/SSE API (serves web/)
 │   ├── web/          Svelte + three.js live 2D/3D topology + control panel
 │   ├── gen/          Offline: per-pair JSON → heatmap (report.py) + fleet.json (fleet_json.py)
+│   ├── mcp/          Read-only MCP server (exposes results DB to AI tooling)
 │   └── cmd/afxdpctl/ One CLI: up / sync / down / run / cancel / report / fleet
 ├── tests/            pytest integration suite (echo-mode; run from the af_xdp root)
 ├── dev/              Dev tooling: Docker build harness (dev/Dockerfile) + sync/provision playbooks
@@ -39,7 +40,7 @@ make echo-mode
 pip install pytest && pytest -v
 ```
 
-## Running benchmarks — two ways
+## Running benchmarks - two ways
 
 **1. Control plane (recommended).** A Go **agent** on every fleet node connects
 *outbound* to a central **backend** over a **NATS** bus; the backend serves a web
@@ -66,20 +67,20 @@ below and [`deploy/ansible/`](deploy/ansible/README.md).
 | Directory | Description |
 |-----------|-------------|
 | [`src/`](src/README.md) | Core C++ replicator + eBPF XDP programs; datapaths, control protocol, build modes |
-| [`tools/`](tools/README.md) | RTT client, multicast tools, control CLI — usage, flags, timestamp modes |
+| [`tools/`](tools/README.md) | RTT client, multicast tools, control CLI - usage, flags, timestamp modes |
 | [`control-plane/`](control-plane/README.md) | NATS + agents + backend + web; what happens behind the web UI; `afxdpctl` |
 | [`control-plane/web/`](control-plane/web/README.md) | Live 2D/3D viewer + control panel internals |
 | [`deploy/`](deploy/README.md) | Deployment flows and instance roles |
 | [`deploy/cdk/`](deploy/cdk/README.md) | Fleet spec, scenarios, deployment types, context parameters |
 | [`deploy/ansible/`](deploy/ansible/README.md) | Runtime playbooks, inventory, variables |
 | [`dev/`](dev/README.md) | Docker build harness, sync/provision, dev loop |
-| [`tests/`](tests/README.md) | Echo-mode integration suite — test classes, fixtures, run modes |
+| [`tests/`](tests/README.md) | Echo-mode integration suite - test classes, fixtures, run modes |
 
 ## Modes
 
 | Mode | Command | Root? | Use case |
 |------|---------|:-----:|----------|
-| AF_XDP (full) | `sudo replicator eth0 <ip> <port>` | Yes | Production — zero-copy, ~32µs p50 |
+| AF_XDP (full) | `sudo replicator eth0 <ip> <port>` | Yes | Production - zero-copy, ~32µs p50 |
 | AF_XDP + m2u | `sudo replicator eth0 <mcast> <port> --mcast` | Yes | Multicast fan-out via m2u tunnel |
 | Echo | `replicator --echo-mode <ip> <port>` | No | Testing, containers, ~200µs p50 |
 
@@ -91,16 +92,16 @@ it out:
 
 ![multicast (m2u) datapath](tools/assets/mcast-datapath.svg)
 
-- **m2u header** — wire framing is `Eth|IP|UDP|m2u|payload`, where `m2u` = `magic
+- **m2u header** - wire framing is `Eth|IP|UDP|m2u|payload`, where `m2u` = `magic
   0x4D324355 ("M2CU")` + 4-byte multicast group. The logical stream is keyed by
   `{UDP dst port, m2u group}`.
-- **Source** (`mcast_send`) — AF_XDP zero-copy TX on a **non-RSS queue (queue 1)**;
+- **Source** (`mcast_send`) - AF_XDP zero-copy TX on a **non-RSS queue (queue 1)**;
   stamps `ts_ns` immediately before ring submit.
-- **Replicator** — `mcast.o` matches `{group,port}` against `config_map` and
+- **Replicator** - `mcast.o` matches `{group,port}` against `config_map` and
   `bpf_redirect_map`s the frame to the AF_XDP socket on RSS **queue 0**; userspace
   stamps `replicator_ns` at RX entry, then emits one unicast copy per **registered**
   destination (per-group fan-out) via zero-copy TX, one driver kick per batch.
-- **Destination** (`mcast_receive`) — its own `mcast.o` redirects the matching frame
+- **Destination** (`mcast_receive`) - its own `mcast.o` redirects the matching frame
   to its XSK. Reports one-way = `rx_ns − ts_ns`, split into **hop1** (`replicator_ns −
   ts_ns`, source→replicator) and **hop2** (`rx_ns − replicator_ns`, replicator→dest).
 - All timestamps are `CLOCK_REALTIME`, disciplined to the common **AWS Time Sync NTP**
@@ -113,17 +114,15 @@ Measured on the 3-node same-AZ + cluster-placement-group fleet (10k msgs @ 200µ
 
 | Optimization | Mechanism | Impact |
 |---|---|---|
-| **Small `gro_flush_timeout` (10µs)** | Backstop timer of the deferred-IRQ + busy-poll regime. NOT `0` (strands packets in busy-poll gaps → multi-second bursts) and NOT the old `200µs` (becomes the primary delivery path → ~200µs/hop). | **234µs → ~60µs** one-way — the dominant win |
+| **Small `gro_flush_timeout` (10µs)** | Backstop timer of the deferred-IRQ + busy-poll regime. NOT `0` (strands packets in busy-poll gaps → multi-second bursts) and NOT the old `200µs` (becomes the primary delivery path → ~200µs/hop). | **234µs → ~60µs** one-way - the dominant win |
 | **In-app NAPI busy-poll** | `SO_PREFER_BUSY_POLL`+`SO_BUSY_POLL` on the XSK fd; the RX loop issues `recvfrom`/`poll` on an empty peek so NAPI runs in the pinned thread instead of waiting for a deferred hard IRQ. Applied to the replicator (`XdpSocket::receive`) **and** `mcast_receive`. | dest-RX becomes gro-independent; robust, burst-free |
 | **CPU isolation + pinning** | `isolcpus=1-4`; ENA IRQ → first isolated CPU, apps → isolated+1, OS/SSH on CPU0. The busy-poll thread is never preempted by the hard IRQ. `irqbalance` disabled. | removes P99 jitter/stalls |
 | **Hugetlb UMEM** | `MAP_HUGETLB` (2 MB pages) for the UMEM with a clean 4 KB fallback. | fewer TLB misses on the packet buffers |
 | **Non-RSS TX queue (queue 1)** | `mcast_send` binds AF_XDP TX off RSS queue 0 (which carries SSH/control); a ZC bind on queue 0 wedges the host NIC. | correctness + host stability |
 | **Hot-path micro-opts** | cache the source IP once (kills per-packet `inet_aton`); drain TX completions once per fan-out batch; single driver kick for all K destinations. | trims per-packet + per-fan-out cost |
 
-**Floor:** on virtualized ENA, ~26µs/hop is NIC/hypervisor-bound — CPU-side tuning
-(busy-poll, IRQ pinning) beyond the gro fix shows diminishing returns. `dev/roadmap.md`
-covers the gro/busy-poll mechanics in depth and the deferred kernel-side forward
-(`XDP_TX`) design that would attack the remaining userspace-replicator hop.
+**Floor:** on virtualized ENA, ~26µs/hop is NIC/hypervisor-bound - CPU-side tuning
+(busy-poll, IRQ pinning) beyond the gro fix shows diminishing returns.
 
 ## Multicast workflow (ansible)
 
@@ -131,17 +130,17 @@ covers the gro/busy-poll mechanics in depth and the deferred kernel-side forward
 cd deploy/ansible
 export AWS_PROFILE=<profile> SSH_KEY_FILE=~/.ssh/<key>.pem ANSIBLE_HOST_KEY_CHECKING=False
 
-# 1. Configure — clock-sync gate, replicator mcast mode, destination joins, datapath probe
+# 1. Configure - clock-sync gate, replicator mcast mode, destination joins, datapath probe
 ansible-playbook -i inventory.aws_ec2.yml configure_mcast.yaml -e replicator_private_ip=<repl_ip>
 
-# 2. Run — NIC tuning (gro=10µs, IRQ pin, defer=2) + isolated-CPU-pinned receivers/sender + report
+# 2. Run - NIC tuning (gro=10µs, IRQ pin, defer=2) + isolated-CPU-pinned receivers/sender + report
 ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml \
   -e replicator_private_ip=<repl_ip> -e count=10000 -e interval_us=200 -e timeout_sec=30
 ```
 Outputs land in `results/<date>/<hh-mm-ss>-mcast/`: per-pair `<src_ip>-<dst_ip>.json`,
 `matrix_report.html` (heatmap), `fleet.json` (topology for the web viewer), and
 `matrix_summary.json`. The same `fleet.json` schema is what the control-plane web
-viewer renders — see [`control-plane/`](control-plane/README.md).
+viewer renders - see [`control-plane/`](control-plane/README.md).
 
 ## Measured Results (c7i cluster-PG, us-east-1)
 
@@ -159,7 +158,7 @@ viewer renders — see [`control-plane/`](control-plane/README.md).
 
 | Metric | one-way | hop1 (src→repl) | hop2 (repl→dest) |
 |--------|:---:|:---:|:---:|
-| min | ~38 µs | — | — |
+| min | ~38 µs | - | - |
 | p50 | ~60–65 µs | ~26 µs | ~31–37 µs |
 | p99 | ~85 µs | ~42 µs | ~49 µs |
 
@@ -191,16 +190,16 @@ The `afxdpctl` CLI wraps all of this. See [`deploy/README.md`](deploy/README.md)
 
 ## Key Design Decisions
 
-- **Universal AMI** — one image for all roles (source/replicator/destination).
-- **Mode-switching replicator** — single binary, config-driven via `/etc/default/replicator`.
-- **Echo-mode for CI** — the full integration suite runs without XDP/root (containers, macOS).
-- **Fleet-driven CDK** — arbitrary topologies from JSON, no hardcoded instance counts.
-- **Agent-outbound control plane** — agents open ONE outbound NATS connection; no inbound
+- **Universal AMI** - one image for all roles (source/replicator/destination).
+- **Mode-switching replicator** - single binary, config-driven via `/etc/default/replicator`.
+- **Echo-mode for CI** - the full integration suite runs without XDP/root (containers, macOS).
+- **Fleet-driven CDK** - arbitrary topologies from JSON, no hardcoded instance counts.
+- **Agent-outbound control plane** - agents open ONE outbound NATS connection; no inbound
   ports on fleet nodes and no SSH in the hot path, so a runaway XDP program can't lock you out.
-- **NTP clock sync** — chrony disciplined to the common AWS Time Sync NTP source
-  (`169.254.169.123`, xleave) for sub-µs *inter-instance* offset. (Per-node ENA PHC refclock
-  was rejected: it disciplines each host to its own PHC, leaving ~200µs between instances —
-  fatal for one-way measurement.)
+- **PHC clock sync** - chrony disciplines each node to the **ENA PHC hardware clock**
+  (`refclock PHC /dev/ptp0`, `phc_enable=1`) reading the Nitro hypervisor clock directly
+  (observed RMS offset tens of nanoseconds). AWS Time Sync NTP (`169.254.169.123`, xleave,
+  `minpoll 2`) is the fallback until the PHC device is available after reboot.
 
 ## License
 

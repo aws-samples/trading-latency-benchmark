@@ -179,7 +179,8 @@ switch (deploymentType) {
         entries: secondaryEntries,
         regionName: secondaryRegion,
         peerVpcCidr: primaryCidr,
-        ssmAmi: false,
+        ssmAmi: true,
+        controlPlaneRegion: region,
       });
       connectRegions(primary, secondary, { secondaryRegion });
     }

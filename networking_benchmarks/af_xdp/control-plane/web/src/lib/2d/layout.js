@@ -68,13 +68,16 @@ export function computePositions(ctx) {
   // account gets the full separation, region 80%, vpc 50%, az 35% — so the outer
   // structure reads clearly without flinging inner groups apart (composition
   // cohesion). Floored at 2·pad + margin so contour boxes never overlap.
-  // Contour pads: account 80, region 60, vpc 40, az 20 (PAD_BASE 20, STEP 20).
+  // Contour pads: account 104, region 76, vpc 48, az 20 (PAD_BASE 20, STEP 28).
+  // DECOR covers the badges a node draws outside its circle and the label a
+  // contour draws above its border, so separated groups clear both.
   // PG (5th tier) has no 2D contour — its gap just spaces PG groups within an AZ.
-  const pads = [80, 60, 40, 20, 14];            // [account, region, vpc, az, pg] — sync with contours.js
+  const pads = [104, 76, 48, 20, 14];           // [account, region, vpc, az, pg] — sync with contours.js
+  const DECOR = 18, LABEL_OVERHANG = 24;        // sync with contours.js
   const ratio = [1.0, 0.8, 0.5, 0.35, 0.22];    // diminishing distance by tier
   const SEP = 215;                              // base (account) separation
   const R = nodeRadius();
-  const gaps = pads.map((p, d) => Math.max(SEP * ratio[d], 2 * p + 24));
+  const gaps = pads.map((p, d) => Math.max(SEP * ratio[d], 2 * p + 2 * R + 2 * DECOR + LABEL_OVERHANG));
   const pts = result.map((p) => [p.x, p.y]);
   separateHierarchy(fleet.nodes, pts, 2, R, gaps);
   result.forEach((p, i) => { p.x = pts[i][0]; p.y = pts[i][1]; });
@@ -84,30 +87,58 @@ export function computePositions(ctx) {
   // top of each other when the MDS distances collapse (e.g. p50 ≈ equal for all
   // pairs in a cluster PG). This is a simple O(N²) iterative push — cheap for
   // fleet sizes (<100 nodes, <5 iterations).
-  const R2 = nodeRadius() * 2 + 6; // min centre-to-centre distance (2 radii + gap)
-  for (let iter = 0; iter < 10; iter++) {
-    let nudged = false;
-    for (let i = 0; i < result.length; i++) {
-      for (let j = i + 1; j < result.length; j++) {
-        const dx = result[j].x - result[i].x, dy = result[j].y - result[i].y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < R2) {
-          const push = (R2 - dist) / 2 + 1;
-          const nx = dist > 0.01 ? dx / dist : 1, ny = dist > 0.01 ? dy / dist : 0;
-          result[i].x -= nx * push; result[i].y -= ny * push;
-          result[j].x += nx * push; result[j].y += ny * push;
-          nudged = true;
+  // Push apart nodes whose bodies overlap. Within a group nodes can land on
+  // each other when the MDS distances collapse, and the viewport fit scales
+  // positions while radii stay fixed, so this runs again in final coordinates.
+  const resolveNodeCollisions = () => {
+    const R2 = nodeRadius() * 2 + 6; // min centre-to-centre distance (2 radii + gap)
+    for (let iter = 0; iter < 10; iter++) {
+      let nudged = false;
+      for (let i = 0; i < result.length; i++) {
+        for (let j = i + 1; j < result.length; j++) {
+          const dx = result[j].x - result[i].x, dy = result[j].y - result[i].y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < R2) {
+            const push = (R2 - dist) / 2 + 1;
+            const nx = dist > 0.01 ? dx / dist : 1, ny = dist > 0.01 ? dy / dist : 0;
+            result[i].x -= nx * push; result[i].y -= ny * push;
+            result[j].x += nx * push; result[j].y += ny * push;
+            nudged = true;
+          }
         }
       }
+      if (!nudged) break;
     }
-    if (!nudged) break;
-  }
-  // Re-centre + fit to the viewport (separation may have spread things out).
-  let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity;
-  result.forEach((p, i) => { const rr = nodeRadius(fleet.nodes[i]); mnx = Math.min(mnx, p.x - rr); mxx = Math.max(mxx, p.x + rr); mny = Math.min(mny, p.y - rr); mxy = Math.max(mxy, p.y + rr); });
-  const gcx = (mnx + mxx) / 2, gcy = (mny + mxy) / 2;
-  const fitK = Math.min(1, (W - 200) / ((mxx - mnx) || 1), (H - 200) / ((mxy - mny) || 1));
+  };
+  resolveNodeCollisions();
+  // Fit to the viewport, then re-enforce separation. Contour pads are absolute
+  // pixels, so scaling positions shrinks the gaps the pads still need: the
+  // constraint only holds if it is applied in final coordinates. The view
+  // supports zoom and pan, so overflowing the viewport is preferable to
+  // boundaries that intersect.
+  const extent = () => {
+    let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity;
+    result.forEach((p, i) => {
+      const rr = nodeRadius(fleet.nodes[i]);
+      mnx = Math.min(mnx, p.x - rr); mxx = Math.max(mxx, p.x + rr);
+      mny = Math.min(mny, p.y - rr); mxy = Math.max(mxy, p.y + rr);
+    });
+    return { mnx, mxx, mny, mxy };
+  };
+  let e = extent();
+  const fitK = Math.min(1, (W - 200) / ((e.mxx - e.mnx) || 1), (H - 200) / ((e.mxy - e.mny) || 1));
+  const gcx = (e.mnx + e.mxx) / 2, gcy = (e.mny + e.mxy) / 2;
   result.forEach((p) => { p.x = CX + (p.x - gcx) * fitK; p.y = CY + (p.y - gcy) * fitK; });
+  if (fitK < 1) {
+    const scaled = result.map((p) => [p.x, p.y]);
+    separateHierarchy(fleet.nodes, scaled, 2, R, gaps);
+    result.forEach((p, i) => { p.x = scaled[i][0]; p.y = scaled[i][1]; });
+  }
+  resolveNodeCollisions();
+  // Translate-only recentre so the restored gaps survive.
+  e = extent();
+  const dx = CX - (e.mnx + e.mxx) / 2, dy = CY - (e.mny + e.mxy) / 2;
+  result.forEach((p) => { p.x += dx; p.y += dy; });
 
   return { positions: result, stress };
 }

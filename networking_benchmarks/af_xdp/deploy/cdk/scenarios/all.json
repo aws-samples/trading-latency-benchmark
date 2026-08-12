@@ -2,11 +2,10 @@
   {"role": "source", "az": "c", "pgName": "cpg-euc-c", "pgType": "cluster", "region": "eu-central-1"},
   
   {"role": "replicator", "az": "c", "pgName": "cpg-euc-c", "pgType": "cluster", "region": "eu-central-1"},
-  {"role": "replicator", "az": "b", "pgName": "cpg-euc-b", "pgType": "cluster", "region": "eu-central-1"},
   
   {"count": 7, "role": "destination", "az": "c", "pgName": "cpg-euc-c", "pgType": "cluster", "region": "eu-central-1"},
-  {"count": 3, "role": "destination", "az": "b", "pgName": "cpg-euc-b", "pgType": "cluster", "region": "eu-central-1"},
+  {"count": 7, "role": "destination", "az": "b", "pgName": "cpg-euc-b", "pgType": "cluster", "region": "eu-central-1"},
   {"count": 7, "role": "destination", "az": "c", "pgName": "spg-euc-c", "pgType": "spread", "region": "eu-central-1"},
 
-  {"count": 1, "role": "destination", "az": "a", "pgName": "cpg-euw-a", "pgType": "cluster", "region": "eu-west-2"}
+  {"count": 3, "role": "destination", "az": "a", "pgName": "cpg-euw-a", "pgType": "cluster", "region": "eu-west-2"}
 ]

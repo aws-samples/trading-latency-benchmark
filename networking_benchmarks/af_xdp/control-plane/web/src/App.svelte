@@ -17,6 +17,7 @@
   let mode = '2d';
   let handle = null;
   let view3d = null;   // persisted 3D camera view, kept across live-update remounts
+  let view2d = null;   // persisted 2D zoom/pan, kept across live-update remounts
 
   let runs = [];
 
@@ -71,13 +72,27 @@
   // The browser's print header prints document.title; blank it so the page is
   // not stamped with "AF_XDP topology". The URL half of that header is a print
   // dialog setting and cannot be suppressed from CSS.
+  // The report's own PDF button calls this instead of window.print(), which
+  // inside the overlay captures only the visible viewport.
+  if (typeof window !== 'undefined') window.__afxdpPrintReport = () => printReport();
+
   function printReport() {
     const views = getReportViews();
     if (!views.length) return;
+    // Browsers name the saved PDF from the document title, and @page margin 0
+    // suppresses the header, so a dynamic title is safe here.
+    const kinds = [...new Set(views.map((v) => (v.kind === 'mcast' ? 'multicast' : 'unicast')))].join('-');
+    const p2 = (n) => String(n).padStart(2, '0');
+    const dt = new Date();
+    const stamp = `${dt.getFullYear()}${p2(dt.getMonth() + 1)}${p2(dt.getDate())}`
+      + `-${p2(dt.getHours())}${p2(dt.getMinutes())}${p2(dt.getSeconds())}`;
     const doc = buildCombinedReportHTML(views, panel?.timezone?.() || '')
+      .replace(/<title>[^<]*<\/title>/, `<title>latency-report-${kinds}-${stamp}</title>`)
       .replace('</head>', `<style>
         @page { size: landscape; margin: 0; }
         @media print {
+          /* Export controls are screen affordances, not part of the report. */
+          .report-export-bar { display: none !important; }
           html, body { background: #fff !important; color: #111 !important; }
           /* @page margin is 0 so browsers drop their header/footer; put the
              page margin back on the content instead. */
@@ -97,7 +112,7 @@
       </style></head>`);
     const f = document.createElement('iframe');
     f.setAttribute('aria-hidden', 'true');
-    f.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+    f.style.cssText = 'position:fixed;left:-10000px;top:0;width:1200px;height:1600px;border:0';
     document.body.appendChild(f);
     f.contentDocument.open();
     f.contentDocument.write(doc);
@@ -154,7 +169,7 @@
     if (contentEl) {
       contentEl.innerHTML = body;
     } else {
-      reportOverlayEl.innerHTML = `<div class="report-content">${body}</div>`;
+      reportOverlayEl.innerHTML = `<div class="report-content report-view">${body}</div>`;
     }
 
     const root = reportOverlayEl.querySelector('.report-content');
@@ -172,13 +187,17 @@
 
   function remount() {
     if (!fleet || !container) return;
-    // Preserve the 3D camera across remounts so live updates don't reset zoom/pan.
-    if (mode === '3d' && handle && handle.getView) { try { view3d = handle.getView(); } catch (_) { /* keep last */ } }
+    // Preserve zoom/pan across remounts in both views so a live update does not
+    // throw away the viewport the user set up.
+    if (handle && handle.getView) {
+      try { if (mode === '3d') view3d = handle.getView(); else view2d = handle.getView(); }
+      catch (_) { /* keep last */ }
+    }
     if (handle) handle.dispose();
     container.innerHTML = '';
     try {
       handle = (mode === '2d')
-        ? mountTopology2D(container, fleet, { targetIds, onToggleTarget })
+        ? mountTopology2D(container, fleet, { view: view2d, targetIds, onToggleTarget })
         : mountTopology3D(container, fleet, { view: view3d, targetIds, onToggleTarget });
     } catch (e) {
       console.error('Viz mount failed:', e);
@@ -241,7 +260,9 @@
     if (reportOverlayOpen) rerenderReportOverlay();
     else remount();
     const s = conn.stats();
-    panel?.setStats({ ...s, updated: Date.now() });
+    // Count the links currently displayed rather than every edge ever seen, so
+    // the readout tracks the selected kind and variation.
+    panel?.setStats({ ...statsFromFleet(fleet), online: s.online, nodes: s.nodes, updated: Date.now() });
   }
   function scheduleRerender() {
     if (rerenderTimer) return;
@@ -255,6 +276,7 @@
     const k = targetIds.size;
     const pairs = countPairs(N, k, scope);
     panel.setTargets({ count: k, pairs, scope, totalNodes: N, preset: activePreset });
+    panel.setTargetIds(targetIds);
   }
 
   // Target toggle handler — called from 2D checkbox / shift+click and 3D shift+click.
@@ -382,14 +404,11 @@
       },
       onScopeChange: (s) => { scope = s; updateTargetPanel(); remount(); },
       onPreset: (name) => {
-        // Presets are group expansions of the MARKED instance: PG selects every
-        // instance sharing its placement group, AZ every one in its AZ, and so
-        // on. Pressing the active preset again collapses back to just that
-        // instance, keeping the anchor so another grouping can be tried without
-        // re-marking. The buttons are disabled while nothing is marked.
+        // 'all' selects every online node unconditionally - no anchor needed.
+        // Other presets are group expansions of the MARKED instance.
         const anchor = targetAnchor || (targetIds.size ? [...targetIds][0] : null);
-        if (!anchor) return;
-        if (activePreset === name) {
+        if (name !== 'all' && !anchor) return;
+        if (activePreset === name && name !== 'all') {
           targetIds = new Set([anchor]);
           activePreset = null;
           updateTargetPanel(); remount(); return;
@@ -434,9 +453,6 @@
 
 {#if reportOverlayOpen}
 <div class="report-overlay" data-report-overlay>
-  <div class="report-toolbar">
-    <button class="report-toolbar-btn" on:click={printReport}>Save as PDF</button>
-  </div>
   <div class="report-body" bind:this={reportOverlayEl}></div>
 </div>
 {/if}

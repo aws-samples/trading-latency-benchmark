@@ -1,4 +1,4 @@
-# control-plane — centralized orchestration + live monitoring for the AF_XDP benchmark
+# control-plane - centralized orchestration + live monitoring for the AF_XDP benchmark
 
 Replaces the fragile SSH/ansible + AWS-creds-in-the-loop orchestration with a
 push-button control plane: a Go **agent** on every fleet node, a central Go
@@ -9,11 +9,12 @@ heatmap + topology model.
 
 ```
 control-plane/
-├── proto/       # shared wire contract (NATS subjects + message schemas) — Go, no deps
+├── proto/       # shared wire contract (NATS subjects + message schemas) - Go, no deps
 ├── agent/       # per-node sidecar: IMDS self-register, run rtt/mcast, stream telemetry
-├── backend/     # registry, NxN collector, orchestrator, HTTP+SSE API, serves web/
+├── backend/     # registry, NxN collector, orchestrator, store, HTTP+SSE API, serves web/
 ├── web/         # Svelte + three.js: live 2D/3D topology + shared control panel
 ├── gen/         # offline: per-pair JSON → heatmap + fleet.json (afxdp.topology/v1)
+├── mcp/         # read-only MCP server (exposes the SQLite results DB to AI tooling)
 ├── cmd/afxdpctl # CLI that wraps the backend HTTP API + CDK/ansible for the dev loop
 └── assets/      # documentation diagrams (SVG)
 ```
@@ -26,7 +27,7 @@ small dedicated EC2 (see Deployment).
 
 ## Architecture overview
 
-![Architecture diagram — agents, NATS bus, backend, web browser](assets/architecture.svg)
+![Architecture diagram - agents, NATS bus, backend, web browser](assets/architecture.svg)
 
 ---
 
@@ -41,7 +42,7 @@ inventories. The agent model fixes this:
   to the backend. No inbound ports on fleet nodes, no SSH in the hot path, so a
   runaway XDP program can never lock you out of control.
 - **Self-registration via IMDS.** Each agent discovers its own instance-id / IP /
-  AZ / PG / role and registers — no hand-built inventory.
+  AZ / PG / role and registers - no hand-built inventory.
 - **The agent owns the node's resource lifecycle** (queue-free, clock makestep,
   isolated-core pinning, replicator mode/service). The backend issues *intents*,
   not shell.
@@ -81,13 +82,13 @@ discover:
 |---|---|---|
 | InstanceID | `/meta-data/instance-id` | `AGENT_INSTANCE_ID` |
 | PrivateIP | `/meta-data/local-ipv4` | `AGENT_PRIVATE_IP` |
-| PublicIP | `/meta-data/public-ipv4` | — |
-| AZ | `/meta-data/placement/availability-zone` | — |
+| PublicIP | `/meta-data/public-ipv4` | - |
+| AZ | `/meta-data/placement/availability-zone` | - |
 | Region | `/meta-data/placement/region` | `AWS_REGION` |
-| InstanceType | `/meta-data/instance-type` | — |
+| InstanceType | `/meta-data/instance-type` | - |
 | PlacementGroup | `/meta-data/placement/group-name` | `AGENT_PG` |
 | Role | `/meta-data/tags/instance/Role` | `AGENT_ROLE` |
-| Stack | `/meta-data/tags/instance/aws:cloudformation:stack-name` | — |
+| Stack | `/meta-data/tags/instance/aws:cloudformation:stack-name` | - |
 
 If IMDS is unavailable (off-EC2 development), set `AGENT_NO_IMDS=1` and provide
 the fields via environment variables.
@@ -142,7 +143,7 @@ publishes **both** a `CommandResult` (on `fleet.result.<id>`) and a `Telemetry`
 ### CPU pin derivation
 
 The agent derives send/receive CPU pins from the intersection of `isolcpus=` and
-the kernel online set — highest two isolated cores (send = highest, recv =
+the kernel online set - highest two isolated cores (send = highest, recv =
 second-highest). This adapts to instance size without hardcoding and never pins
 to an offline core (which would silently fall back to CPU 0, inflating latency).
 
@@ -150,25 +151,47 @@ to an offline core (which would silently fall back to CPU 0, inflating latency).
 
 ## Backend components + logic (backend/)
 
-### registry.go — fleet state
+Package layout: `hub/`, `registry/`, `collector/`, `store/`, `pairs/`,
+`orchestrator/`, `ingest/`, `errorreg/`, `api/`, with `main.go` as wiring.
+
+### store/ - SQLite persistence
+
+A SQLite database (WAL mode) persists every measurement and campaign run.
+Schema: `runs` (id, started/ended, kind, variation, scope, target_ids, params,
+pair counts) and `measurements` (run_id FK, timestamps, kind, variation, src/dst,
+percentiles, loss). The store is also consumed read-only by the MCP server
+(`control-plane/mcp/`).
+
+### pairs/ - pair expansion
+
+Expands a `nodes[]` + `scope` into ordered `(src, dst)` pairs. Scopes: `among`
+(full NxN mesh among the selected nodes), `fanout` (one selected node sends to
+all others), `fanin` (all others send to one selected node).
+
+### errorreg/ - error registry
+
+Accumulates per-node errors from failed commands so they can be queried at
+`GET /api/errors`.
+
+### registry.go - fleet state
 
 Authoritative in-memory fleet keyed by InstanceID. `Upsert` on register, update
 on heartbeat, staleness window → offline (default 20 s). Query helpers:
 
-- `Online()` — all live nodes (ucast campaign scope)
-- `ByRole(role)` — first online node with a specific role
-- `AllByRole(role)` — all online nodes of a role (e.g. all destinations)
+- `Online()` - all live nodes (ucast campaign scope)
+- `ByRole(role)` - first online node with a specific role
+- `AllByRole(role)` - all online nodes of a role (e.g. all destinations)
 
-### collector.go — NxN measurement matrix
+### collector.go - NxN measurement matrix
 
 Edges keyed **`kind|variation|src|dst`** (+ a 60-entry p50 history ring for
 sparklines). The `kind` in the key is deliberate: mcast fwd-mode `kernel` and
 ucast variation `kernel` share src→dst and would otherwise collide (a bug caught
-live — mcast telemetry silently overwrote the ucast kernel edge).
+live - mcast telemetry silently overwrote the ucast kernel edge).
 
 `Apply(Telemetry)` updates or creates the edge and returns a copy for SSE broadcast.
 
-### orchestrator.go — campaigns + dispatch
+### orchestrator.go - campaigns + dispatch
 
 Dispatches commands to agents via NATS `fleet.cmd.agent.<id>`, correlates their
 `CommandResult` by `CmdID` from the wildcard `fleet.result.*` subscription. Only
@@ -176,28 +199,28 @@ Dispatches commands to agents via NATS `fleet.cmd.agent.<id>`, correlates their
 
 **Key behaviors:**
 
-- `Dispatch(subject, cmd, timeout)` — publish + wait for correlated result (or timeout).
-- `dispatchRetry(instanceID, cmd, timeout, attempts)` — retry a command up to N times on error/!OK. Core NATS is at-most-once: a retry fills a matrix hole.
-- `Cancel()` — sets an atomic flag; the running campaign aborts at its next safe boundary (round for ucast, mode for mcast).
-- `scheduleRounds(n)` — packs N×(N−1) ordered pairs into node-disjoint rounds for parallel execution (see below).
+- `Dispatch(subject, cmd, timeout)` - publish + wait for correlated result (or timeout).
+- `dispatchRetry(instanceID, cmd, timeout, attempts)` - retry a command up to N times on error/!OK. Core NATS is at-most-once: a retry fills a matrix hole.
+- `Cancel()` - sets an atomic flag; the running campaign aborts at its next safe boundary (round for ucast, mode for mcast).
+- `scheduleRounds(n)` - packs N×(N−1) ordered pairs into node-disjoint rounds for parallel execution (see below).
 
-### ingest.go — NATS→state bridge
+### ingest.go - NATS→state bridge
 
 Subscribes to `fleet.register`, `fleet.heartbeat`, `fleet.telemetry`:
 
 - **Registration** → `registry.Upsert` → `hub.Emit("node", …)`
-- **Heartbeat** → `registry.Heartbeat` → `hub.Emit("node", …)` only if a material field changed (state, mode, or online transition — not every tick)
+- **Heartbeat** → `registry.Heartbeat` → `hub.Emit("node", …)` only if a material field changed (state, mode, or online transition - not every tick)
 - **Telemetry** → `collector.Apply` → `hub.Emit("edge", …)`
 
 If a heartbeat arrives from an unknown instance (e.g. after a backend restart),
 the ingest publishes a `CmdReregister` nudge so the agent repopulates immediately.
 
-### hub.go — SSE fan-out
+### hub.go - SSE fan-out
 
 Fan-out to SSE clients. Each subscriber gets a buffered channel (256 entries);
 slow clients are dropped (channel full) rather than blocking the ingest path.
 
-### api.go + main.go — HTTP server
+### api.go + main.go - HTTP server
 
 Serves the HTTP+SSE API and the built web app (`web/dist`).
 
@@ -207,11 +230,12 @@ Serves the HTTP+SSE API and the built web app (`web/dist`).
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/fleet` | GET | Full snapshot `{generated_unix, nodes[], edges[]}` — for late joiners / batch view |
+| `/api/fleet` | GET | Full snapshot `{generated_unix, nodes[], edges[]}` - for late joiners / batch view |
 | `/api/events` | GET | SSE stream: `snapshot` on connect, then `node`/`edge`/`job` deltas + keepalives |
 | `/api/run` | POST | Start a campaign (async, returns `202 Accepted`) |
 | `/api/cancel` | POST | Request the running campaign to abort at the next boundary |
 | `/api/cmd` | POST | Dispatch an ad-hoc command to one agent `{instance_id, command}` |
+| `/api/errors` | GET | Node errors (all, or `?node=<id>` for one node) |
 | `/healthz` | GET | Liveness probe |
 
 ### SSE event types (`/api/events`)
@@ -229,6 +253,42 @@ incremental deltas flow:
 Keepalive comments (`: keepalive\n\n`) are sent every 20 s to prevent proxy
 timeouts from closing the connection.
 
+### POST /api/run body
+
+The `kind` field selects the campaign type; remaining fields are campaign-specific:
+
+**ucast** (`UcastMatrixParams`):
+
+```json
+{
+  "kind": "ucast",
+  "variation": "kernel",
+  "count": 5000,
+  "rate": 20000,
+  "warmup": 1000,
+  "nodes": ["i-abc123", "i-def456"],
+  "scope": "among"
+}
+```
+
+- `variation` (singular): `kernel` | `xdp-tx` | `xdp-rx` | `xdp-txrx` (default `kernel`).
+- `nodes` (optional): restrict the campaign to these instance IDs. Empty = full NxN mesh.
+- `scope` (optional): `among` (default) | `fanout` | `fanin` - expands `nodes` into ordered pairs.
+
+**mcast** (`McastMatrixParams`):
+
+```json
+{
+  "kind": "mcast",
+  "modes": ["copy", "inplace", "kernel"],
+  "count": 10000,
+  "interval_us": 200,
+  "timeout_sec": 30
+}
+```
+
+- `modes`: subset of `copy` | `inplace` | `kernel` (default: all three).
+
 ---
 
 ## Orchestrator optimizations
@@ -237,12 +297,12 @@ timeouts from closing the connection.
 
 The contention rule is: a node may be in only one live measurement at a time (as
 sender *or* echo target). So all ordered pairs are packed into **node-disjoint
-rounds** — within a round no node appears twice, so every pair runs
+rounds** - within a round no node appears twice, so every pair runs
 **concurrently**; rounds run serially behind a `sync.WaitGroup` barrier.
 
 This turns the naïve O(N²) serial matrix into **~2(N−1) rounds of up to ⌊N/2⌋
 concurrent pairs** (≈O(N) wall-clock). (At N≤3 there is no concurrency to be
-had — any pair uses 2 of 3 nodes.)
+had - any pair uses 2 of 3 nodes.)
 
 ### Per-pair retry
 
@@ -329,9 +389,9 @@ These are **two distinct modes** in the web UI:
 | | One-shot test | Live (heartbeat) mode |
 |---|---|---|
 | Trigger | Click a test button once | Toggle "Live" → select a mode + interval |
-| Repeat | Never — runs once and finishes | Re-runs every N seconds (min 10 s) |
+| Repeat | Never - runs once and finishes | Re-runs every N seconds (min 10 s) |
 | SSE connection | Always open (independent of test) | Always open |
-| Backend concurrency | One campaign at a time | Same — queues are rejected while running |
+| Backend concurrency | One campaign at a time | Same - queues are rejected while running |
 | Parameters | Full 5000-packet runs (user-configurable) | Smaller 1000-packet bursts (quick pulse) |
 | UI behavior | Active button turns orange until done | Selected heartbeat button stays orange continuously |
 
@@ -362,7 +422,7 @@ The web app includes a "download report" button (⤓ icon) that generates a
 - Built from the currently-shown `fleet.json` model (live or static).
 - Contains an NxN **heatmap** (p50 colour-scaled) + a full per-edge latency
   table (p50/p90/p99/p99.9/max/loss%).
-- No server round-trip — the report is assembled in `lib/report.js` from the
+- No server round-trip - the report is assembled in `lib/report.js` from the
   in-memory model, wrapped in a Blob, and triggered as a download.
 - File naming: `afxdp-report-<kind>-<variation>-<timestamp>.html`.
 
@@ -397,7 +457,7 @@ Driven from the web panel or `POST /api/run`.
 | `xdp-txrx` | AF_XDP zero-copy | kernel socket + XDP-stamped ts | both |
 
 **mcast (one-way source → replicator fan-out → dest), fwd modes:** `copy`,
-`inplace`, `kernel` — set on the replicator per mode; one-way latency uses the
+`inplace`, `kernel` - set on the replicator per mode; one-way latency uses the
 XDP/PHC ingress stamp on the destination, gated on clock convergence.
 
 ---
@@ -460,7 +520,7 @@ afxdpctl down --key virginia --scenario ucast-az-cpg-3
 
 NATS needs a raw TCP endpoint, so a small dedicated EC2 beats ECS here. Fleets
 live in separate VPCs/regions, so the control plane gets a **public EIP** and
-agents connect *outbound* — no VPC peering.
+agents connect *outbound* - no VPC peering.
 
 ```bash
 # 1) Control plane (EC2 + EIP + SG + nats-server + backend; publishes SSM endpoint)
@@ -484,7 +544,7 @@ cdk deploy --context deploymentType=control-plane \
 | `-nats-insecure` | `CP_NATS_INSECURE` | off | Skip TLS verify (self-signed) |
 | `-addr` | `CP_HTTP_ADDR` | `:8080` | HTTP listen address |
 | `-web` | `CP_WEB_DIR` | auto-detect `web/dist` | Static web dir |
-| `-stale` | — | `20` | Seconds without heartbeat → offline |
+| `-stale` | - | `20` | Seconds without heartbeat → offline |
 
 ### Agent flags / environment
 
@@ -492,12 +552,12 @@ cdk deploy --context deploymentType=control-plane \
 |---|---|---|---|
 | `-nats` | `AGENT_NATS_URL` | `nats://localhost:4222` | NATS server URL |
 | `-bindir` | `AGENT_BIN_DIR` | `/opt/af-xdp` | Directory of C++ measurement tools |
-| `-heartbeat` | — | `5` | Heartbeat interval (seconds) |
-| — | `AGENT_NATS_TOKEN` | (none) | NATS auth token |
-| — | `AGENT_NATS_CA` | (none) | CA file to validate NATS TLS |
-| — | `AGENT_NATS_INSECURE` | (none) | Skip TLS verify (self-signed) |
-| — | `AGENT_NO_IMDS` | (none) | Disable IMDS (off-EC2 dev) |
-| — | `AGENT_ROLE` | (none) | Fallback role if IMDS tag unavailable |
+| `-heartbeat` | - | `5` | Heartbeat interval (seconds) |
+| - | `AGENT_NATS_TOKEN` | (none) | NATS auth token |
+| - | `AGENT_NATS_CA` | (none) | CA file to validate NATS TLS |
+| - | `AGENT_NATS_INSECURE` | (none) | Skip TLS verify (self-signed) |
+| - | `AGENT_NO_IMDS` | (none) | Disable IMDS (off-EC2 dev) |
+| - | `AGENT_ROLE` | (none) | Fallback role if IMDS tag unavailable |
 
 ---
 
@@ -507,7 +567,7 @@ cdk deploy --context deploymentType=control-plane \
   telemetry/heartbeat rates are trivial for NATS.
 - Past hundreds of nodes: `Snapshot()` copies the whole NxN per `/api/fleet` and
   per new SSE client, collector history rings dominate memory, and the NxN viz
-  itself becomes unusable — all need pagination / bounded snapshots / sampling.
+  itself becomes unusable - all need pagination / bounded snapshots / sampling.
 - The web fully remounts the topology per live update (debounced 500 ms); fine at
   tens of nodes, janky for very large N (prefer in-place edge updates there).
 
@@ -533,6 +593,19 @@ python3 control-plane/gen/fleet_json.py  results/<date>/<run>
 
 The same `fleet.json` schema is what the live backend adapts to, so the 2D/3D
 viewer renders both saved runs and the live stream identically.
+
+---
+
+## Read-only MCP server (mcp/)
+
+A Model Context Protocol (MCP) server that opens the backend's SQLite database
+in **read-only mode** (`mode=ro` in the DSN) and exposes measurement history and
+run metadata to AI tooling via JSON-RPC 2.0 over stdio. The read-only guarantee
+is enforced at the connection level and verified by tests - no write can succeed
+regardless of the query issued.
+
+Entry point: `mcp/cmd/main.go`. The server is a separate binary; it does not run
+inside the backend process.
 
 ---
 

@@ -1,13 +1,13 @@
 # dev/
 
-Developer iteration tooling — separate from production `deploy/`. Used to build, test, and hot-deploy code to a running fleet during development.
+Developer iteration tooling - separate from production `deploy/`. Used to build, test, and hot-deploy code to a running fleet during development.
 
 ## Structure
 
 ```
 dev/
 ├── Dockerfile              Local build + test harness (mirrors the AMI bake)
-├── roadmap.md              Development notes and measurements log
+├── roadmap/                Development design docs (pair-selection, generalization, etc.)
 └── ansible/                Dev playbooks + shared-inventory symlink
     ├── sync.yaml           rsync local source → EC2s, rebuild, restart (+ Go agent)
     ├── provision.yaml      Full install on stock AL2023 (no baked AMI)
@@ -26,7 +26,7 @@ afxdpctl sync --key ~/.ssh/virginia.pem --region us-east-1
 
 This is equivalent to running `ansible-playbook sync.yaml` but handles env vars and paths for you.
 
-## Dockerfile — Local Build + Test
+## Dockerfile - Local Build + Test
 
 Mirrors the AMI bake (xdp-tools + `make full`), then runs pytest in echo mode (no root/XDP). Validates that the code **compiles** exactly as the bake will, before spending ~9 min on an EC2 bake.
 
@@ -44,7 +44,7 @@ The Dockerfile:
 3. Runs `make full` (validates compilation)
 4. Default CMD: `pytest tests/ -v --tb=short`
 
-## ansible/ — Dev Iteration on a Running Fleet
+## ansible/ - Dev Iteration on a Running Fleet
 
 Run from `dev/ansible/` (the inventory is symlinked here). Requires `SSH_KEY_FILE` and `AWS_DEFAULT_REGION`.
 
@@ -59,7 +59,7 @@ export SSH_KEY_FILE_SECONDARY=~/.ssh/london.pem
 
 A fleet must be running and tagged by `Role` (deployed via CDK or manually tagged).
 
-### sync.yaml — Hot-deploy Local Code Changes
+### sync.yaml - Hot-deploy Local Code Changes
 
 Syncs the local `af_xdp/` tree to all fleet nodes, rebuilds, and restarts:
 
@@ -84,14 +84,14 @@ ansible-playbook -i inventory.aws_ec2.yml sync.yaml --limit replicator
 
 The rsync excludes build artifacts (`*.o`, `*.d`, binaries) to prevent a stale host-compiled object (e.g. one with `-DECHO_MODE_ONLY`) from contaminating the remote build.
 
-### provision.yaml — Full Provision on Stock AL2023
+### provision.yaml - Full Provision on Stock AL2023
 
 For instances without the baked AMI (development or BYOI):
 
 ```bash
 ansible-playbook -i inventory.aws_ec2.yml provision.yaml
 
-# Rebuild only (skip deps/configs — after code changes):
+# Rebuild only (skip deps/configs - after code changes):
 ansible-playbook -i inventory.aws_ec2.yml provision.yaml -e rebuild=true
 
 # Skip the automatic reboot (defer it yourself):
@@ -110,7 +110,7 @@ ansible-playbook -i inventory.aws_ec2.yml provision.yaml -e grub_reboot=false
 - Reboot for kernel cmdline + PHC activation
 - Verifies PHC active after reboot
 
-### run_tests.yaml — Run Integration Tests
+### run_tests.yaml - Run Integration Tests
 
 Runs the pytest suite on all fleet nodes in echo mode:
 
@@ -123,7 +123,7 @@ ansible-playbook -i inventory.aws_ec2.yml run_tests.yaml --limit replicator
 
 **What it does:**
 1. Ensures `pytest` is installed
-2. Stops `replicator.service` (tests spawn their own echo-mode replicator on port 12345)
+2. Stops `replicator.service` (tests spawn their own echo-mode replicator on port 23456/29000)
 3. Runs `pytest tests/ -v --tb=short`
 4. Always restarts `replicator.service` after tests (even on failure)
 5. Fails the play if any tests failed
@@ -133,9 +133,9 @@ ansible-playbook -i inventory.aws_ec2.yml run_tests.yaml --limit replicator
 Symlink to `../../deploy/ansible/inventory.aws_ec2.yml`. Uses the `amazon.aws.aws_ec2` plugin to discover fleet instances by `Role` tag across `us-east-1` and `eu-west-2`.
 
 Groups:
-- `source` — Role=source
-- `replicator` — Role=replicator
-- `destination` — Role=destination
+- `source` - Role=source
+- `replicator` - Role=replicator
+- `destination` - Role=destination
 
 Auto-selects the SSH key per region (primary vs secondary).
 

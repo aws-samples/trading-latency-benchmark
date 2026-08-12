@@ -33,6 +33,7 @@
 
 #include <arpa/inet.h>
 #include "common/wire.h"   // S1: single source of the on-wire layout
+#include "common/nexthop.h"  // next-hop MAC (gateway when off-subnet)
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
@@ -164,47 +165,6 @@ static bool get_iface_info(const char *iface, iface_info &out)
 }
 
 /* ── ARP MAC resolution ───────────────────────────────────────────────── */
-static bool resolve_mac(const char *dst_ip, const char *iface, uint8_t mac[6])
-{
-	int s = socket(AF_INET, SOCK_DGRAM, 0);
-	if (s < 0) return false;
-	setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, iface, strlen(iface) + 1);
-	struct sockaddr_in a{};
-	a.sin_family = AF_INET;
-	a.sin_port   = htons(9);
-	inet_pton(AF_INET, dst_ip, &a.sin_addr);
-	connect(s, (struct sockaddr *)&a, sizeof(a));
-	send(s, nullptr, 0, 0);
-	close(s);
-
-	// Check the cache BEFORE sleeping, then retry: a warm neighbour entry (the
-	// normal case) costs nothing, and a cold one now gets several attempts
-	// instead of a single check that could miss.
-	for (int attempt = 0; attempt < 21; ++attempt) {
-		if (attempt) usleep(50000);
-
-		FILE *f = fopen("/proc/net/arp", "r");
-		if (!f) { perror("open /proc/net/arp"); return false; }
-
-		char line[256];
-		fgets(line, sizeof(line), f);
-		while (fgets(line, sizeof(line), f)) {
-			char ip[32], hwtype[16], flags[16], hw[32], mask[16], dev[32];
-			if (sscanf(line, "%31s %15s %15s %31s %15s %31s",
-			           ip, hwtype, flags, hw, mask, dev) != 6) continue;
-			if (strcmp(ip, dst_ip) != 0) continue;
-			unsigned int b[6];
-			if (sscanf(hw, "%x:%x:%x:%x:%x:%x",
-			           &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) continue;
-			if ((b[0] | b[1] | b[2] | b[3] | b[4] | b[5]) == 0) break;  // 00:00.. not resolved
-			for (int i = 0; i < 6; i++) mac[i] = (uint8_t)b[i];
-			fclose(f);
-			return true;
-		}
-		fclose(f);
-	}
-	return false;
-}
 
 /*
  * Build the full m2u packet template into buf.
@@ -334,8 +294,8 @@ int main(int argc, char *argv[])
 	/* ── resolve replicator MAC ───────────────────────────────────────────── */
 	uint8_t dst_mac[6];
 	printf("Resolving MAC for %s ...\n", replicator_ip_s);
-	if (!resolve_mac(replicator_ip_s, iface, dst_mac)) {
-		fprintf(stderr, "error: ARP resolution failed for %s\n", replicator_ip_s);
+	if (!afxdp::resolve_next_hop_mac(replicator_ip_s, iface, dst_mac)) {
+		fprintf(stderr, "error: next-hop MAC resolution failed for %s\n", replicator_ip_s);
 		fprintf(stderr, "       ensure replicator is reachable and try again\n");
 		return 1;
 	}

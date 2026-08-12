@@ -16,11 +16,11 @@ const CSS = `
 .cp-panel-title{display:flex;align-items:center;gap:6px;padding:8px 12px;cursor:move;
   user-select:none;border-bottom:1px solid #30363d;background:#0d1117}
 .cp-panel-title:hover{background:#1c2128}
-.cp-panel-caret{font-size:14px;color:#8b949e;margin-right:6px;transition:transform .15s;cursor:pointer;
+.cp-panel-caret{display:inline-block;transition:transform .12s;font-size:18px;color:#8b949e;margin-right:6px;transition:transform .15s;cursor:pointer;
   padding:2px 4px;border-radius:4px}
 .cp-panel-caret:hover{background:rgba(88,166,255,.15);color:#58a6ff}
 .cp-panel-caret.collapsed{transform:rotate(-90deg)}
-.cp-panel-fold-btn{font-size:9px;color:#8b949e;cursor:pointer;user-select:none;padding:0 2px}
+.cp-panel-fold-btn{font-size:18px;line-height:1;color:#8b949e;cursor:pointer;user-select:none;padding:0 2px}
 .cp-panel-fold-btn:hover{color:#e6edf3}
 .cp-panel-body{padding:6px 12px 10px;background:#161b22}
 .cp-panel .row{display:flex;align-items:center;gap:6px;margin:6px 0;flex-wrap:wrap}
@@ -39,19 +39,20 @@ const CSS = `
 .cp-foldall{margin-left:auto;background:transparent;color:#8b949e;border:1px solid #30363d;
   border-radius:7px;padding:5px 10px;cursor:pointer;font:600 13px inherit;line-height:1}
 .cp-foldall:hover{color:#e6edf3;border-color:#8b949e;background:rgba(88,166,255,.12)}
-.cp-lbl{color:#6e7681;font:600 11px inherit;text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
+.cp-lbl{color:#6e7681;font:600 11px inherit;text-transform:uppercase;letter-spacing:.4px;flex-shrink:0;width:76px;display:inline-block;padding-right:10px;box-sizing:border-box}
 .cp-section{color:#e6edf3;font:700 12px inherit;text-transform:uppercase;letter-spacing:.5px}
 .cp-btn-group{display:flex;gap:4px;flex-wrap:nowrap;margin-left:4px}
 .cp-stats{color:#8b949e;font:12px inherit;font-variant-numeric:tabular-nums}
 .cp-stats b{color:#e6edf3}
 .cp-clock{color:#8b949e;font:12px inherit;font-variant-numeric:tabular-nums;flex:1}
-.cp-tz{flex:0 0 auto;width:auto;max-width:150px}
+.cp-tz{flex:0 1 auto;width:auto;min-width:72px;max-width:150px}
 .cp-sel{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:4px 6px;font:12px inherit;flex:1}
 .cp-btn{background:#21262d;color:#adbac7;border:1px solid #30363d;border-radius:6px;
-  padding:4px 8px;cursor:pointer;font:600 12px inherit;transition:background .15s,border-color .15s}
+  padding:4px 8px;cursor:pointer;font:600 12px inherit;transition:background .15s,border-color .15s;text-decoration:none;display:inline-block}
 .cp-btn:hover{background:#30363d;color:#fff}
 .cp-btn:active,.cp-btn.running{background:rgba(240,136,62,.22);color:#f0883e;border-color:#f0883e}
-.cp-btn:disabled{opacity:.4;cursor:not-allowed;color:#6e7681;background:#1a1f26;border-color:#21262d}
+.cp-btn:disabled,.cp-btn.disabled{opacity:.4;cursor:not-allowed;color:#6e7681;background:#1a1f26;border-color:#21262d}
+.cp-btn.disabled:hover{background:#1a1f26;color:#6e7681}
 .cp-btn-sm{padding:3px 7px;font-size:11px}
 .cp-target-info{color:#8b949e;font:12px inherit;flex:1}
 .cp-target-info.active{color:#ffd700}
@@ -62,7 +63,7 @@ const CSS = `
 .cp-cost-hint{color:#f0883e;font:10px inherit;margin-left:4px}
 .cp-icon{background:#21262d;color:#adbac7;border:1px solid #30363d;border-radius:6px;padding:4px 9px;cursor:pointer;font:600 14px inherit;line-height:1;flex:0 0 auto}
 .cp-icon:hover{background:#30363d;color:#fff}
-.cp-num{width:58px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:3px 5px;font:12px inherit}
+.cp-num{width:72px;flex:0 0 72px;box-sizing:border-box;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:3px 5px;font:12px inherit}
 .cp-dim{color:#6e7681;font:11px inherit;margin-left:2px}
 .cp-log-label{color:#6e7681;font:700 10px inherit;letter-spacing:.6px}
 .cp-log-row{display:flex;align-items:center;gap:6px;margin:2px 0 3px}
@@ -74,7 +75,8 @@ const CSS = `
 .cp-hr{height:1px;background:#21262d;margin:4px -12px}
 `;
 
-import { enhancePanel, foldAllPanels, resetAllPanels } from './2d/panels.js';
+import { enhancePanel } from './2d/panels.js';
+import { makeFoldable, setAllFolded } from './fold.js';
 import { esc } from './2d/palette.js';
 import { SCOPES, SCOPE_AMONG, SCOPE_FANOUT, PRESETS, countPairs } from './pairs.js';
 
@@ -103,20 +105,25 @@ export function mountControls(host, opts = {}) {
       <!-- NORMAL mode: View buttons + one-shot Run Tests -->
       <div data-normal>
         <div class="row"><span class="cp-lbl">View</span>
-          <span class="cp-seg" data-view-seg></span>
+          <span class="cp-btn-group" data-view-seg></span>
         </div>
         <div class="cp-hr"></div>
-        <div data-target-block>
-          <div class="row center"><span class="cp-section">Targets</span><span class="cp-panel-caret collapsed" data-fold-targets>\u25B6</span></div>
-          <div data-targets-content style="display:none">
-          <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span></div>
-          <div class="row"><span class="cp-tip" data-target-tip>Mark an instance for a group selection</span></div>
-            <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm cp-cancel" data-cancel-targets title="Clear the target set">Cancel</button></div>
-          <div class="row"><select class="cp-sel" data-scope></select></div>
-          </div>
+      </div>
+
+      <!-- Target block: shared between normal and live modes -->
+      <div data-target-block>
+        <div class="row center"><span class="cp-section">Targets</span><span class="cp-panel-caret collapsed" data-fold-targets>\u2304</span></div>
+        <div data-targets-content style="display:none">
+        <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span></div>
+        <div class="row"><span class="cp-tip" data-target-tip>Mark an instance for a group selection</span></div>
+          <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm cp-cancel" data-cancel-targets title="Clear the target set">Deselect</button></div>
+        <div class="row"><select class="cp-sel" data-scope></select></div>
         </div>
-        <div class="cp-hr"></div>
-        <div class="row center"><span class="cp-section">Test Latency</span><span class="cp-panel-caret collapsed" data-fold-latency>\u25B6</span></div>
+      </div>
+      <div class="cp-hr"></div>
+
+      <div data-normal>
+        <div class="row center"><span class="cp-section">Test Latency</span><span class="cp-panel-caret collapsed" data-fold-latency>\u2304</span></div>
         <div data-latency-content style="display:none">
         <div class="row"><span class="cp-lbl">Packets</span><input class="cp-num" data-count value="10000" title="Measurement packets per pair (100–1,000,000)"></div>
         <div class="row"><span class="cp-lbl">Rate</span><input class="cp-num" data-rate value="10000" title="Ucast send rate (1,000–1,000,000)"><span class="cp-dim">pps</span></div>
@@ -170,6 +177,7 @@ export function mountControls(host, opts = {}) {
       <div class="cp-hr"></div>
       <div class="cp-log-row"><span class="cp-log-label">LOG</span><button class="cp-icon cp-log-dl" data-log-download title="Download the full session ops log">\u2913</button></div>
       <div class="cp-status" data-status></div>
+      <div class="row" style="margin-top:6px"><button class="cp-btn cp-btn-sm" data-cancel-run disabled title="Cancel the in-flight campaign run">Cancel Run</button></div>
     </div>
   `;
   host.appendChild(el);
@@ -182,14 +190,23 @@ export function mountControls(host, opts = {}) {
   const $ = (sel) => el.querySelector(sel);
   const segBtns = [...el.querySelectorAll('[data-mode]')];
   const liveBtn = $('[data-live]');
+  // Fold state for both sections, bound once the markup exists.
+  const foldables = [
+    ['cp-targets', '[data-fold-targets]', '[data-targets-content]'],
+    ['cp-latency', '[data-fold-latency]', '[data-latency-content]'],
+  ].map(([key, btnSel, contentSel]) => makeFoldable(
+    key, $(btnSel), $(contentSel), { defaultFolded: true },
+  ));
+
   const foldAllBtn = $('[data-foldall]');
   // Toggle: 1st click folds EVERY panel (including this control panel); 2nd click
   // restores them ALL to their default position/size/expanded state, regardless
   // of whatever the user changed in between.
   let allFolded = false;
   foldAllBtn.addEventListener('click', () => {
-    if (allFolded) { resetAllPanels(); allFolded = false; foldAllBtn.textContent = '\u29C9'; }
-    else { foldAllPanels(true); allFolded = true; foldAllBtn.textContent = '\u29C7'; }
+    allFolded = !allFolded;
+    setAllFolded(allFolded);
+    foldAllBtn.textContent = allFolded ? '\u29C7' : '\u29C9';
   });
   const viewSeg = $('[data-view-seg]');
   const statsEl = $('[data-stats]');
@@ -219,18 +236,15 @@ export function mountControls(host, opts = {}) {
   let activeViewKind = null;
   const renderViewButtons = (kinds, sel) => {
     lastCombos = kinds; lastSel = sel;
-    // Anchors, not buttons: a button plus window.open can be redirected into the
-    // CURRENT tab by the browser's popup settings, which rewrote this page's URL.
-    // target=_blank on a real link always opens a tab and never navigates here.
-    // Both kinds are always rendered; one without data is disabled, so the panel
-    // states what exists rather than hiding it.
+    // Anchors styled identically to the .cp-btn mode buttons below. A disabled
+    // anchor (no data yet) matches the disabled button appearance.
     const have = new Set((kinds || []).map((c) => c.kind));
     viewSeg.innerHTML = ['ucast', 'mcast'].map((k) => {
       const on = have.has(k);
       return on
-        ? `<a data-view-btn="${esc(k)}" href="?report=${esc(k)}" target="_blank" rel="noopener"`
+        ? `<a data-view-btn="${esc(k)}" class="cp-btn" href="?report=${esc(k)}" target="_blank" rel="noopener"`
           + ` title="Open the ${esc(k)} report in a new tab">${esc(k)}</a>`
-        : `<a data-view-btn="${esc(k)}" class="disabled" aria-disabled="true"`
+        : `<a data-view-btn="${esc(k)}" class="cp-btn disabled" aria-disabled="true"`
           + ` title="No ${esc(k)} results yet">${esc(k)}</a>`;
     }).join('');
     viewSeg.querySelectorAll('a.disabled').forEach((a) => {
@@ -247,11 +261,15 @@ export function mountControls(host, opts = {}) {
   const paintLive = () => { liveBtn.classList.toggle('on', liveOn); liveBtn.textContent = liveOn ? '\u25CF Live' : 'Live'; };
   // Live mode swaps the panel body: hide the Show row + one-shot Run Tests, show
   // the heartbeat section (distinct settings). Clears any active heartbeat on exit.
+  // Sections bind eagerly below; this only re-asserts after a repaint.
+  function applyFoldState() { foldables.forEach((f) => f.apply()); }
+
   function syncSections() {
-    const nrm = $('[data-normal]'), lv = $('[data-live-section]');
-    if (nrm) nrm.style.display = liveOn ? 'none' : '';
+    el.querySelectorAll('[data-normal]').forEach((n) => { n.style.display = liveOn ? 'none' : ''; });
+    const lv = $('[data-live-section]');
     if (lv) lv.style.display = liveOn ? '' : 'none';
     if (!liveOn && activeHb) { activeHb.classList.remove('running'); activeHb = null; }
+    applyFoldState();
   }
   paintMode(); paintLive(); syncSections();
 
@@ -261,10 +279,12 @@ export function mountControls(host, opts = {}) {
   // orange; every other run button is disabled (gray) until the run finishes.
   const runBtns = [...el.querySelectorAll('[data-run-ucast],[data-run-mcast]')];
   let activeRunBtn = null;
+  const cancelRunBtn = $('[data-cancel-run]');
   const endRunUI = () => {
     if (activeRunBtn) activeRunBtn.classList.remove('running');
     activeRunBtn = null;
     runBtns.forEach((b) => { b.disabled = false; });
+    if (cancelRunBtn) cancelRunBtn.disabled = true;
   };
   const startRun = (btn, payload) => {
     if (activeRunBtn === btn) {          // second press on the active button = cancel
@@ -274,10 +294,17 @@ export function mountControls(host, opts = {}) {
     }
     if (activeRunBtn) return;            // a run is active — others are disabled anyway
     activeRunBtn = btn;
-    btn.classList.add('running');                                  // active = orange
-    runBtns.forEach((b) => { if (b !== btn) b.disabled = true; });  // others gray + disabled
+    btn.classList.add('running');
+    runBtns.forEach((b) => { if (b !== btn) b.disabled = true; });
+    if (cancelRunBtn) cancelRunBtn.disabled = false;
     onRun && onRun(payload);
   };
+  // Cancel Run button handler
+  if (cancelRunBtn) {
+    cancelRunBtn.addEventListener('click', () => {
+      if (!cancelRunBtn.disabled) { onRun && onRun(null); endRunUI(); }
+    });
+  }
 
   el.querySelectorAll('[data-run-ucast]').forEach((b) => b.addEventListener('click', () => {
     startRun(b, { kind: 'ucast', variation: b.dataset.runUcast, count: clamp(num('[data-count]'), 100, 1000000), rate: clamp(num('[data-rate]'), 1000, 1000000), warmup: clamp(num('[data-warmup]'), 0, 100000), max_parallel: clamp(num('[data-max-parallel]'), 1, 100), max_loss_pct: clamp(numf('[data-max-loss]', 2), -1, 100) });
@@ -325,14 +352,20 @@ export function mountControls(host, opts = {}) {
   }));
 
   let _lastTargetState = { count: 0, pairs: 0, scope: 'among', totalNodes: 0 };
+  const scopeRow = scopeSel.closest('.row');
+  if (scopeRow) scopeRow.style.display = 'none'; // hidden until selection exists
   const paintTargetBlock = ({ count, pairs, scope: sc, totalNodes, preset }) => {
     _lastTargetState = { count, pairs, scope: sc, totalNodes, preset };
+    // Show the scope dropdown only when there is a selection
+    if (scopeRow) scopeRow.style.display = count > 0 ? '' : 'none';
     // Each preset expands the marked instance into its group, so there is
-    // nothing for them to act on until an instance is marked.
+    // nothing for them to act on until an instance is marked - EXCEPT 'all'
+    // which selects every online node regardless of anchor.
     el.querySelectorAll('[data-preset]').forEach((b) => {
-      b.disabled = count === 0;
+      const isAll = b.dataset.preset === 'all';
+      b.disabled = isAll ? false : count === 0;
       b.classList.toggle('on', !!preset && b.dataset.preset === preset);
-      b.title = count === 0
+      b.title = (!isAll && count === 0)
         ? 'Mark an instance first'
         : `Select every instance in the same ${b.textContent.trim()} as the marked one`;
     });
@@ -350,29 +383,10 @@ export function mountControls(host, opts = {}) {
     }
   };
 
-  // ── Test Latency fold toggle ────────────────────────────────────────────────
-  const foldTargetsBtn = $('[data-fold-targets]');
-  const targetsContent = $('[data-targets-content]');
-  if (foldTargetsBtn && targetsContent) {
-    foldTargetsBtn.addEventListener('click', () => {
-      const hidden = targetsContent.style.display === 'none';
-      targetsContent.style.display = hidden ? '' : 'none';
-      foldTargetsBtn.classList.toggle('collapsed', !hidden);
-      foldTargetsBtn.textContent = hidden ? '\u25BC' : '\u25B6';
-    });
-  }
-  const foldLatencyBtn = $('[data-fold-latency]');
-  const latencyContent = $('[data-latency-content]');
-  if (foldLatencyBtn && latencyContent) {
-    foldLatencyBtn.addEventListener('click', () => {
-      const hidden = latencyContent.style.display === 'none';
-      latencyContent.style.display = hidden ? '' : 'none';
-      foldLatencyBtn.classList.toggle('collapsed', !hidden);
-      foldLatencyBtn.textContent = hidden ? '\u25BC' : '\u25B6';
-    });
-  }
+  // ── Fold state persistence (localStorage) ────────────────────────────────
 
   // ── Live heartbeat: choose a mode -> App re-runs it every interval (min 30s) ──
+  let _targetIds = new Set();
   const hbIntervalSec = () => {
     const input = $('[data-hb-interval]');
     let v = parseInt(input.value, 10) || 30;
@@ -383,9 +397,8 @@ export function mountControls(host, opts = {}) {
     if (activeHb === btn) { btn.classList.remove('running'); activeHb = null; onHeartbeat && onHeartbeat(null); return; }
     if (activeHb) activeHb.classList.remove('running');
     btn.classList.add('running'); activeHb = btn;
-    // Heartbeat is a frequent liveness pulse — a small packet count keeps each
-    // tick quick and resource-light (one-shot Test Latency uses the larger 5000).
-    const params = { count: 1000, rate: 20000, warmup: 500, interval_us: 100, timeout_sec: 25, intervalSec: hbIntervalSec() };
+    const params = { count: 1000, rate: 20000, warmup: 500, interval_us: 100, timeout_sec: 25, intervalSec: hbIntervalSec(),
+      nodes: [..._targetIds], scope: scopeSel.value || 'among' };
     onHeartbeat && onHeartbeat({ ...sel, ...params });
   };
   el.querySelectorAll('[data-hb-ucast]').forEach((b) => b.addEventListener('click', () => hbClick(b, { kind: 'ucast', variation: b.dataset.hbUcast })));
@@ -410,7 +423,7 @@ export function mountControls(host, opts = {}) {
     opsLog() { return opsLog.slice(); },
     endRun() { endRunUI(); },
     setStats({ nodes = 0, online = 0, edges = 0 } = {}) {
-      statsEl.innerHTML = `<b>${online}</b>/${nodes} online &middot; <b>${edges}</b> edges`;
+      statsEl.innerHTML = `<b>${online}</b>/${nodes} online &middot; <b>${edges}</b> links`;
     },
     // Populate the Show dropdown with saved-run browse results (dev-only API).
     setResults(runs) {
@@ -418,8 +431,16 @@ export function mountControls(host, opts = {}) {
       if (!runs || !runs.length) return;
     },
     // kinds: [{kind,unix}]; sel: {kind,variation} currently shown
-    setCombos(kinds, sel) { renderViewButtons(kinds, sel); },
+    setCombos(kinds, sel) { renderViewButtons(kinds, sel);   applyFoldState();
+    },
     setTargets(state) { paintTargetBlock(state); },
+    setTargetIds(ids) { _targetIds = ids || new Set();   applyFoldState();
+    },
+    startRunUI() {
+      // Mark cancel-run as enabled (for external callers / testing).
+      if (cancelRunBtn) cancelRunBtn.disabled = false;
+      runBtns.forEach((b) => { b.disabled = true; });
+    },
     dispose() { el.remove(); },
   };
 }

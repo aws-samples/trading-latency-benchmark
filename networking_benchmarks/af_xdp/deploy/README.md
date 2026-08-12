@@ -24,9 +24,9 @@ Fleet agents connect **outbound** to the control-plane's NATS endpoint (discover
 deploy/
 ├── assets/                SVG diagrams (referenced by markdown docs)
 ├── cdk/                   CDK infrastructure (Fleet + AMI Builder + Control Plane stacks)
-│   ├── bin/app.ts         Entry point — deployment type routing
+│   ├── bin/app.ts         Entry point - deployment type routing
 │   ├── lib/               Stack constructs (FleetStack, AmiBuilderStack, ControlPlaneStack)
-│   ├── scenarios/         Pre-built fleet topologies (ucast/ + mcast/)
+│   ├── scenarios/         Pre-built fleet topologies (u-*, m-*, all)
 │   └── scripts/           AMI bake script (configs, binaries, systemd)
 │
 └── ansible/               Runtime/benchmark playbooks + shared inventory
@@ -42,14 +42,14 @@ Dev/iteration tooling lives outside deploy/, under af_xdp/dev/:
     └── ansible/           provision.yaml, sync.yaml, run_tests.yaml (+ inventory symlink)
 ```
 
-## Quick Start (recommended — `afxdpctl`)
+## Quick Start (recommended - `afxdpctl`)
 
 The `afxdpctl` CLI (at `control-plane/cmd/afxdpctl`) is the recommended single entrypoint for the full lifecycle:
 
 ```bash
 # 1. Deploy everything (control-plane + optional AMI bake + fleet)
 afxdpctl up --key virginia --git-repo <repo-url> --git-ref main \
-            --scenario ucast/az-cpg-3 --bake
+            --scenario u-cpg-3 --bake
 
 # 2. Hot-deploy local code changes
 afxdpctl sync --key ~/.ssh/virginia.pem --region us-east-1
@@ -63,7 +63,7 @@ afxdpctl run mcast copy,inplace,kernel
 afxdpctl report -o results.html
 
 # 5. Tear down
-afxdpctl down --key virginia --scenario ucast/az-cpg-3
+afxdpctl down --key virginia --scenario u-cpg-3
 ```
 
 ## Manual Deployment Flow
@@ -83,9 +83,9 @@ npx cdk deploy --context deploymentType=control-plane \
                --context keyPairName=virginia \
                --context gitRepo=<repo-url> --context gitRef=main
 
-# 3. Deploy fleet (instant readiness — AMI resolved from SSM)
+# 3. Deploy fleet (instant readiness - AMI resolved from SSM)
 npx cdk deploy --context keyPairName=virginia \
-               --context scenario=ucast-az-cpg-3
+               --context scenario=u-cpg-3
 
 # 4. Run benchmarks
 ansible-playbook -i ../ansible/inventory.aws_ec2.yml ../ansible/run_ucast.yaml
@@ -94,9 +94,9 @@ ansible-playbook -i ../ansible/inventory.aws_ec2.yml ../ansible/run_ucast.yaml
 ### Development (stock AL2023)
 
 ```bash
-# 1. Deploy fleet (stock AMI — skips SSM; needs ansible provisioning)
+# 1. Deploy fleet (stock AMI - skips SSM; needs ansible provisioning)
 npx cdk deploy --context keyPairName=virginia \
-               --context scenario=ucast-az-cpg-3 \
+               --context scenario=u-cpg-3 \
                --context amiId=resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 
 # 2. Provision instances (~8 min)
@@ -107,7 +107,7 @@ ansible-playbook -i inventory.aws_ec2.yml provision.yaml
 ansible-playbook -i inventory.aws_ec2.yml sync.yaml
 ```
 
-### Self-hosted (BYOI — no CDK)
+### Self-hosted (BYOI - no CDK)
 
 Tag your instances with `Role: source|replicator|destination`, ensure SSH + intra-fleet connectivity, then:
 
@@ -134,7 +134,7 @@ Assigned via CDK fleet spec `role` field (or manual EC2 tags for BYOI), used as 
 | `replicator` | Packet replicator (AF_XDP or kernel) | Replicator in echo-mode |
 | `destination` | Latency measurement endpoint | Replicator in echo-mode |
 
-All nodes boot the same AMI — role determines topology wiring at runtime (via ansible or the control plane).
+All nodes boot the same AMI - role determines topology wiring at runtime (via ansible or the control plane).
 
 ## Instance Sizing (cost vs cores)
 
@@ -142,14 +142,14 @@ The CDK **scenarios pick the instance type per workload** (via the `FleetEntry.t
 
 | Workload | Instance | Online cores | Datapath cores needed | Fits? |
 |----------|----------|:------------:|-----------------------|:-----:|
-| **mcast** | `c7i.2xlarge` | 4 (0-3) | 3 — OS + IRQ + 1 app | ✅ |
-| **ucast** | `c7i.4xlarge` | 8 (0-7) | 5 — OS + IRQ + replicator-poll + rtt-send + rtt-recv | ✅ |
+| **mcast** | `c7i.2xlarge` | 4 (0-3) | 3 - OS + IRQ + 1 app | ✅ |
+| **ucast** | `c7i.4xlarge` | 8 (0-7) | 5 - OS + IRQ + replicator-poll + rtt-send + rtt-recv | ✅ |
 
 Core pinning is derived dynamically at runtime from the isolated set, so **one AMI serves all instance sizes**.
 
 ## Key Decisions
 
-- **Universal AMI:** One AMI for all roles — no per-role variants needed
+- **Universal AMI:** One AMI for all roles - no per-role variants needed
 - **Replicator on boot:** Every instance starts `replicator.service` in unicast mode by default
 - **Mode switching:** `/etc/default/replicator` controls mode (kernel/ucast/mcast)
 - **Control-plane agent baked in:** The Go agent is built into the AMI; failure is FATAL (fails the bake)
@@ -157,9 +157,9 @@ Core pinning is derived dynamically at runtime from the isolated set, so **one A
 
 ## Documentation
 
-- [CDK README](cdk/README.md) — stacks, parameters, fleet spec, scenarios
-- [CDK lib/ README](cdk/lib/README.md) — FleetStack + AmiBuilderStack + ControlPlaneStack internals
-- [Scenarios README](cdk/scenarios/README.md) — topology table, custom format
-- [Scripts README](cdk/scripts/README.md) — bake-ami.sh flow, configs applied
-- [Ansible README](ansible/README.md) — playbooks, inventory, variables
-- [Dev README](../dev/README.md) — Docker build, sync, provision, test iteration
+- [CDK README](cdk/README.md) - stacks, parameters, fleet spec, scenarios
+- [CDK lib/ README](cdk/lib/README.md) - FleetStack + AmiBuilderStack + ControlPlaneStack internals
+- [Scenarios README](cdk/scenarios/README.md) - topology table, custom format
+- [Scripts README](cdk/scripts/README.md) - bake-ami.sh flow, configs applied
+- [Ansible README](ansible/README.md) - playbooks, inventory, variables
+- [Dev README](../dev/README.md) - Docker build, sync, provision, test iteration

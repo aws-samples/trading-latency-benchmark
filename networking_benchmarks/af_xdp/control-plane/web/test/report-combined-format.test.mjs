@@ -143,7 +143,7 @@ test('clicking src IP column selects source (sel-src), not destination', () => {
 
 // --- (5) Best/worst colouring ---
 
-test('best (min) value in measurement columns is green, worst (max) is red', () => {
+test('best (min) value in measurement columns is gold, worst (max) is red', () => {
   // Use views with varying latencies so min != max
   const vs = [
     view('ucast', 'kernel', [[0, 1, 20], [1, 0, 50], [0, 2, 35]], 2000),
@@ -158,12 +158,12 @@ test('best (min) value in measurement columns is green, worst (max) is red', () 
   assert.ok(p50idx >= 0);
   // Gather styles
   const p50cells = rows.map((r) => r.cells[p50idx]);
-  const greenCell = p50cells.find((c) => /color:\s*green/i.test(c.getAttribute('style') || ''));
+  const goldCell = p50cells.find((c) => /color:\s*rgb\(57,\s*211,\s*83\)/i.test(c.getAttribute('style') || ''));
   const redCell = p50cells.find((c) => /color:\s*red/i.test(c.getAttribute('style') || ''));
-  assert.ok(greenCell, 'the minimum p50 cell must be green');
+  assert.ok(goldCell, 'the minimum p50 cell must be gold');
   assert.ok(redCell, 'the maximum p50 cell must be red');
-  // Verify the green is actually the min and red is the max
-  assert.match(greenCell.textContent, /20/, 'green cell should be the min value (20)');
+  // Verify the gold is actually the min and red is the max
+  assert.match(goldCell.textContent, /20/, 'gold cell should be the min value (20)');
   assert.match(redCell.textContent, /50/, 'red cell should be the max value (50)');
 });
 

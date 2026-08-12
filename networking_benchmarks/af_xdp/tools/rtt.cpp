@@ -108,6 +108,7 @@
 #include <net/if.h>
 #include <immintrin.h>  // _mm_pause for busy-poll spin
 #include "common/wire.h"   // S1: single source of the on-wire layout
+#include "common/nexthop.h"  // next-hop MAC (gateway when off-subnet)
 
 #include "common/ControlPort.hpp"
 
@@ -161,8 +162,15 @@ public:
         if (!get_iface_info(iface.c_str(), src)) { err = "get_iface_info failed for " + iface; return false; }
 
         uint8_t dst_mac[6];
-        if (!resolve_mac(dst_ip.c_str(), iface.c_str(), dst_mac)) {
-            err = "ARP resolution failed for " + dst_ip; return false;
+        char next_hop[INET_ADDRSTRLEN] = {0};
+        if (!afxdp::resolve_next_hop_mac(dst_ip.c_str(), iface.c_str(), dst_mac,
+                                         next_hop, sizeof(next_hop))) {
+            err = "next-hop MAC resolution failed for " + dst_ip
+                + " (next hop " + next_hop + ")";
+            return false;
+        }
+        if (strcmp(next_hop, dst_ip.c_str()) != 0) {
+            printf("  off-subnet destination: addressing frames to gateway %s\n", next_hop);
         }
 
         uint32_t dst_ip_nbo = 0;
@@ -365,42 +373,6 @@ private:
         else ok = false;
         ::close(s);
         return ok;
-    }
-
-    static bool resolve_mac(const char* dst_ip, const char* iface, uint8_t mac[6]) {
-        // Trigger neighbour resolution, then read /proc/net/arp.
-        int s = socket(AF_INET, SOCK_DGRAM, 0);
-        if (s >= 0) {
-            setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, iface, strlen(iface) + 1);
-            struct sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(9);
-            inet_pton(AF_INET, dst_ip, &a.sin_addr);
-            connect(s, (struct sockaddr*)&a, sizeof(a));
-            ::send(s, nullptr, 0, 0);
-            ::close(s);
-        }
-        // Check the cache BEFORE sleeping: in a benchmark the neighbour entry is
-        // almost always already resolved, so a wait-then-check loop would pay a
-        // fixed 50ms on every invocation for nothing.
-        for (int attempt = 0; attempt < 21; ++attempt) {
-            if (attempt) usleep(50000);
-            FILE* f = fopen("/proc/net/arp", "r");
-            if (!f) return false;
-            char line[256]; fgets(line, sizeof(line), f);  // header
-            bool found = false;
-            while (fgets(line, sizeof(line), f)) {
-                char ip[64], hw[64], t[64], fl[64], m[64], dev[64];
-                if (sscanf(line, "%63s %63s %63s %63s %63s %63s", ip, t, fl, hw, m, dev) != 6) continue;
-                if (strcmp(ip, dst_ip) != 0) continue;
-                unsigned b[6];
-                if (sscanf(hw, "%x:%x:%x:%x:%x:%x", &b[0],&b[1],&b[2],&b[3],&b[4],&b[5]) != 6) continue;
-                if ((b[0]|b[1]|b[2]|b[3]|b[4]|b[5]) == 0) break;  // 00:00.. → not resolved yet
-                for (int i = 0; i < 6; i++) mac[i] = (uint8_t)b[i];
-                found = true; break;
-            }
-            fclose(f);
-            if (found) return true;
-        }
-        return false;
     }
 
     static int build_udp_pkt(uint8_t* buf, int max_buf, const iface_info& src,
