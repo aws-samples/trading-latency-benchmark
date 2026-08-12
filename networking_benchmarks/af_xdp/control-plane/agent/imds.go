@@ -84,6 +84,10 @@ func gatherNodeInfo() proto.NodeInfo {
 		Stack:          c.get("/meta-data/tags/instance/aws:cloudformation:stack-name"),
 		Hostname:       host,
 	}
+	// VPC ID: available via the primary ENI's MAC address metadata path.
+	if mac := c.get("/meta-data/mac"); mac != "" {
+		n.VpcID = c.get("/meta-data/network/interfaces/macs/" + mac + "/vpc-id")
+	}
 	return n
 }
 

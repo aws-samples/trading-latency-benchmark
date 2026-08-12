@@ -4,12 +4,20 @@
 plugin: amazon.aws.aws_ec2
 
 # Dynamic inventory from EC2 tags set by FleetStack.
-# Discovers both the primary (us-east-1) and secondary (eu-west-2) regions so a
-# single run covers cross-region topologies. Single-region runs just get an
-# empty result from the other region (harmless).
+#
+# Region(s) are determined by environment variables — set them to match your
+# CDK deploy context rather than hardcoding:
+#
+#   AWS_DEFAULT_REGION   — primary fleet region (required; e.g. eu-central-1)
+#   AWS_SECONDARY_REGION — second region for cross-region topologies (optional)
+#
+# The secondary region is supported via a companion inventory file:
+#   ansible-playbook -i inventory.aws_ec2.yml [-i inventory_secondary.aws_ec2.yml] ...
+#
+# For a single-region fleet (the common case):
+#   AWS_DEFAULT_REGION=eu-central-1 ansible-playbook -i inventory.aws_ec2.yml sync.yaml
 regions:
-  - us-east-1
-  - eu-west-2
+  - "{{ lookup('env', 'AWS_DEFAULT_REGION') | default('us-east-1', true) }}"
 
 include_filters:
   - tag:Role:
@@ -23,10 +31,7 @@ hostnames:
 compose:
   ansible_host: public_ip_address
   ansible_user: "'ec2-user'"
-  # Per-region key: eu-west-2 nodes use SSH_KEY_FILE_SECONDARY (e.g. london.pem),
-  # everything else uses SSH_KEY_FILE (e.g. virginia.pem). Selected by AZ prefix
-  # so single-region runs (only SSH_KEY_FILE set) keep working unchanged.
-  ansible_ssh_private_key_file: "('eu-west-2' in placement.availability_zone) | ternary(lookup('env', 'SSH_KEY_FILE_SECONDARY'), lookup('env', 'SSH_KEY_FILE'))"
+  ansible_ssh_private_key_file: "{{ lookup('env', 'SSH_KEY_FILE') }}"
 
 groups:
   source:       "tags.Role == 'source'"

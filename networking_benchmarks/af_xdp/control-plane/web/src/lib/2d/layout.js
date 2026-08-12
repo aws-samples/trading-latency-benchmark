@@ -1,6 +1,7 @@
 // 2d/layout.js — SMACOF MDS layout + AZ-row alignment for the 2D map.
 
 import { nodeRadius } from './palette.js';
+import { separateHierarchy } from '../grouplayout.js';
 
 // Uniform latency→distance curve (replaces the old per-pair intra/inter split).
 // At/below KNEE µs the mapping is 1:1 linear, so small differences in the
@@ -59,44 +60,54 @@ export function computePositions(ctx) {
   }
   const stress = stressDen > 0 ? Math.sqrt(stressNum / stressDen) : 0;
 
-  // Arrange AZ clusters left→right in a horizontal row (all aligned on CY so the
-  // boxes are level). Inter-AZ spacing is DYNAMIC: the centre-to-centre distance
-  // is the representative cross-AZ latency mapped through the same latDist × scale
-  // as intra-AZ edges, clamped only so boxes never overlap.
-  const azMap = {};
-  fleet.nodes.forEach((n, i) => { const a = n.az || 'z'; (azMap[a] = azMap[a] || []).push(i); });
-  const azKeys = Object.keys(azMap).sort();
-  if (azKeys.length > 1) {
-    const blocks = azKeys.map(a => {
-      const idx = azMap[a]; let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity;
-      idx.forEach(i => { const rr = nodeRadius(fleet.nodes[i]), p = result[i];
-        mnx = Math.min(mnx, p.x - rr); mxx = Math.max(mxx, p.x + rr); mny = Math.min(mny, p.y - rr); mxy = Math.max(mxy, p.y + rr); });
-      return { idx, cx: (mnx + mxx) / 2, cy: (mny + mxy) / 2, halfW: (mxx - mnx) / 2 };
-    });
-    // mean cross-AZ p50 between two clusters (both directions)
-    const interLat = (A, B) => {
-      let s = 0, c = 0;
-      A.idx.forEach(i => B.idx.forEach(j => {
-        const ab = matrix[i] && matrix[i][j], ba = matrix[j] && matrix[j][i];
-        if (ab) { s += ab.p50; c++; } if (ba) { s += ba.p50; c++; }
-      }));
-      return c ? s / c : 100;
-    };
-    const MARGIN = 24;   // min px between adjacent boxes (overlap guard only)
-    const centers = [0];
-    for (let k = 1; k < blocks.length; k++) {
-      const want = latDist(interLat(blocks[k - 1], blocks[k])) * scale;        // latency-proportional
-      const minSep = blocks[k - 1].halfW + blocks[k].halfW + MARGIN;           // no-overlap floor
-      centers.push(centers[k - 1] + Math.max(want, minSep));
+  // Group-aware separation (B+E): after the latency layout, rigidly push apart
+  // sibling groups per tier (Account ⊃ Region ⊃ VPC ⊃ AZ) so the nested contour
+  // boxes never intersect. Clusters move as rigid blocks — intra-group latency
+  // shape is preserved; only inter-group distance is traded for cleanliness.
+  // Per-tier "mandatory distance" between sibling containers DIMINISHES by tier —
+  // account gets the full separation, region 80%, vpc 50%, az 35% — so the outer
+  // structure reads clearly without flinging inner groups apart (composition
+  // cohesion). Floored at 2·pad + margin so contour boxes never overlap.
+  // Contour pads: account 46, region 34, vpc 22, az 10 (PAD_BASE 10, STEP 12).
+  // PG (5th tier) has no 2D contour — its gap just spaces PG groups within an AZ.
+  const pads = [46, 34, 22, 10, 8];             // [account, region, vpc, az, pg] — sync with contours.js
+  const ratio = [1.0, 0.8, 0.5, 0.35, 0.22];    // diminishing distance by tier
+  const SEP = 215;                              // base (account) separation
+  const R = nodeRadius();
+  const gaps = pads.map((p, d) => Math.max(SEP * ratio[d], 2 * p + 24));
+  const pts = result.map((p) => [p.x, p.y]);
+  separateHierarchy(fleet.nodes, pts, 2, R, gaps);
+  result.forEach((p, i) => { p.x = pts[i][0]; p.y = pts[i][1]; });
+  // ── Node collision resolution: push apart any individual nodes whose bodies
+  // overlap after the group separation. The hierarchy pass guarantees GROUP
+  // boxes don't intersect, but within a group (same PG) nodes can still land on
+  // top of each other when the MDS distances collapse (e.g. p50 ≈ equal for all
+  // pairs in a cluster PG). This is a simple O(N²) iterative push — cheap for
+  // fleet sizes (<100 nodes, <5 iterations).
+  const R2 = nodeRadius() * 2 + 6; // min centre-to-centre distance (2 radii + gap)
+  for (let iter = 0; iter < 10; iter++) {
+    let nudged = false;
+    for (let i = 0; i < result.length; i++) {
+      for (let j = i + 1; j < result.length; j++) {
+        const dx = result[j].x - result[i].x, dy = result[j].y - result[i].y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < R2) {
+          const push = (R2 - dist) / 2 + 1;
+          const nx = dist > 0.01 ? dx / dist : 1, ny = dist > 0.01 ? dy / dist : 0;
+          result[i].x -= nx * push; result[i].y -= ny * push;
+          result[j].x += nx * push; result[j].y += ny * push;
+          nudged = true;
+        }
+      }
     }
-    const rowMid = (centers[0] + centers[centers.length - 1]) / 2;
-    blocks.forEach((b, k) => { const dx = CX + (centers[k] - rowMid) - b.cx, dy = CY - b.cy; b.idx.forEach(i => { result[i].x += dx; result[i].y += dy; }); });
-    // shrink toward center if the row overflows the viewport
-    let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity;
-    result.forEach((p, i) => { const rr = nodeRadius(fleet.nodes[i]); mnx = Math.min(mnx, p.x - rr); mxx = Math.max(mxx, p.x + rr); mny = Math.min(mny, p.y - rr); mxy = Math.max(mxy, p.y + rr); });
-    const fitK = Math.min(1, (W - 160) / ((mxx - mnx) || 1), (H - 160) / ((mxy - mny) || 1));
-    if (fitK < 1) result.forEach(p => { p.x = CX + (p.x - CX) * fitK; p.y = CY + (p.y - CY) * fitK; });
+    if (!nudged) break;
   }
+  // Re-centre + fit to the viewport (separation may have spread things out).
+  let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity;
+  result.forEach((p, i) => { const rr = nodeRadius(fleet.nodes[i]); mnx = Math.min(mnx, p.x - rr); mxx = Math.max(mxx, p.x + rr); mny = Math.min(mny, p.y - rr); mxy = Math.max(mxy, p.y + rr); });
+  const gcx = (mnx + mxx) / 2, gcy = (mny + mxy) / 2;
+  const fitK = Math.min(1, (W - 200) / ((mxx - mnx) || 1), (H - 200) / ((mxy - mny) || 1));
+  result.forEach((p) => { p.x = CX + (p.x - gcx) * fitK; p.y = CY + (p.y - gcy) * fitK; });
 
   return { positions: result, stress };
 }

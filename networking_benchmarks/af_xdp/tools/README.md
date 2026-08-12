@@ -26,7 +26,20 @@ Plus two utilities: `replicator_ctl` (control-protocol CLI) and `udp_send`
 
 - **[R1] Self-registration** — `rtt` sends `CTRL_ADD_DESTINATION` to the
   replicator's control port (`AFXDP_CONTROL_PORT`, default 12345) so the echo
-  comes back to it. On exit it removes itself.
+  comes back to it. It deregisters (`CTRL_REMOVE_DESTINATION`) via an `atexit`
+  handler, which also covers the SIGINT/SIGTERM path (those only clear the run
+  flag and return through a normal exit). A `SIGKILL` cannot run `atexit`, so
+  the orchestrator additionally issues `purge_dests` to every node in the ucast
+  prepare phase as a belt-and-braces cleanup.
+
+  **Why a stale registration is not merely untidy:** in unicast mode the
+  replicator fans out each received packet to *every* registered destination,
+  with the intended reply sent last in the loop. One leaked registration per
+  peer that ever measured against a node therefore adds a constant per-packet
+  cost to that node's echo path — which presents as a whole-distribution shift
+  (p50 ≈ p90 ≈ p99, tight spread) that grows across consecutive campaigns and
+  reaches milliseconds. Always confirm `replicator_ctl <ip> list` is empty
+  before trusting a result.
 - **[R2] Pacing** — `clock_nanosleep(TIMER_ABSTIME)` fires each send at an
   absolute deadline (target rate), eliminating cumulative drift/jitter that a
   relative `sleep` would accrue.
@@ -65,6 +78,21 @@ Plus two utilities: `replicator_ctl` (control-protocol CLI) and `udp_send`
   are discarded, then min/mean/p50/p90/p95/p99/p99.9/max are written as
   `service_rtt_us` alongside `messages, warmup, rate_mps, lost, loss_pct,
   timestamp_rx, timestamp_tx, tx_path`. Exit code 1 if >10% packet loss.
+
+**Loss invalidates percentiles — treat `loss_pct` as a validity flag, not a
+footnote.** Every percentile is computed *only* over datagrams that came back.
+A run losing X% therefore reports the latency distribution of the surviving
+(100−X)%, which is not a random sample: it silently omits exactly the packets
+whose fate you care about. Two runs with different loss are not comparable at
+all, so a "slower p50" can be pure survivorship bias rather than a real cost.
+
+The orchestrator enforces this with a **loss gate**: `max_loss_pct` (default
+2%, `-max-loss` in `afxdpctl`, "Max loss" in the web UI) makes the agent reject
+the measurement outright when loss exceeds the threshold. A rejected pair is
+recorded as a *failure* — no metrics reach the collector — so the report shows
+a blank cell and a coverage note instead of a plausible-looking wrong number.
+Set `-1` to disable, which is only appropriate when deliberately characterising
+loss itself.
 
 **Why kernel is not slower than AF_XDP at QD=1 (one packet in flight):**
 
@@ -111,6 +139,26 @@ Plus two utilities: `replicator_ctl` (control-protocol CLI) and `udp_send`
   PHC `/dev/ptp0` + chrony, ~µs). `mcast_receive` counts **negative hop2** /
   **negative total** samples as a live clock-skew diagnostic and reports
   percentiles (p50…max) to stdout and `-j` JSON.
+
+---
+
+## Unicast RTT variations
+
+The `rtt` tool supports four variations that control which transport is used on
+the **client side** (sender/receiver). In all cases, the remote replicator echoes
+via AF_XDP — so the variation isolates the client's TX/RX path contribution:
+
+| Variation | Client TX | Client RX | Remote echo | What it measures |
+|-----------|-----------|-----------|-------------|------------------|
+| `kernel` | kernel `sendto()` | kernel `recvfrom()` | AF_XDP | Full kernel socket overhead (both legs) + AF_XDP echo |
+| `xdp-tx` | AF_XDP (queue 1) | kernel `recvfrom()` | AF_XDP | XDP-bypassed TX vs kernel RX — isolates TX contribution |
+| `xdp-rx` | kernel `sendto()` | AF_XDP | AF_XDP | Kernel TX vs XDP-bypassed RX — isolates RX contribution |
+| `xdp-txrx` | AF_XDP TX | AF_XDP RX | AF_XDP | Full XDP bypass both legs — the lowest achievable RTT |
+
+**When to use each:**
+- `kernel` — baseline; represents the path a real application using standard sockets would see.
+- `xdp-tx` / `xdp-rx` — diagnostic: shows whether TX or RX dominates the kernel overhead.
+- `xdp-txrx` — floor; the minimum RTT achievable on this hardware/placement.
 
 ---
 

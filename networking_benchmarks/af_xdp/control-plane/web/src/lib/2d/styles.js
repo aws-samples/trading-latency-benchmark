@@ -2,7 +2,9 @@
 // so they never collide with the 3D app.css). Injected once by index.js.
 
 export const CSS = `
-.t2d-root { position: absolute; inset: 0; width: 100%; height: 100%; }
+.t2d-root { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; }
+/* Pannable map layer — translated on drag; panels sit above it in .t2d-root. */
+.t2d-root .t2d-viewport { position: absolute; inset: 0; transform-origin: 0 0; }
 .t2d-root svg.edges { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
 
 /* ── Edge labels ── */
@@ -31,7 +33,8 @@ export const CSS = `
 .t2d-root .node .pg-badge { position: absolute; top: -9px; left: 50%; transform: none;
   background: #f0883e; color: #0d1117; font-size: 10px; font-weight: 700;
   padding: 1px 6px; border-radius: 10px; border: 2px solid #0d1117;
-  white-space: nowrap; letter-spacing: 0.2px; pointer-events: none; }
+  white-space: nowrap; letter-spacing: 0.2px; pointer-events: auto; cursor: default;
+  width: auto; max-width: none; overflow: visible; }
 
 /* Role badge at the bottom-centre — colour by role, same tint family as the legend. */
 .t2d-root .node .role-badge { position: absolute; bottom: -9px; left: 50%; transform: translateX(-50%);
@@ -84,7 +87,8 @@ export const CSS = `
 .t2d-root .stats .stat .val { color: #f0883e; font-weight: 600; font-family: 'SF Mono',monospace;
   font-size: 13px; text-align: right; overflow-wrap: break-word; word-break: normal; }
 /* Stacked multi-value scope (PGs/Regions): each name on its own right-aligned row. */
-.t2d-root .stats .stat .val.val-list { line-height: 1.5; }
+.t2d-root .stats .stat .val.val-list { line-height: 1.5; text-align: right; }
+.t2d-root .stats .stat:has(.val-list) { align-items: flex-start; }
 .t2d-root .stats .stress { margin-top: 8px; padding-top: 8px; border-top: 1px solid #30363d; font-size: 12px; color: #8b949e; }
 .t2d-root .stats .stress .val { color: #39d353; }
 
@@ -99,6 +103,13 @@ export const CSS = `
 .t2d-root .vis-legend .contour-samples span { border-radius: 4px; padding: 3px 10px; font-size: 12px; }
 .t2d-root .vis-legend .ux-hint { margin-top: 10px; padding-top: 8px; border-top: 1px solid #30363d; font-size: 11px; color: #8b949e; line-height: 1.6; }
 .t2d-root .vis-legend .ux-hint b { color: #e6edf3; }
+
+/* Shared Boundaries toggles */
+.t2d-root .boundary-toggles { margin-top: 10px; padding-top: 8px; border-top: 1px solid #30363d; }
+.t2d-root .boundary-toggles .bt-title { font-size: 10px; font-weight: 700; color: #6e7681; letter-spacing: .5px; margin-bottom: 5px; text-transform: uppercase; }
+.t2d-root .boundary-toggles .bt-row { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.t2d-root .boundary-toggles .bt-item { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #e6edf3; cursor: pointer; user-select: none; }
+.t2d-root .boundary-toggles .bt-item input { cursor: pointer; margin: 0; }
 
 /* Instance legend — bottom-left */
 .t2d-root .instance-legend { position: absolute; bottom: 16px; left: 16px; z-index: 1000; background: #161b22;
@@ -165,19 +176,19 @@ export const CSS = `
 .t2d-root .contour { position: absolute; z-index: 0; border-radius: 20px; border: 1.5px dashed; pointer-events: none; }
 .t2d-root .contour .label { position: absolute; top: -11px; left: 14px; font-size: 10px; font-weight: 700;
   padding: 1px 8px; border-radius: 4px; white-space: nowrap; }
-.t2d-root .contour.region { border-color: rgba(88,166,255,0.25); }
-.t2d-root .contour.region .label { background: rgba(88,166,255,0.15); color: #58a6ff; }
+.t2d-root .contour.region { border-color: rgba(57,211,83,0.25); }
+.t2d-root .contour.region .label { background: rgba(57,211,83,0.15); color: #39d353; }
 .t2d-root .contour.az { border-color: rgba(163,113,247,0.4); border-width: 2px; }
 .t2d-root .contour.az .label { background: rgba(163,113,247,0.2); color: #c084fc; font-size: 11px; }
-.t2d-root .contour.vpc { border-color: rgba(57,211,83,0.2); }
-.t2d-root .contour.vpc .label { background: rgba(57,211,83,0.12); color: #39d353; }
+.t2d-root .contour.vpc { border-color: rgba(88,166,255,0.25); }
+.t2d-root .contour.vpc .label { background: rgba(88,166,255,0.15); color: #58a6ff; }
 .t2d-root .contour.cpg { border-color: rgba(240,136,62,0.3); }
 .t2d-root .contour.cpg .label { background: rgba(240,136,62,0.15); color: #f0883e; }
 .t2d-root .contour.account { border-color: rgba(248,81,73,0.28); border-style: solid; }
 .t2d-root .contour.account .label { background: rgba(248,81,73,0.15); color: #f85149; }
 
 /* ── VPC peering ── */
-.t2d-root svg.edges line.peering-line { stroke: #58a6ff; stroke-width: 2.5; stroke-dasharray: 7 5; opacity: 0.75; }
+.t2d-root svg.edges line.peering-line { stroke: #58a6ff; stroke-width: 2; stroke-dasharray: 6 5; opacity: 0.4; }
 .t2d-root svg.edges line.peering-hit { stroke: transparent; stroke-width: 18; pointer-events: stroke; cursor: help; }
 .t2d-root .peering-label { position: absolute; z-index: 1; transform: translate(-50%,-50%); font-size: 10px; font-weight: 700; color: #58a6ff;
   background: rgba(13,17,23,0.9); border: 1px solid rgba(88,166,255,0.45); border-radius: 4px; padding: 1px 7px; white-space: nowrap; }

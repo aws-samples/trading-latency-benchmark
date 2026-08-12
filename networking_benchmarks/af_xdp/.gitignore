@@ -5,3 +5,6 @@ __pycache__/
 
 # Local planning (not for the repo)
 dev/roadmap.md
+
+# CLI tool - local build
+afxdpctl

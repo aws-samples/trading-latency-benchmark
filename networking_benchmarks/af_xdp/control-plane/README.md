@@ -426,9 +426,9 @@ status (`done`/`cancelled`/`error`/`rejected`), then prints the edge matrix.
 ### Infrastructure commands
 
 ```bash
-afxdpctl up   --key virginia --git-repo <url> --git-ref main --scenario ucast/az-cpg-3 [--bake]
+afxdpctl up   --key virginia --git-repo <url> --git-ref main --scenario ucast-az-cpg-3 [--bake]
 afxdpctl sync --key ~/.ssh/virginia.pem --region us-east-1
-afxdpctl down --key virginia --scenario ucast/az-cpg-3
+afxdpctl down --key virginia --scenario ucast-az-cpg-3
 ```
 
 | Command | What it does |

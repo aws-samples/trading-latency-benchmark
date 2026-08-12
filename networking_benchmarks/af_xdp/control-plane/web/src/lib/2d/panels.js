@@ -4,7 +4,8 @@
 // On fold: panel shrinks to header text width, resize disabled.
 // On unfold: restores original position and size.
 
-import { fmtRange, nodeRadius, getNodeColors, esc } from './palette.js';
+import { fmtLat, fmtRange, capabilityColor, buildCapabilityScale, CAP_GRADIENT_CSS, esc } from './palette.js';
+import { applySel } from './selection.js';
 
 // Resize floor is the panel's ORIGINAL size (1.0×) — a panel may grow up to
 // MAX_K× but never shrink below what it was first laid out at.
@@ -18,7 +19,52 @@ export function foldAllPanels(collapse) { foldables.forEach((f) => f.setCollapse
 export function anyPanelExpanded() { for (const f of foldables) if (!f.isCollapsed()) return true; return false; }
 export function resetAllPanels() { foldables.forEach((f) => f.reset && f.reset()); }
 
-export function enhancePanel(ctx, el, track = true) {
+// ── Shared corner placement ──────────────────────────────────────────────────
+// The 2D map and the 3D scene both scatter their info panels across the four
+// viewport corners (control panel = top-left, always). This is the single
+// source of truth for that distribution so both renderers stay in lock-step.
+// corner ∈ 'tl' | 'tr' | 'bl' | 'br'. Sets inline top/left/right/bottom (which
+// override any CSS default) so a panel lands — and, after a fold/reset, returns
+// — to the same corner in either view.
+export const PANEL_MARGIN = 16;
+const CORNER_SIDES = { tl: ['top', 'left'], tr: ['top', 'right'], bl: ['bottom', 'left'], br: ['bottom', 'right'] };
+export function placePanel(el, corner) {
+  el.style.top = el.style.bottom = el.style.left = el.style.right = 'auto';
+  const [v, h] = CORNER_SIDES[corner] || CORNER_SIDES.tr;
+  el.style[v] = PANEL_MARGIN + 'px';
+  el.style[h] = PANEL_MARGIN + 'px';
+}
+
+// ── Shared boundary-visibility toggles (Account/Region/VPC/AZ) ───────────────
+// Builds a labelled row of checkboxes for the legend panel. Framework-agnostic:
+// the caller supplies onToggle(level, enabled) and shows/hides its own boundary
+// objects (2D contour DOM / 3D scene objects). Used by both renderers so the
+// control's markup + behaviour live in one place. Returns the wrapper element.
+export function buildBoundaryToggles(onToggle, initial = {}, extras = []) {
+  const wrap = document.createElement('div');
+  wrap.className = 'boundary-toggles';
+  wrap.innerHTML = '<div class="bt-title">Show</div>';
+  const rowEl = document.createElement('div'); rowEl.className = 'bt-row';
+  [['account', 'Account'], ['region', 'Region'], ['vpc', 'VPC'], ['az', 'AZ'], ['pg', 'PG']].forEach(([key, label]) => {
+    const lab = document.createElement('label'); lab.className = 'bt-item';
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = initial[key] !== false;
+    cb.addEventListener('change', () => onToggle(key, cb.checked));
+    lab.appendChild(cb); lab.appendChild(document.createTextNode(' ' + label));
+    rowEl.appendChild(lab);
+  });
+  // Extra checkboxes sharing the same row (e.g. "Links"). Each: {label, onChange, checked}.
+  extras.forEach(({ label, onChange, checked }) => {
+    const lab = document.createElement('label'); lab.className = 'bt-item';
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = checked !== false;
+    cb.addEventListener('change', () => onChange(cb.checked));
+    lab.appendChild(cb); lab.appendChild(document.createTextNode(' ' + label));
+    rowEl.appendChild(lab);
+  });
+  wrap.appendChild(rowEl);
+  return wrap;
+}
+
+export function enhancePanel(ctx, el, track = true, corner = null) {
   const h = el.querySelector('h3');
   if (!h) return () => {};
 
@@ -34,6 +80,9 @@ export function enhancePanel(ctx, el, track = true) {
   const scaler = document.createElement('div'); scaler.className = 'panel-scale';
   while (content.firstChild) scaler.appendChild(content.firstChild);
   content.appendChild(scaler);
+
+  // Initial corner placement (shared 2D/3D). Overrides CSS defaults.
+  if (corner) placePanel(el, corner);
 
   // Proportional resize. Header stays fixed; only the body scales. Resize is
   // WIDTH-DRIVEN ONLY: dragging the width zooms the content and the panel height
@@ -135,6 +184,7 @@ export function enhancePanel(ctx, el, track = true) {
     el.style.left = el.style.right = el.style.top = el.style.bottom = '';
     el.style.width = el.style.height = el.style.minWidth = el.style.maxHeight = '';
     el.style.resize = 'horizontal';
+    if (corner) placePanel(el, corner);   // return to the assigned corner, not the CSS default
     baseW = 0;
     update();
   };
@@ -205,59 +255,107 @@ export function enhancePinned(el, def) {
   return () => { foldables.delete(entry); window.removeEventListener('mousemove', mm); window.removeEventListener('mouseup', mu); };
 }
 
+// ── Shared panel content builders (used by both 2D and 3D renderers) ─────────
+
+// Build the Summary panel's inner HTML. `opts`: { N, pairs, minP50, maxP50,
+// minP99, maxP99, minSigma, maxSigma, nodes[], stress? }.
+export function buildSummaryHTML(opts) {
+  const { N, pairs, minP50, maxP50, minP99, maxP99, minSigma, maxSigma, nodes, stress } = opts;
+  const stat = (label, val) => '<div class="stat"><span>' + label + '</span><span class="val">' + esc(val) + '</span></div>';
+  const statList = (label, arr) => '<div class="stat"><span>' + label + '</span><span class="val val-list">' + arr.map(esc).join('<br>') + '</span></div>';
+
+  const uniq = (k) => [...new Set((nodes || []).map(n => n[k]))].filter(v => v && v !== 'unknown');
+  const uRegions = uniq('region'), uAZs = uniq('az'), uCPGs = uniq('cpg_name'), uAccounts = uniq('account');
+  let scopeHtml = '';
+  if (uCPGs.length === 1) scopeHtml += stat('Placement Group', uCPGs[0]); else if (uCPGs.length > 1) scopeHtml += statList('PGs', uCPGs);
+  if (uAZs.length === 1) scopeHtml += stat('AZ', uAZs[0]); else if (uAZs.length > 1) scopeHtml += stat('AZs', uAZs.length);
+  if (uRegions.length === 1) scopeHtml += stat('Region', uRegions[0]); else if (uRegions.length > 1) scopeHtml += statList('Regions', uRegions);
+  if (uAccounts.length === 1) scopeHtml += stat('Account', uAccounts[0]); else if (uAccounts.length > 1) scopeHtml += stat('Accounts', uAccounts.length);
+
+  let html = '<h3>Summary</h3>'
+    + stat('Nodes', N) + stat('Pairs', pairs)
+    + stat('p50', fmtRange(minP50, maxP50))
+    + stat('p99', fmtRange(minP99, maxP99))
+    + stat('Jitter \u03c3', fmtRange(minSigma, maxSigma));
+  if (scopeHtml) html += '<div style="margin-top:8px;border-top:1px solid #30363d;padding-top:6px">' + scopeHtml + '</div>';
+  if (stress != null) html += '<div class="stress">Layout fidelity: <span class="val">' + (100 - stress * 100).toFixed(1) + '%</span></div>';
+  return html;
+}
+
+// Build Instance Types panel rows HTML. Returns '' if no known types.
+export function buildInstanceTypesHTML(nodes, region, capScale) {
+  const seen = new Map(); (nodes || []).forEach(n => { if (!seen.has(n.type)) seen.set(n.type, n); });
+  let rows = '';
+  for (const [type, node] of seen) {
+    if (type === 'unknown') continue;
+    const colors = capabilityColor(node, capScale), r = 13, family = type.split('.')[0];
+    const eType = esc(type);
+    const specs = [];
+    if (node.vcpus) specs.push(esc(node.vcpus) + 'vCPU');
+    if (node.mem_gb) specs.push(esc(node.mem_gb) + 'GB');
+    if (node.bw_gbps) specs.push(esc(node.bw_gbps) + 'Gbps');
+    if (node.pps_mpps) specs.push(esc(node.pps_mpps) + 'Mpps');
+    if (node.enis) specs.push(esc(node.enis) + ' ENIs');
+    if (node.nitro_gen) specs.push('Nitro ' + esc(node.nitro_gen));
+    const specsHtml = specs.length ? '<div class="type-specs">' + specs.join(' \u00b7 ') + '</div>' : '';
+    rows += '<div class="type-row"><div class="type-dot" style="width:' + (r*2) + 'px;height:' + (r*2) + 'px;background:' + colors.bg + ';border:2px solid ' + colors.border + '"></div>'
+      + '<div class="type-info"><div class="type-name">' + eType + '</div>' + specsHtml + '</div>'
+      + '<a href="https://instances.vantage.sh/?selected=' + encodeURIComponent(type) + '&region=' + encodeURIComponent(region) + '" target="_blank" rel="noopener noreferrer">specs\u2197</a>'
+      + '<a href="https://aws.amazon.com/ec2/instance-types/' + encodeURIComponent(family) + '/" target="_blank" rel="noopener noreferrer">family\u2197</a></div>';
+  }
+  return rows;
+}
+
 export function renderPanels(ctx) {
   const { fleet, root, statsEl, N, region, stress } = ctx;
   const { minP50, maxP50, minP99, maxP99, minSigma, maxSigma, allP50 } = ctx.ranges;
+  const capScale = buildCapabilityScale(fleet.nodes);   // uniform blue→green over present types
 
-  (function () {
-    const seen = new Map(); fleet.nodes.forEach(n => { if (!seen.has(n.type)) seen.set(n.type, n); });
-    let rows = '';
-    for (const [type, node] of seen) {
-      const colors = getNodeColors(type), r = Math.round(nodeRadius(node) * 0.35), family = type.split('.')[0];
-      const eType = esc(type);
-      rows += '<div class="type-row"><div class="type-dot" style="width:' + (r*2) + 'px;height:' + (r*2) + 'px;background:' + colors.bg + ';border:2px solid ' + colors.border + '"></div>'
-        + '<div class="type-info"><div class="type-name">' + eType + '</div><div class="type-specs">' + esc(node.vcpus) + 'vCPU \u00b7 ' + esc(node.mem_gb) + 'GB \u00b7 ' + esc(node.bw_gbps) + 'Gbps \u00b7 ' + esc(node.pps_mpps) + 'Mpps \u00b7 ' + esc(node.enis) + ' ENIs \u00b7 Nitro ' + esc(node.nitro_gen) + '</div></div>'
-        + '<a href="https://instances.vantage.sh/?selected=' + encodeURIComponent(type) + '&region=' + encodeURIComponent(region) + '" target="_blank" rel="noopener noreferrer">specs\u2197</a>'
-        + '<a href="https://aws.amazon.com/ec2/instance-types/' + encodeURIComponent(family) + '/" target="_blank" rel="noopener noreferrer">family\u2197</a></div>';
-    }
+  // Instance Types panel (shared logic via buildInstanceTypesHTML).
+  const itHtml = buildInstanceTypesHTML(fleet.nodes, region, capScale);
+  if (itHtml) {
     const el = document.createElement('div'); el.className = 'instance-legend';
-    el.innerHTML = '<h3>Instance Types</h3>' + rows; root.appendChild(el);
-  })();
+    el.innerHTML = '<h3>Instance Types</h3>' + itHtml; root.appendChild(el);
+  }
 
   (function () {
     const el = document.createElement('div'); el.className = 'vis-legend';
     el.innerHTML = '<h3>Legend</h3>'
       + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,#39d353,#f0883e,#f85149)"></div><span>Edge color = p50 (green=fast, red=slow)</span></div>'
       + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,rgba(57,211,83,0.7),rgba(57,211,83,0.07))"></div><span>Edge opacity = p50 (faster = more opaque)</span></div>'
-      + '<div class="row"><span>Node size = f(BW, PPS, ENIs, Nitro, CPU, Mem, metal)</span></div>'
+      + '<div class="row"><div class="swatch" style="background:' + CAP_GRADIENT_CSS + '"></div><span>Node color = capability (blue=basic \u2192 green=metal/top-net)</span></div>'
       + '<div class="row"><span>Distance \u221d p50 \u2014 stress ' + (stress * 100).toFixed(1) + '%</span></div>'
       + '<div class="contour-samples">'
-      + '<span style="border:1.5px dashed rgba(57,211,83,0.3);color:#39d353">VPC</span>'
+      + '<span style="border:1.5px dashed rgba(88,166,255,0.3);color:#58a6ff">VPC</span>'
       + '<span style="border:2px dashed rgba(163,113,247,0.4);color:#c084fc">AZ</span>'
-      + '<span style="border:1.5px dashed rgba(88,166,255,0.3);color:#58a6ff">Region</span>'
+      + '<span style="border:1.5px dashed rgba(57,211,83,0.3);color:#39d353">Region</span>'
       + '<span style="border:1.5px solid rgba(248,81,73,0.5);color:#f85149">Account</span></div>'
       + '<div class="ux-hint"><b>Hover</b> node \u2014 edge labels. <b>Click</b> \u2014 pin table. <b>Drag</b> title to move; click to fold; drag corner to resize.</div>';
+    // Shared Boundaries toggles — show/hide contour levels (and VPC peering lines).
+    // Shared Show toggles — boundary levels + Links (edge) visibility in one row.
+    el.appendChild(buildBoundaryToggles((key, on) => {
+      const disp = on ? '' : 'none';
+      if (key === 'pg') { root.querySelectorAll('.pg-badge').forEach((c) => { c.style.display = disp; }); return; }
+      root.querySelectorAll('.contour.' + key).forEach((c) => { c.style.display = disp; });
+      if (key === 'vpc') {
+        root.querySelectorAll('.peering-line, .peering-hit').forEach((c) => { c.style.display = disp; });
+        if (!on) root.querySelectorAll('.peering-label').forEach((c) => { c.style.display = 'none'; });
+      }
+    }, {}, [{ label: 'Links', checked: true, onChange: (on) => { ctx.linksHidden = !on; applySel(ctx, -1); } }]));
     root.appendChild(el);
   })();
 
-  const uniq = (k) => [...new Set(fleet.nodes.map(n => n[k]))].filter(v => v && v !== 'unknown');
-  const uRegions = uniq('region'), uAZs = uniq('az'), uCPGs = uniq('cpg_name'), uAccounts = uniq('account');
-  const stat = (label, val) => '<div class="stat"><span>' + label + '</span><span class="val">' + esc(val) + '</span></div>';
-  // Multi-value scope (PGs/Regions): stack each name on its own row so long
-  // names wrap as whole titles instead of breaking mid-spelling.
-  const statList = (label, arr) => '<div class="stat"><span>' + label + '</span><span class="val val-list">' + arr.map(esc).join('<br>') + '</span></div>';
-  let scopeHtml = '';
-  if (uCPGs.length === 1) scopeHtml += stat('Placement Group', uCPGs[0]); else if (uCPGs.length > 1) scopeHtml += statList('PGs', uCPGs);
-  if (uAZs.length === 1) scopeHtml += stat('AZ', uAZs[0]); else if (uAZs.length > 1) scopeHtml += stat('AZs', uAZs.length);
-  if (uRegions.length === 1) scopeHtml += stat('Region', uRegions[0]); else if (uRegions.length > 1) scopeHtml += statList('Regions', uRegions);
-  if (uAccounts.length === 1) scopeHtml += stat('Account', uAccounts[0]); else if (uAccounts.length > 1) scopeHtml += stat('Accounts', uAccounts.length);
-  statsEl.innerHTML = '<h3>Summary</h3>'
-    + stat('Nodes', N) + stat('Pairs', allP50.length)
-    + stat('p50', fmtRange(minP50, maxP50))
-    + stat('p99', fmtRange(minP99, maxP99))
-    + stat('Jitter \u03c3', fmtRange(minSigma, maxSigma))
-    + (scopeHtml ? '<div style="margin-top:8px;border-top:1px solid #30363d;padding-top:6px">' + scopeHtml + '</div>' : '')
-    + '<div class="stress">Layout fidelity: <span class="val">' + (100 - stress * 100).toFixed(1) + '%</span></div>';
+  // Summary panel (shared logic via buildSummaryHTML).
+  statsEl.innerHTML = buildSummaryHTML({
+    N, pairs: allP50.length, minP50, maxP50, minP99, maxP99, minSigma, maxSigma,
+    nodes: fleet.nodes, stress,
+  });
 
-  root.querySelectorAll('.stats, .vis-legend, .instance-legend').forEach(el => enhancePanel(ctx, el));
+  // Scatter the info panels across the corners (shared placement): summary
+  // top-right, instance types bottom-left, legend bottom-right (control panel
+  // owns top-left). Same distribution as the 3D view.
+  root.querySelectorAll('.stats, .vis-legend, .instance-legend').forEach(el => {
+    const corner = el.classList.contains('stats') ? 'tr' : el.classList.contains('instance-legend') ? 'bl' : 'br';
+    enhancePanel(ctx, el, true, corner);
+  });
 }

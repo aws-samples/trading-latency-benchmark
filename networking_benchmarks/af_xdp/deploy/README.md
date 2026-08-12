@@ -85,7 +85,7 @@ npx cdk deploy --context deploymentType=control-plane \
 
 # 3. Deploy fleet (instant readiness — AMI resolved from SSM)
 npx cdk deploy --context keyPairName=virginia \
-               --context scenario=ucast/az-cpg-3
+               --context scenario=ucast-az-cpg-3
 
 # 4. Run benchmarks
 ansible-playbook -i ../ansible/inventory.aws_ec2.yml ../ansible/run_ucast.yaml
@@ -96,7 +96,7 @@ ansible-playbook -i ../ansible/inventory.aws_ec2.yml ../ansible/run_ucast.yaml
 ```bash
 # 1. Deploy fleet (stock AMI — skips SSM; needs ansible provisioning)
 npx cdk deploy --context keyPairName=virginia \
-               --context scenario=ucast/az-cpg-2 \
+               --context scenario=ucast-az-cpg-3 \
                --context amiId=resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 
 # 2. Provision instances (~8 min)

@@ -94,24 +94,23 @@ export function mountControls(host, opts = {}) {
         <div class="row"><span class="cp-lbl">Packets</span><input class="cp-num" data-count value="5000" title="Measurement packets per pair (100–1,000,000)"></div>
         <div class="row"><span class="cp-lbl">Rate</span><input class="cp-num" data-rate value="20000" title="Ucast send rate (1,000–1,000,000)"><span class="cp-dim">pps</span></div>
         <div class="row"><span class="cp-lbl">Interval</span><input class="cp-num" data-interval value="100" title="Mcast inter-packet interval (10–100,000)"><span class="cp-dim">µs</span></div>
+        <div class="row"><span class="cp-lbl">Parallel</span><input class="cp-num" data-max-parallel value="4" title="Max concurrent pairs per round. Lower = more accurate (less NIC contention). 1 = fully serial (slowest, most correct)."><span class="cp-dim">pairs</span></div>
+        <div class="row"><span class="cp-lbl">Max loss</span><input class="cp-num" data-max-loss value="2" title="Reject a pair outright when its loss exceeds this percent. rtt computes percentiles ONLY from datagrams that returned, so a lossy run reports the latency of its surviving subset — a survivorship-biased number that is not comparable to a clean run. Rejected pairs are recorded as failures, not as results. Set -1 to disable (not recommended)."><span class="cp-dim">% loss</span></div>
         <div class="cp-hr"></div>
         <div class="row"><span class="cp-lbl">unicast</span></div>
         <div class="row">
           <span class="cp-btn-group">
-            <button class="cp-btn" data-run-ucast="kernel" title="Round-trip through kernel sendto (tuned busy-poll baseline)">kernel</button>
-            <button class="cp-btn" data-run-ucast="xdp-tx" title="AF_XDP zero-copy TX + kernel RX">xdp-tx</button>
-            <button class="cp-btn" data-run-ucast="xdp-rx" title="Kernel TX + XDP-stamped RX (instrumented)">xdp-rx</button>
-            <button class="cp-btn" data-run-ucast="xdp-txrx" title="AF_XDP TX + XDP-stamped RX">txrx</button>
-            <button class="cp-btn" data-run-ucast="all" title="Run all 4 ucast variations sequentially">all</button>
+            <button class="cp-btn" data-run-ucast="kernel" title="kernel sendto()/recvfrom() — full kernel network stack, AF_XDP echo on remote">kernel</button>
+            <button class="cp-btn" data-run-ucast="xdp" title="Kernel bypass on sender - AF_XDP zero-copy TX + RX">xdp</button>
           </span>
         </div>
         <div class="row"><span class="cp-lbl">multicast</span></div>
         <div class="row">
           <span class="cp-btn-group">
-            <button class="cp-btn" data-run-mcast="copy" title="Replicator copies frame to new TX buffer per destination">copy</button>
-            <button class="cp-btn" data-run-mcast="inplace" title="Replicator patches RX frame headers in-place (zero-copy last dest)">inplace</button>
-            <button class="cp-btn" data-run-mcast="kernel" title="XDP_TX forward in the kernel (single destination only)">kernel</button>
-            <button class="cp-btn" data-run-mcast="all" title="Run all 3 mcast modes sequentially">all</button>
+            <button class="cp-btn" data-run-mcast="copy" title="Replicator copies each RX frame into a fresh TX buffer per destination — safest, one kernel alloc per fan-out">copy</button>
+            <button class="cp-btn" data-run-mcast="inplace" title="Replicator patches destination MAC/IP in-place on the RX frame — zero-copy for the last destination, fastest fan-out">inplace</button>
+            <button class="cp-btn" data-run-mcast="kernel" title="XDP_TX kernel forward — no userspace replicator, single-destination only, lowest possible hop latency">kernel</button>
+            <button class="cp-btn" data-run-mcast="all" title="Run all 3 mcast forward modes sequentially (copy → inplace → kernel)">all</button>
           </span>
         </div>
       </div>
@@ -119,17 +118,14 @@ export function mountControls(host, opts = {}) {
       <!-- LIVE mode: heartbeat — interval first, then pick a mode to re-run -->
       <div data-live-section style="display:none">
         <div class="row"><span class="cp-lbl">Every</span>
-          <input class="cp-num" data-hb-interval value="30" title="Heartbeat interval — keep >= 10s to stay resource-sane (a full campaign takes several seconds)">
-          <span class="cp-dim">sec (min 10)</span>
+          <input class="cp-num" data-hb-interval value="60" title="Heartbeat interval — keep >= 60s (a full campaign takes several seconds)">
+          <span class="cp-dim">sec (min 60)</span>
         </div>
         <div class="cp-hr"></div>
         <div class="row"><span class="cp-lbl">unicast</span></div>
         <div class="row"><span class="cp-btn-group">
           <button class="cp-btn" data-hb-ucast="kernel">kernel</button>
-          <button class="cp-btn" data-hb-ucast="xdp-tx">xdp-tx</button>
-          <button class="cp-btn" data-hb-ucast="xdp-rx">xdp-rx</button>
-          <button class="cp-btn" data-hb-ucast="xdp-txrx">txrx</button>
-          <button class="cp-btn" data-hb-ucast="all">all</button>
+          <button class="cp-btn" data-hb-ucast="xdp">xdp</button>
         </span></div>
         <div class="row"><span class="cp-lbl">multicast</span></div>
         <div class="row"><span class="cp-btn-group">
@@ -168,6 +164,9 @@ export function mountControls(host, opts = {}) {
   const statsEl = $('[data-stats]');
   const statusEl = $('[data-status]');
   const num = (s) => Math.max(1, parseInt($(s).value, 10) || 0);
+  // Loss threshold needs fractions and must allow -1 (disable), so it cannot use
+  // num() which floors at 1.
+  const numf = (s, dflt) => { const v = parseFloat($(s).value); return Number.isFinite(v) ? v : dflt; };
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
   // ── Display timezone (affects the Show list + any timestamps) ───────────────
@@ -248,7 +247,7 @@ export function mountControls(host, opts = {}) {
   };
 
   el.querySelectorAll('[data-run-ucast]').forEach((b) => b.addEventListener('click', () => {
-    startRun(b, { kind: 'ucast', variation: b.dataset.runUcast, count: clamp(num('[data-count]'), 100, 1000000), rate: clamp(num('[data-rate]'), 1000, 1000000), warmup: 1000 });
+    startRun(b, { kind: 'ucast', variation: b.dataset.runUcast, count: clamp(num('[data-count]'), 100, 1000000), rate: clamp(num('[data-rate]'), 1000, 1000000), warmup: 1000, max_parallel: clamp(num('[data-max-parallel]'), 1, 100), max_loss_pct: clamp(numf('[data-max-loss]', 2), -1, 100) });
   }));
   el.querySelectorAll('[data-run-mcast]').forEach((b) => b.addEventListener('click', () => {
     const mcastMode = b.dataset.runMcast;
@@ -259,8 +258,13 @@ export function mountControls(host, opts = {}) {
   // Download report (heatmap + all latencies) for the currently-shown run.
   $('[data-report]').addEventListener('click', () => onReport && onReport());
 
-  // ── Live heartbeat: choose a mode → App re-runs it every interval (min 10s) ──
-  const hbIntervalSec = () => Math.max(10, parseInt($('[data-hb-interval]').value, 10) || 30);
+  // ── Live heartbeat: choose a mode → App re-runs it every interval (min 60s) ──
+  const hbIntervalSec = () => {
+    const input = $('[data-hb-interval]');
+    let v = parseInt(input.value, 10) || 60;
+    if (v < 60) { v = 60; input.value = '60'; }
+    return v;
+  };
   const hbClick = (btn, sel) => {
     if (activeHb === btn) { btn.classList.remove('running'); activeHb = null; onHeartbeat && onHeartbeat(null); return; }
     if (activeHb) activeHb.classList.remove('running');

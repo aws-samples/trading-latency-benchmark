@@ -46,38 +46,6 @@ func TestNextCmdIDUnique(t *testing.T) {
 	}
 }
 
-// The scheduler must (a) never place a node twice in one round (contention-free
-// concurrency) and (b) cover every ordered pair exactly once.
-func TestScheduleRoundsCoversAllPairsDisjoint(t *testing.T) {
-	for _, n := range []int{2, 3, 4, 5, 8, 10, 25} {
-		rounds := scheduleRounds(n)
-		seen := map[[2]int]bool{}
-		maxPer := 0
-		for _, round := range rounds {
-			if len(round) > maxPer {
-				maxPer = len(round)
-			}
-			used := map[int]bool{}
-			for _, p := range round {
-				if used[p[0]] || used[p[1]] {
-					t.Fatalf("n=%d round not node-disjoint at %v", n, p)
-				}
-				used[p[0]], used[p[1]] = true, true
-				if seen[p] {
-					t.Fatalf("n=%d duplicate pair %v", n, p)
-				}
-				seen[p] = true
-			}
-		}
-		if len(seen) != n*(n-1) {
-			t.Fatalf("n=%d covered %d pairs, want %d", n, len(seen), n*(n-1))
-		}
-		if n >= 4 && maxPer < 2 {
-			t.Fatalf("n=%d expected concurrency (>=2 pairs/round), got max %d", n, maxPer)
-		}
-	}
-}
-
 // Cancel must set the flag; a campaign resets it at start (mirrored here).
 func TestOrchestratorCancel(t *testing.T) {
 	o := &Orchestrator{pending: map[string]chan proto.CommandResult{}}

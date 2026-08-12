@@ -628,6 +628,65 @@ static bool subscribe_to_replicator(const char* replicator_ip, [[maybe_unused]] 
     return (r == 1 && ack == 1);
 }
 
+// Deregister from the replicator's destination registry.
+//
+// CRITICAL: without this, `all_destinations_` on the remote replicator grows by
+// one entry per distinct source IP that has ever measured against it, and the
+// UNICAST echo path fans out to EVERY registered destination
+// (Destinations.cpp: `if (!mcast_mode_ && !all_copy.empty())`). Each subsequent
+// measurement then costs N sends per packet instead of 1, adding a CONSTANT
+// per-packet delay — the observed ms-scale whole-distribution p50 shift with a
+// normal (20-100us) spread. Best-effort: a failed remove must not fail the run,
+// but it is retried once.
+static bool unsubscribe_from_replicator(const char* replicator_ip, const char* local_ip, uint16_t local_port) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return false;
+    struct timeval tv = {2, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in server = {};
+    server.sin_family = AF_INET;
+    server.sin_port = htons(afxdp_control_port());
+    inet_pton(AF_INET, replicator_ip, &server.sin_addr);
+
+    // Wire format: [2=REMOVE][4B IP network order][2B port network order]
+    uint8_t msg[7];
+    msg[0] = 2;  // CTRL_REMOVE_DESTINATION
+    inet_pton(AF_INET, local_ip, &msg[1]);
+    uint16_t port_net = htons(local_port);
+    memcpy(&msg[5], &port_net, 2);
+
+    uint8_t ack = 0;
+    ssize_t r = -1;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (sendto(fd, msg, 7, 0, (struct sockaddr*)&server, sizeof(server)) == 7) {
+            r = recv(fd, &ack, 1, 0);
+            if (r == 1 && ack == 1) break;
+        }
+    }
+    close(fd);
+    if (r == 1 && ack == 1) {
+        std::cout << "Unsubscribed from replicator at " << replicator_ip << std::endl;
+        return true;
+    }
+    std::cerr << "WARNING: failed to unsubscribe from " << replicator_ip
+              << " — the replicator will keep echoing to " << local_ip << ":" << local_port
+              << ", inflating latency for subsequent runs" << std::endl;
+    return false;
+}
+
+// Registration state for the exit/signal cleanup path.
+static char g_reg_replicator_ip[64] = {0};
+static char g_reg_local_ip[64]      = {0};
+static uint16_t g_reg_local_port    = 0;
+static bool g_registered            = false;
+
+static void deregister_if_needed() {
+    if (!g_registered) return;
+    g_registered = false;   // idempotent: atexit + signal must not double-send
+    unsubscribe_from_replicator(g_reg_replicator_ip, g_reg_local_ip, g_reg_local_port);
+}
+
 // ---------------------------------------------------------------------------
 // CPU pinning
 // ---------------------------------------------------------------------------
@@ -826,6 +885,14 @@ int main(int argc, char* argv[]) {
         std::cerr << "Failed to subscribe to replicator" << std::endl;
         close(recv_fd); return 1;
     }
+    // Arm the deregistration path (normal exit + SIGINT/SIGTERM). Leaving a stale
+    // registration makes the replicator fan out every echo to this dead endpoint,
+    // inflating p50 for every later measurement against that node.
+    snprintf(g_reg_replicator_ip, sizeof(g_reg_replicator_ip), "%s", replicator_ip);
+    snprintf(g_reg_local_ip, sizeof(g_reg_local_ip), "%s", local_ip);
+    g_reg_local_port = local_port;
+    g_registered = true;
+    atexit(deregister_if_needed);
 
     // Create send socket
     int send_fd = socket(AF_INET, SOCK_DGRAM, 0);

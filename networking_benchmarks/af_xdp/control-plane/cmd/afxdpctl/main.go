@@ -11,12 +11,13 @@
 // Examples:
 //   afxdpctl fleet
 //   afxdpctl run ucast kernel
-//   afxdpctl run mcast copy,inplace,kernel
+//   afxdpctl run ucast kernel -count 50000 -rate 10000
+//   afxdpctl run mcast copy,inplace,kernel -count 10000 -interval-us 200
 //   afxdpctl cancel
 //   afxdpctl report -o run.html
-//   afxdpctl up   --key virginia --scenario ucast/az-cpg-3 --git-repo <url> --git-ref <branch> [--bake]
-//   afxdpctl sync --key ~/.ssh/virginia.pem --region us-east-1 [--profile P]
-//   afxdpctl down --key virginia [--scenario ucast/az-cpg-3]
+//   afxdpctl up   --key frankfurt --secondary-key london --scenario all --git-repo <url> --git-ref <branch> --bake
+//   afxdpctl sync --key ~/.ssh/frankfurt.pem --region eu-central-1
+//   afxdpctl down --key frankfurt --scenario all
 package main
 
 import (
@@ -227,29 +228,41 @@ func printMatrix(base, kind, variation string) {
 
 func cmdRun(base string, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: run ucast <variation> | run mcast <modes,csv>")
+		return fmt.Errorf("usage: run ucast <variation> [-count N] [-rate R] [-warmup W] [-max-parallel P] [-max-loss PCT]\n       run mcast <modes,csv> [-count N] [-interval-us I] [-timeout T]")
 	}
 	kind := args[0]
 	var body map[string]any
 	variation := ""
 	switch kind {
 	case "ucast":
+		fs := flag.NewFlagSet("run-ucast", flag.ExitOnError)
+		count := fs.Int("count", 10000, "messages per pair")
+		rate := fs.Int("rate", 10000, "messages/sec")
+		warmup := fs.Int("warmup", 1000, "warmup messages")
+		maxPar := fs.Int("max-parallel", 4, "max concurrent pairs per round (1=serial, 0=unlimited)")
+		maxLoss := fs.Float64("max-loss", 2.0, "reject a pair whose loss exceeds this % (percentiles from a lossy run are survivorship-biased); -1 disables")
+		fs.Parse(args[1:])
 		variation = "kernel"
-		if len(args) > 1 {
-			variation = args[1]
+		if fs.NArg() > 0 {
+			variation = fs.Arg(0)
 		}
-		body = map[string]any{"kind": "ucast", "variation": variation, "count": 5000, "rate": 20000, "warmup": 1000}
+		body = map[string]any{"kind": "ucast", "variation": variation, "count": *count, "rate": *rate, "warmup": *warmup, "max_parallel": *maxPar, "max_loss_pct": *maxLoss}
 	case "mcast":
+		fs := flag.NewFlagSet("run-mcast", flag.ExitOnError)
+		count := fs.Int("count", 10000, "messages")
+		intervalUs := fs.Int("interval-us", 200, "inter-message interval (µs)")
+		timeout := fs.Int("timeout", 30, "receive timeout (sec)")
+		fs.Parse(args[1:])
 		modes := []string{"copy"}
-		if len(args) > 1 {
-			modes = strings.Split(args[1], ",")
+		if fs.NArg() > 0 {
+			modes = strings.Split(fs.Arg(0), ",")
 		}
 		variation = modes[0]
-		body = map[string]any{"kind": "mcast", "modes": modes, "count": 5000, "interval_us": 100, "timeout_sec": 25}
+		body = map[string]any{"kind": "mcast", "modes": modes, "count": *count, "interval_us": *intervalUs, "timeout_sec": *timeout}
 	default:
 		return fmt.Errorf("kind must be ucast or mcast")
 	}
-	fmt.Printf("launching %s %v ...\n", kind, args[1:])
+	fmt.Printf("launching %s/%s ...\n", kind, variation)
 	if err := postJSON(base, "/api/run", body); err != nil {
 		return err
 	}
@@ -287,18 +300,27 @@ func run(dir, name string, args ...string) error {
 
 func cmdUp(args []string) error {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
-	key := fs.String("key", "", "EC2 key pair name (required)")
-	scenario := fs.String("scenario", "ucast/az-cpg-3", "fleet scenario")
+	key := fs.String("key", "", "EC2 key pair name for primary region (required)")
+	secondaryKey := fs.String("secondary-key", "", "EC2 key pair name for secondary region (cross-region deploys)")
+	scenario := fs.String("scenario", "ucast-cpg-3", "fleet scenario")
 	repo := fs.String("git-repo", "", "git repo for control-plane + AMI bake")
 	ref := fs.String("git-ref", "main", "git ref")
 	bake := fs.Bool("bake", false, "also (re)bake the AMI")
 	instType := fs.String("instance-type", "c7i.4xlarge", "AMI builder instance type")
 	cdkDir := fs.String("cdk-dir", "deploy/cdk", "path to the CDK app")
+	region := fs.String("region", "eu-central-1", "primary AWS region")
 	fs.Parse(args)
 	if *key == "" || *repo == "" {
 		return fmt.Errorf("up requires --key and --git-repo")
 	}
-	ctx := []string{"--require-approval", "never", "--context", "keyPairName=" + *key, "--context", "gitRepo=" + *repo, "--context", "gitRef=" + *ref}
+	ctx := []string{"--require-approval", "never",
+		"--context", "keyPairName=" + *key,
+		"--context", "gitRepo=" + *repo,
+		"--context", "gitRef=" + *ref,
+		"--context", "region=" + *region}
+	if *secondaryKey != "" {
+		ctx = append(ctx, "--context", "secondaryKeyPairName="+*secondaryKey)
+	}
 	if err := run(*cdkDir, "npx", append([]string{"cdk", "deploy", "XdpStack-ControlPlane", "--context", "deploymentType=control-plane"}, ctx...)...); err != nil {
 		return err
 	}
@@ -307,7 +329,8 @@ func cmdUp(args []string) error {
 			return err
 		}
 	}
-	return run(*cdkDir, "npx", "cdk", "deploy", "XdpStack", "--require-approval", "never", "--context", "keyPairName="+*key, "--context", "scenario="+*scenario)
+	deployCtx := append(ctx, "--context", "scenario="+*scenario)
+	return run(*cdkDir, "npx", append([]string{"cdk", "deploy", "--all"}, deployCtx...)...)
 }
 
 func cmdSync(args []string) error {
@@ -334,13 +357,15 @@ func cmdSync(args []string) error {
 func cmdDown(args []string) error {
 	fs := flag.NewFlagSet("down", flag.ExitOnError)
 	key := fs.String("key", "x", "EC2 key pair name (context only)")
-	scenario := fs.String("scenario", "ucast/az-cpg-3", "scenario context (for fleet synth)")
+	scenario := fs.String("scenario", "ucast-cpg-3", "scenario context (for fleet synth)")
 	cdkDir := fs.String("cdk-dir", "deploy/cdk", "path to the CDK app")
+	region := fs.String("region", "eu-central-1", "primary AWS region")
 	fs.Parse(args)
+	ctx := []string{"--context", "keyPairName=" + *key, "--context", "region=" + *region}
 	// Destroy in reverse dependency order; each is best-effort.
-	_ = run(*cdkDir, "npx", "cdk", "destroy", "--force", "XdpStack", "--context", "keyPairName="+*key, "--context", "scenario="+*scenario)
-	_ = run(*cdkDir, "npx", "cdk", "destroy", "--force", "XdpStack-ControlPlane", "--context", "deploymentType=control-plane", "--context", "keyPairName="+*key)
-	_ = run(*cdkDir, "npx", "cdk", "destroy", "--force", "XdpStack-AmiBuilder", "--context", "deploymentType=ami-builder", "--context", "keyPairName="+*key)
+	_ = run(*cdkDir, "npx", append([]string{"cdk", "destroy", "--force", "--all", "--context", "scenario=" + *scenario}, ctx...)...)
+	_ = run(*cdkDir, "npx", append([]string{"cdk", "destroy", "--force", "XdpStack-ControlPlane", "--context", "deploymentType=control-plane"}, ctx...)...)
+	_ = run(*cdkDir, "npx", append([]string{"cdk", "destroy", "--force", "XdpStack-AmiBuilder", "--context", "deploymentType=ami-builder"}, ctx...)...)
 	return nil
 }
 
@@ -348,16 +373,18 @@ func usage() {
 	fmt.Print(`afxdpctl — AF_XDP benchmark control CLI
 
   Measurement (talks to the control-plane API; -cp or $CP_URL):
-    fleet                     show nodes + edge count
-    run ucast <variation>     kernel|xdp-tx|xdp-rx|xdp-txrx|all
-    run mcast <modes,csv>     copy,inplace,kernel
-    cancel                    abort the running campaign
-    report [-o file] [-kind]  write an HTML report (heatmap + all latencies)
+    fleet                          show nodes + edge count
+    run ucast [variation] [-count N] [-rate R] [-warmup W] [-max-parallel P] [-max-loss PCT]
+                                   variation: kernel|xdp|all
+    run mcast [modes,csv] [-count N] [-interval-us I] [-timeout T]
+                                   modes: copy,inplace,kernel
+    cancel                         abort the running campaign
+    report [-o file] [-kind]       write an HTML report (heatmap + all latencies)
 
   Infra (wrap CDK / ansible):
-    up   --key K --git-repo R [--git-ref B] [--scenario S] [--bake]
+    up   --key K --git-repo R [--secondary-key K2] [--git-ref B] [--scenario S] [--region R] [--bake]
     sync --key KEYFILE [--region R] [--profile P]
-    down --key K [--scenario S]
+    down --key K [--scenario S] [--region R]
 
   Global: -cp <url>   control-plane base URL (default $CP_URL or http://localhost:8080)
 `)

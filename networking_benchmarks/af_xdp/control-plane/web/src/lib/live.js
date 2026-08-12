@@ -33,6 +33,15 @@ export function createLive({ onUpdate, onJob } = {}) {
       case 'job':
         onJob && onJob(msg.data);
         break;
+      case 'error': {
+        const id = msg.data && msg.data.instance_id;
+        if (id) {
+          if (!errorNodes.has(id)) errorNodes.set(id, []);
+          errorNodes.get(id).push(msg.data.error || msg.data);
+          onUpdate && onUpdate();
+        }
+        break;
+      }
     }
   }
 
@@ -68,24 +77,46 @@ export function createLive({ onUpdate, onJob } = {}) {
     },
 
     // Adapt current state into the fleet.json schema for one kind+variation.
+    // Only ONLINE nodes are included — the CDK stack may have many more instances
+    // than are currently running; showing offline nodes bloats the heatmap with
+    // empty cells and confuses the user into thinking the orchestrator is trying
+    // to reach them.
     toFleet(kind, variation) {
-      const order = [...nodes].sort((a, b) => (a.private_ip || '').localeCompare(b.private_ip || ''));
+      const online = nodes.filter((n) => n.online);
+      const order = [...online].sort((a, b) => (a.private_ip || '').localeCompare(b.private_ip || ''));
       const idx = new Map(order.map((n, i) => [n.private_ip, i]));
-      const fnodes = order.map((n, i) => ({
-        index: i,
-        name: n.private_ip,
-        ec2_name: n.role || n.instance_id || n.private_ip,
-        type: n.instance_type || 'unknown',
-        private_ip: n.private_ip,
-        public_ip: n.public_ip || '',
-        az: n.az || 'unknown',
-        region: n.region || 'us-east-1',
-        cpg_name: n.placement_group || 'unknown',
-        pg_type: n.placement_group ? 'cluster' : 'unknown',
-        role: n.role || '',
-        online: !!n.online,
-        metal: false,
-      }));
+      // Copy an optional field through only when the backend actually reports it,
+      // so renderers that show raw specs don't print "undefined" for a node that
+      // never provided one.
+      const opt = (dst, src, keys) => { for (const k of keys) if (src[k] != null) dst[k] = src[k]; };
+      const fnodes = order.map((n, i) => {
+        const fn = {
+          index: i,
+          name: n.private_ip,
+          ec2_name: n.role || n.instance_id || n.private_ip,
+          type: n.instance_type || 'unknown',
+          private_ip: n.private_ip,
+          public_ip: n.public_ip || '',
+          az: n.az || 'unknown',
+          region: n.region || 'us-east-1',
+          // Topology grouping fields the 2D contours (VPC/Region/Account) and 3D
+          // volumes group by. proto.NodeInfo doesn't model vpc_id/account yet, so
+          // they fall back to 'unknown' (contour is skipped) until the agent/IMDS
+          // self-report supplies them — pass through here so a richer backend
+          // renders the full nested hierarchy with no further UI change.
+          account: n.account || 'unknown',
+          vpc_id: n.vpc_id || 'unknown',
+          cpg_name: n.placement_group || 'unknown',
+          // Prefer the backend's own pg_type; else infer cluster from PG presence.
+          pg_type: n.pg_type || (n.placement_group ? 'cluster' : 'unknown'),
+          role: n.role || '',
+          online: !!n.online,
+          metal: n.metal != null ? !!n.metal : /\.metal$/.test(n.instance_type || ''),
+        };
+        // Hardware specs shown in the 3D per-node panel — carried through when present.
+        opt(fn, n, ['vcpus', 'mem_gb', 'bw_gbps', 'pps_mpps', 'enis', 'nitro_gen', 'stack']);
+        return fn;
+      });
       const N = order.length;
       const matrix = Array.from({ length: N }, () => Array(N).fill(null));
       // mcast is a fan-out THROUGH the replicator, so render the physical
@@ -114,6 +145,7 @@ export function createLive({ onUpdate, onJob } = {}) {
       return {
         schema: 'afxdp.topology/v1',
         region: (fnodes[0] && fnodes[0].region) || 'us-east-1',
+        account: (fnodes[0] && fnodes[0].account) || 'unknown',
         generated_at: new Date().toISOString(),
         nodes: fnodes, matrix,
       };

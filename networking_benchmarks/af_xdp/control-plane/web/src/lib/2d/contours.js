@@ -1,7 +1,11 @@
-// 2d/contours.js — nested topology contours (AZ ⊂ VPC ⊂ Region ⊂ Account) plus
-// cross-region VPC peering lines. CPG is shown as a per-node badge, not a contour.
+// 2d/contours.js — nested topology contours as a STRICT tree Account ⊃ Region ⊃
+// VPC ⊃ AZ, using per-parent path cells (option E): an AZ that spans two VPCs is
+// drawn as one cell per VPC. The group-aware layout (see grouplayout.js) has
+// already separated sibling clusters, so these boxes nest cleanly and never
+// intersect. CPG is a per-node badge, not a contour.
 
 import { nodeRadius, esc } from './palette.js';
+import { HIER, pathKeyOf } from '../grouplayout.js';
 
 // Loop/reduce-based min/max — avoids `Math.min(...arr)` spread, which can blow
 // the call stack for large groups (mirrors the guard used in index.js).
@@ -10,22 +14,31 @@ const maxOf = (arr) => arr.reduce((m, v) => (v > m ? v : m), -Infinity);
 
 export function renderContours(ctx) {
   const { fleet, root, svg, positions } = ctx;
-  const groupBy = (key) => { const g = {}; fleet.nodes.forEach((node, i) => { const v = node[key] || 'unknown'; (g[v] = g[v] || []).push(i); }); return g; };
-  const PAD_BASE = 16, STEP = 20;
+  // Path-scoped cells for a tier depth (0=account…3=az): key = full ancestor
+  // path so cells are per-parent. Each entry carries the leaf name + indices.
+  const cellsOf = (depth) => {
+    const g = {};
+    fleet.nodes.forEach((node, i) => {
+      const leaf = node[HIER[depth]]; if (!leaf || leaf === 'unknown') return;
+      const key = pathKeyOf(node, depth);
+      (g[key] = g[key] || { leaf, idx: [] }).idx.push(i);
+    });
+    return g;
+  };
+  const PAD_BASE = 10, STEP = 12;
   // Extra top padding so the contour label (top:-11px) never clips above the canvas.
   const LABEL_H = 18;
   const contourDefs = [
-    { groups: groupBy('az'),      cls: 'az',      prefix: 'AZ',      pad: PAD_BASE },
-    { groups: groupBy('vpc_id'),  cls: 'vpc',     prefix: 'VPC',     pad: PAD_BASE + STEP },
-    { groups: groupBy('region'),  cls: 'region',  prefix: 'Region',  pad: PAD_BASE + STEP * 2 },
-    { groups: groupBy('account'), cls: 'account', prefix: 'Account', pad: PAD_BASE + STEP * 3 },
+    { depth: 3, cls: 'az',      prefix: 'AZ',      pad: PAD_BASE },
+    { depth: 2, cls: 'vpc',     prefix: 'VPC',     pad: PAD_BASE + STEP },
+    { depth: 1, cls: 'region',  prefix: 'Region',  pad: PAD_BASE + STEP * 2 },
+    { depth: 0, cls: 'account', prefix: 'Account', pad: PAD_BASE + STEP * 3 },
   ];
   const vpcBoxes = [];
   contourDefs.forEach(def => {
-    const keys = Object.keys(def.groups); if (keys.length === 0) return;
-    keys.forEach(key => {
-      if (key === 'unknown') return;
-      const idx = def.groups[key]; if (idx.length === 0) return;
+    const cells = cellsOf(def.depth);
+    Object.keys(cells).forEach(key => {
+      const idx = cells[key].idx; if (idx.length === 0) return;
       const xs = idx.map(i => positions[i].x), ys = idx.map(i => positions[i].y), radii = idx.map(i => nodeRadius(fleet.nodes[i]));
       const left = minOf(xs.map((x, k) => x - radii[k])) - def.pad;
       const right = maxOf(xs.map((x, k) => x + radii[k])) + def.pad;
@@ -35,8 +48,7 @@ export function renderContours(ctx) {
       const bottom = maxOf(ys.map((y, k) => y + radii[k])) + def.pad;
       const el = document.createElement('div'); el.className = 'contour ' + def.cls;
       el.style.left = left + 'px'; el.style.top = top + 'px'; el.style.width = (right - left) + 'px'; el.style.height = (bottom - top) + 'px';
-      const label = keys.length === 1 ? def.prefix + ': ' + key : key;
-      el.innerHTML = '<span class="label">' + esc(label) + '</span>';
+      el.innerHTML = '<span class="label">' + esc(def.prefix + ': ' + cells[key].leaf) + '</span>';
       root.appendChild(el);
       if (def.cls === 'vpc') vpcBoxes.push({ cx: (left + right) / 2, cy: (top + bottom) / 2, hw: (right - left) / 2, hh: (bottom - top) / 2 });
     });

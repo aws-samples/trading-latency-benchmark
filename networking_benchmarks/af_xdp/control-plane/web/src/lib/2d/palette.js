@@ -48,17 +48,84 @@ export function computeNodeScore(node) {
   s += (num(node.mem_gb) / 768) * 2;
   return s;
 }
-// Base radius raised so the private+public IP lines fit inside the body even for
-// live nodes (whose capability score is 0). Static nodes are dominated by score.
-export const nodeRadius = (node) => 44 + computeNodeScore(node) * 0.6;
+// ── Node size (FIXED) ────────────────────────────────────────────────────────
+// Capability is encoded by COLOUR now, not size — so every node is the same
+// size in each renderer. Both the 2D map (px) and the 3D scene (world units)
+// import these, so node sizing lives in exactly one place.
+//   2D: large enough to fit the private+public IP lines + PG/role badges.
+export const NODE_RADIUS_2D = 38;
+export const NODE_RADIUS_3D = 4.6;
+// Kept as (node)=>… call signatures so existing call sites are untouched; the
+// node argument is ignored now that size is constant.
+export const nodeRadius   = () => NODE_RADIUS_2D;
+export const nodeRadius3D = () => NODE_RADIUS_3D;
 
-const familyColors = {
-  'c7i':  { bg: '#1a2a40', border: '#58a6ff' }, 'c6in': { bg: '#261a3d', border: '#a371f7' },
-  'c6i':  { bg: '#1a2e1a', border: '#39d353' }, 'm7i':  { bg: '#2e2415', border: '#f0883e' },
-  'r7i':  { bg: '#2e1515', border: '#da3633' }, 'm6i':  { bg: '#2e2a15', border: '#d29922' },
-  'r6i':  { bg: '#2e1a1a', border: '#f85149' },
-};
-export const getNodeColors = (type) => familyColors[type.split('.')[0]] || { bg: '#1a2a40', border: '#58a6ff' };
+// ── Node body colour = capability, as a subtle blue→green tint ───────────────
+// computeNodeScore() maps hardware (bandwidth, PPS, ENIs, Nitro gen, vCPU/mem,
+// metal) to a score; normalise over a fixed band and lerp a calm blue (basic)
+// → green (metal / top-net). Returns { t, border, bg } where `border` is the
+// vivid tint (node outline / 3D mesh colour) and `bg` a dark, low-saturation
+// fill — the "slight neat tint" shown as the node body.
+const CAP_MIN = 15, CAP_MAX = 120;
+// Multi-stop capability ramp: blue (lowest) → violet (mid) → green (highest).
+// Only blue / violet / green (+ the tints the lerp makes between them). Both
+// transitions stay cool/neutral — NO yellowish tints, NO gold (selection), NO cyan.
+const CAP_STOPS = [
+  [88, 166, 255],   // #58a6ff  blue    — lowest
+  [163, 113, 247],  // #a371f7  violet  — mid
+  [63, 185, 80],    // #3fb950  green   — highest
+];
+const CAP_DARK  = [13, 17, 23];    // #0d1117 — canvas; mixed in for the body tint
+const lerp3 = (a, b, t) => [Math.round(a[0] + (b[0] - a[0]) * t), Math.round(a[1] + (b[1] - a[1]) * t), Math.round(a[2] + (b[2] - a[2]) * t)];
+const rgbStr = (a) => 'rgb(' + a[0] + ',' + a[1] + ',' + a[2] + ')';
+// Sample the multi-stop ramp at t∈[0,1].
+function rampRGB(t) {
+  const segs = CAP_STOPS.length - 1;
+  const x = Math.max(0, Math.min(1, t)) * segs;
+  const i = Math.min(segs - 1, Math.floor(x));
+  return lerp3(CAP_STOPS[i], CAP_STOPS[i + 1], x - i);
+}
+
+// Absolute fallback: capability score → [0,1] over a fixed band. Used only when
+// no fleet-derived scale is supplied (a single lone node, etc.).
+export function capabilityT(node) {
+  const s = computeNodeScore(node);
+  return Math.max(0, Math.min(1, (s - CAP_MIN) / (CAP_MAX - CAP_MIN)));
+}
+
+// Rank-based scale: spread the ramp UNIFORMLY across the distinct capability
+// scores actually present, instead of by absolute magnitude. Raw hardware scores
+// cluster tightly for the small/mid instance types and then jump to a lone high
+// value (metal / top-net), which under a linear absolute map crushed the small
+// types into indistinguishable colour with an empty middle. Ranking by position
+// guarantees each distinct instance type gets a visibly different hue. Returns a
+// `scale(node) -> t in [0,1]`.
+export function buildCapabilityScale(nodes) {
+  const scores = [...new Set((nodes || []).map(computeNodeScore))].sort((a, b) => a - b);
+  const n = scores.length;
+  const rank = new Map(scores.map((s, i) => [s, n > 1 ? i / (n - 1) : 0.5]));
+  return (node) => {
+    const s = computeNodeScore(node);
+    if (rank.has(s)) return rank.get(s);
+    if (n <= 1) return 0.5;
+    return Math.max(0, Math.min(1, (s - scores[0]) / (scores[n - 1] - scores[0] || 1)));
+  };
+}
+
+// Node body colour = capability, across the multi-hue ramp. Pass a `scale` from
+// buildCapabilityScale(fleet.nodes) so the spread is uniform across the types
+// present; without it, the absolute band (capabilityT) is used. Returns
+// { t, border, bg } — `border` the vivid ramp colour (outline / 3D mesh colour),
+// `bg` a darker, lower-saturation fill (the node body) that keeps overlaid text
+// readable while still carrying the hue.
+export function capabilityColor(node, scale) {
+  const t = scale ? scale(node) : capabilityT(node);
+  const vivid = rampRGB(t);
+  const bg = lerp3(vivid, CAP_DARK, 0.72);   // toward canvas → darker but hue-carrying tint
+  return { t, border: rgbStr(vivid), bg: rgbStr(bg) };
+}
+// Multi-stop swatch for the legends (single source of truth for the gradient).
+export const CAP_GRADIENT_CSS = 'linear-gradient(to right,' + CAP_STOPS.map(rgbStr).join(',') + ')';
 
 export const dirSigma = (d) => (d && d.p99 > d.p50) ? (d.p99 - d.p50) / 2.326 : 0;
 export function edgeSigma(ab, ba) { const v = [ab, ba].filter(Boolean).map(dirSigma); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0; }

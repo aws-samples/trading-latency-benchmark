@@ -14,9 +14,18 @@ type NodeInfo struct {
 	Region         string `json:"region"`
 	InstanceType   string `json:"instance_type"`
 	PlacementGroup string `json:"placement_group,omitempty"` // "" = no PG
+	VpcID          string `json:"vpc_id,omitempty"`
 	Role           string `json:"role,omitempty"`            // source|replicator|destination
 	Stack          string `json:"stack,omitempty"`           // CFN stack name, if tagged
 	Hostname       string `json:"hostname,omitempty"`
+	// Hardware specs (populated from EC2 DescribeInstanceTypes at startup).
+	VCPUs    int     `json:"vcpus,omitempty"`
+	MemGB    float64 `json:"mem_gb,omitempty"`
+	BwGbps   float64 `json:"bw_gbps,omitempty"`
+	PpsMpps  float64 `json:"pps_mpps,omitempty"`
+	ENIs     int     `json:"enis,omitempty"`
+	NitroGen string  `json:"nitro_gen,omitempty"`
+	Metal    bool    `json:"metal,omitempty"`
 }
 
 // Registration is published on every (re)connect. Idempotent: the backend keys
@@ -53,6 +62,8 @@ const (
 	CmdSetMode      CmdType = "set_mode"       // set REPLICATOR_MODE (+ fwd) + restart
 	CmdReplicatorSvc CmdType = "replicator_svc" // stop|start|restart replicator.service
 	CmdJoinGroup    CmdType = "join_group"     // replicator_ctl mcast <group>
+	CmdPurgeDests   CmdType = "purge_dests"    // remove stale ucast destinations from the local replicator
+	CmdEnsureHost   CmdType = "ensure_host"    // idempotently converge local host state to a measurement profile
 	CmdCleanup      CmdType = "cleanup"        // free AF_XDP queue (kill + detach XDP)
 	CmdClockSync    CmdType = "clock_sync"     // chronyc makestep + report offset
 	CmdStartStream  CmdType = "start_stream"   // continuous rtt --stream to a peer
@@ -73,6 +84,48 @@ type Command struct {
 	Mode      string       `json:"mode,omitempty"`       // ucast|mcast|kernel (set_mode)
 	SvcAction string       `json:"svc_action,omitempty"` // stop|start|restart (replicator_svc)
 	Group     string       `json:"group,omitempty"`      // for join_group
+	Host      *HostStateParams `json:"host,omitempty"`   // for ensure_host
+}
+
+// HostProfile names the desired local host state for a measurement role. Applying
+// a profile is IDEMPOTENT: the agent reads current state and performs only the
+// transitions that actually differ, so re-applying a profile a node is already in
+// costs one cheap read and no service restart.
+type HostProfile string
+
+const (
+	// HostClient — this node runs `rtt` (the measurer). The replicator is STOPPED
+	// so no AF_XDP zero-copy socket owns an RX queue, and the XDP program is
+	// attached STANDALONE so --xdp-rx/--xdp-tx still work in xdp mode.
+	//
+	// Why: a ZC socket bound to the RX queue the returning echoes land on starves
+	// the client's ingress. Echoes don't match the replicator's config_map, so
+	// XDP_PASS makes the driver copy them out of the UMEM and recycle the frame
+	// via the fill queue the replicator's poll loop owns; when that loop isn't
+	// draining promptly the NIC drops arriving echoes. Measured: 0-95% loss with
+	// the replicator running vs 0% with it stopped — which silently biased every
+	// percentile.
+	HostClient HostProfile = "client"
+
+	// HostEchoUcast — unicast echo target. Replicator RUNNING in ucast mode; it
+	// attaches its own XDP program and binds its own AF_XDP sockets.
+	HostEchoUcast HostProfile = "echo-ucast"
+
+	// HostMcastReplicator — replicator RUNNING in mcast mode with FwdMode fan-out.
+	HostMcastReplicator HostProfile = "mcast-replicator"
+
+	// HostMcastEndpoint — runs mcast_send / mcast_receive, which bind their own
+	// AF_XDP sockets and load their own program. Replicator STOPPED, XDP detached.
+	HostMcastEndpoint HostProfile = "mcast-endpoint"
+
+	// HostIdle — no constraint; the agent leaves the host untouched.
+	HostIdle HostProfile = "idle"
+)
+
+// HostStateParams asks the agent to converge local state to Profile.
+type HostStateParams struct {
+	Profile HostProfile `json:"profile"`
+	FwdMode string      `json:"fwd_mode"` // mcast-replicator only: copy|inplace|kernel
 }
 
 // RTTParams mirrors the rtt CLI. XDP flags are the client TX/RX variations.
@@ -89,6 +142,13 @@ type RTTParams struct {
 	XdpTx      bool   `json:"xdp_tx"`
 	XdpTxQueue int    `json:"xdp_tx_queue"`
 	XdpRx      bool   `json:"xdp_rx"`
+
+	// MaxLossPct rejects the measurement outright when the observed loss exceeds
+	// this percentage. Percentiles are computed ONLY over datagrams that came
+	// back, so a lossy run reports the latency of its surviving subset — a
+	// survivorship-biased number that is not comparable to a clean run and must
+	// never be published as a result. 0 disables the gate (not recommended).
+	MaxLossPct float64 `json:"max_loss_pct"`
 }
 
 // McastParams mirrors mcast_send / mcast_receive.
@@ -152,6 +212,18 @@ type Metrics struct {
 	ClockSkewSamples int64   `json:"clock_skew_samples,omitempty"`
 }
 
+// ErrorEvent is published proactively by an agent when a command fails or an
+// internal error is detected (XDP detach, clock drift, service crash). The
+// backend stores a bounded per-node error ring and broadcasts to the web UI.
+type ErrorEvent struct {
+	InstanceID string `json:"instance_id"`
+	Unix       int64  `json:"unix"`
+	CmdID      string `json:"cmd_id,omitempty"` // correlates with the failed command, if any
+	CmdType    string `json:"cmd_type,omitempty"`
+	Error      string `json:"error"`
+	Context    string `json:"context,omitempty"` // extra detail (stderr snippet, etc.)
+}
+
 // Telemetry is a directed edge measurement (src -> dst), tagged with the
 // producing agent so the backend can place it in the NxN matrix live.
 type Telemetry struct {
@@ -160,7 +232,7 @@ type Telemetry struct {
 	Kind       string  `json:"kind"`   // ucast|mcast
 	SrcIP      string  `json:"src_ip"`
 	DstIP      string  `json:"dst_ip"`
-	Variation  string  `json:"variation,omitempty"` // kernel|xdp-tx|xdp-rx|xdp-txrx|copy|inplace
+	Variation  string  `json:"variation,omitempty"` // kernel|xdp|copy|inplace
 	TxMode     string  `json:"tx_mode,omitempty"`   // AF_XDP TX bind: zero-copy|copy ("" = kernel TX)
 	CmdID      string  `json:"cmd_id,omitempty"`
 	Metrics    Metrics `json:"metrics"`

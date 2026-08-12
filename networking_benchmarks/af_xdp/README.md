@@ -49,7 +49,7 @@ loop. See [`control-plane/`](control-plane/README.md).
 
 ```bash
 # One CLI for the whole loop (control-plane/cmd/afxdpctl):
-afxdpctl up   --key virginia --git-repo <url> --git-ref <branch> --scenario ucast/az-cpg-3 --bake
+afxdpctl up   --key virginia --git-repo <url> --git-ref <branch> --scenario ucast-az-cpg-3 --bake
 afxdpctl sync --key ~/.ssh/virginia.pem            # hot-deploy local code to the fleet
 afxdpctl run  ucast kernel                          # or: run mcast copy,inplace,kernel
 afxdpctl report -o run.html                         # heatmap + all latencies

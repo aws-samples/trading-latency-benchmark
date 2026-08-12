@@ -41,6 +41,7 @@ func main() {
 	flag.Parse()
 
 	node := gatherNodeInfo()
+	enrichFromEC2(&node)
 	a := &agent{run: NewRunner(*binDir), node: node, state: "idle"}
 	log.Printf("agent %s: instance=%s ip=%s az=%s type=%s pg=%q role=%q",
 		agentVersion, node.InstanceID, node.PrivateIP, node.AZ, node.InstanceType, node.PlacementGroup, node.Role)
@@ -160,6 +161,18 @@ func (a *agent) onCommand(m *nats.Msg) {
 		} else {
 			res.SetErr(a.run.JoinGroup(c.Mcast.ReplicatorIP, c.Mcast.Group))
 		}
+	case proto.CmdPurgeDests:
+		res.SetErr(a.run.PurgeDests())
+	case proto.CmdEnsureHost:
+		if c.Host == nil {
+			res.Fail("ensure_host requires host params")
+			break
+		}
+		if what, err := a.run.EnsureHostState(*c.Host); err != nil {
+			res.SetErr(err)
+		} else {
+			res.Text = what
+		}
 	case proto.CmdRunRTT:
 		if c.RTT == nil {
 			res.Fail("run_rtt requires rtt params")
@@ -206,6 +219,16 @@ func (a *agent) onCommand(m *nats.Msg) {
 		res.Fail("unknown command type: " + string(c.Type))
 	}
 	a.publish(proto.SubjectResult(a.node.InstanceID), res)
+	// Proactively report errors to the backend error registry.
+	if !res.OK && res.Err != "" {
+		a.publish(proto.SubjectError, proto.ErrorEvent{
+			InstanceID: a.node.InstanceID,
+			Unix:       time.Now().Unix(),
+			CmdID:      c.CmdID,
+			CmdType:    string(c.Type),
+			Error:      res.Err,
+		})
+	}
 }
 
 func (a *agent) publish(subject string, v any) {
@@ -222,16 +245,10 @@ func (a *agent) publish(subject string, v any) {
 // ── small helpers ────────────────────────────────────────────────────────────
 
 func rttVariation(p *proto.RTTParams) string {
-	switch {
-	case p.XdpTx && p.XdpRx:
-		return "xdp-txrx"
-	case p.XdpTx:
-		return "xdp-tx"
-	case p.XdpRx:
-		return "xdp-rx"
-	default:
-		return "kernel"
+	if p.XdpTx || p.XdpRx {
+		return "xdp"
 	}
+	return "kernel"
 }
 
 func mustSub(nc *nats.Conn, subj string, cb nats.MsgHandler) {

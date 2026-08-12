@@ -61,6 +61,29 @@ export function mountTopology2D(container, fleet) {
   renderPanels(ctx);
   applySel(ctx, -1);
 
+  // ── pan: drag the empty canvas to move the whole map (panels stay put) ──────
+  // Map layers (edges svg + node/contour/edge-label/peering-label) live in a
+  // viewport that we translate; the info panels + deselect button remain fixed
+  // in the root above it.
+  const viewport = document.createElement('div'); viewport.className = 't2d-viewport';
+  root.insertBefore(viewport, root.firstChild);
+  viewport.appendChild(svg);
+  root.querySelectorAll('.node, .contour, .edge-label, .peering-label').forEach((el) => viewport.appendChild(el));
+  let panX = 0, panY = 0, panning = false, psx = 0, psy = 0, pox = 0, poy = 0;
+  // Don't start a pan when the press lands on something interactive (nodes,
+  // panels, edge/peering labels) — those own their clicks/drags.
+  const NO_PAN = '.node, .stats, .vis-legend, .instance-legend, .node-tooltip, .deselect-btn, .edge-label, .peering-hit, .peering-line';
+  const onPanDown = (e) => {
+    if (e.button !== 0 || (e.target.closest && e.target.closest(NO_PAN))) return;
+    panning = true; psx = e.clientX; psy = e.clientY; pox = panX; poy = panY;
+    root.style.cursor = 'grabbing'; e.preventDefault();
+  };
+  const onPanMove = (e) => { if (!panning) return; panX = pox + (e.clientX - psx); panY = poy + (e.clientY - psy); viewport.style.transform = 'translate(' + panX + 'px,' + panY + 'px)'; };
+  const onPanUp = () => { if (panning) { panning = false; root.style.cursor = ''; } };
+  root.addEventListener('mousedown', onPanDown);
+  window.addEventListener('mousemove', onPanMove); window.addEventListener('mouseup', onPanUp);
+  ctx.disposers.push(() => { root.removeEventListener('mousedown', onPanDown); window.removeEventListener('mousemove', onPanMove); window.removeEventListener('mouseup', onPanUp); });
+
   deselectBtn.addEventListener('click', () => { ctx.selected.clear(); applySel(ctx, -1); if (ctx.unpinAll) ctx.unpinAll(); });
 
   return { dispose() { ctx.disposers.forEach(fn => fn()); if (root.parentNode) root.parentNode.removeChild(root); } };

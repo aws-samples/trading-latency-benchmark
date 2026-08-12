@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -121,46 +122,26 @@ func (o *Orchestrator) dispatchRetry(instanceID string, c proto.Command, timeout
 	return res, err
 }
 
-// scheduleRounds packs every ordered pair (i,j) of n nodes into concurrent rounds
-// where no node index appears twice. All pairs within a round are node-disjoint and
-// can run simultaneously without contending on a shared node. This turns the O(N²)
-// serial matrix into ~2(N-1) rounds of up to N/2 concurrent pairs (O(N) wall-clock).
-func scheduleRounds(n int) [][][2]int {
-	var remaining [][2]int
-	for i := 0; i < n; i++ {
-		for j := 0; j < n; j++ {
-			if i != j {
-				remaining = append(remaining, [2]int{i, j})
-			}
-		}
-	}
-	var rounds [][][2]int
-	for len(remaining) > 0 {
-		used := make([]bool, n)
-		var round, next [][2]int
-		for _, p := range remaining {
-			if !used[p[0]] && !used[p[1]] {
-				round = append(round, p)
-				used[p[0]], used[p[1]] = true, true
-			} else {
-				next = append(next, p)
-			}
-		}
-		rounds = append(rounds, round)
-		remaining = next
-	}
-	return rounds
-}
-
 // UcastMatrixParams configures a serial NxN ucast campaign.
 type UcastMatrixParams struct {
-	Variation string `json:"variation"` // kernel|xdp-tx|xdp-rx|xdp-txrx
-	Count     int    `json:"count"`
-	Rate      int    `json:"rate"`
-	Warmup    int    `json:"warmup"`
-	DataPort  int    `json:"data_port"`
-	ListenPort int   `json:"listen_port"`
+	Variation   string `json:"variation"`   // kernel|xdp
+	Count       int    `json:"count"`
+	Rate        int    `json:"rate"`
+	Warmup      int    `json:"warmup"`
+	MaxParallel int    `json:"max_parallel"` // max concurrent pairs per round (0 = unlimited, 1 = serial)
+	DataPort    int    `json:"data_port"`
+	ListenPort  int    `json:"listen_port"`
+
+	// MaxLossPct rejects any pair whose loss exceeds this percentage instead of
+	// recording its (survivorship-biased) percentiles. Negative disables the
+	// gate; 0 means "use the default". See DefaultMaxLossPct.
+	MaxLossPct float64 `json:"max_loss_pct"`
 }
+
+// DefaultMaxLossPct is the loss ceiling applied when UcastMatrixParams.MaxLossPct
+// is left at 0. A few percent tolerates ordinary straggler drops while still
+// rejecting the pathological runs (30-95% loss) that make percentiles meaningless.
+const DefaultMaxLossPct = 2.0
 
 // RunUcastMatrix runs the NxN serially — ONE sender at a time (the contention
 // constraint), each measuring to every peer. Telemetry flows to the collector
@@ -173,8 +154,8 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	defer atomic.StoreInt32(&o.running, 0)
 	atomic.StoreInt32(&o.cancel, 0)
 
-	xdpTx := p.Variation == "xdp-tx" || p.Variation == "xdp-txrx"
-	xdpRx := p.Variation == "xdp-rx" || p.Variation == "xdp-txrx"
+	xdpTx := p.Variation == "xdp"
+	xdpRx := p.Variation == "xdp"
 	if p.Count == 0 {
 		p.Count = 10000
 	}
@@ -190,6 +171,13 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	if p.ListenPort == 0 {
 		p.ListenPort = 19020
 	}
+	// 0 => apply the default gate. Negative => caller explicitly disabled it,
+	// which we normalise to 0 so the agent-side check is skipped.
+	if p.MaxLossPct == 0 {
+		p.MaxLossPct = DefaultMaxLossPct
+	} else if p.MaxLossPct < 0 {
+		p.MaxLossPct = 0
+	}
 	nodes := o.reg.Online()
 	if len(nodes) < 2 {
 		o.hub.Emit("job", map[string]any{"status": "error", "kind": "ucast",
@@ -197,78 +185,139 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 		log.Printf("ucast campaign refused: only %d online node(s)", len(nodes))
 		return
 	}
-	rounds := scheduleRounds(len(nodes))
 	total := len(nodes) * (len(nodes) - 1)
 	o.hub.Emit("job", map[string]any{"status": "running", "kind": "ucast", "variation": p.Variation,
-		"pairs": total, "rounds": len(rounds)})
-	log.Printf("campaign ucast/%s over %d nodes (%d pairs, %d parallel rounds)", p.Variation, len(nodes), total, len(rounds))
+		"pairs": total, "sources": len(nodes)})
+	log.Printf("campaign ucast/%s over %d nodes (%d pairs, source-grouped, max %d concurrent per source)",
+		p.Variation, len(nodes), total, p.MaxParallel)
 
-	// Prepare: only (re)set nodes that aren't already echoing in ucast mode — a
-	// quick check against the last heartbeat state, so a heartbeat re-run is cheap
-	// when the fleet is already prepared.
-	var toPrep []Node
+	// Prepare: converge every node to the ucast echo profile. EnsureHostState is
+	// idempotent, so nodes already correct cost one cheap state read and no
+	// restart — we can therefore dispatch to all of them unconditionally instead
+	// of guessing from a possibly-stale heartbeat.
+	o.hub.Emit("job", map[string]any{"status": "progress", "kind": "ucast", "variation": p.Variation,
+		"phase": "prepare", "msg": fmt.Sprintf("converging %d node(s) to ucast echo profile", len(nodes))})
+	var prep sync.WaitGroup
 	for _, n := range nodes {
-		if n.ReplicatorMode != "ucast" || n.ReplicatorSvc != "active" {
-			toPrep = append(toPrep, n)
-		}
+		prep.Add(1)
+		go func(n Node) {
+			defer prep.Done()
+			o.dispatchRetry(n.InstanceID, proto.Command{Type: proto.CmdEnsureHost,
+				Host: &proto.HostStateParams{Profile: proto.HostEchoUcast}}, 60*time.Second, 2)
+		}(n)
 	}
-	if len(toPrep) > 0 {
-		o.hub.Emit("job", map[string]any{"status": "progress", "kind": "ucast", "variation": p.Variation,
-			"phase": "prepare", "msg": fmt.Sprintf("preparing %d/%d node(s) to ucast echo mode", len(toPrep), len(nodes))})
-		var prep sync.WaitGroup
-		for _, n := range toPrep {
-			prep.Add(1)
-			go func(n Node) {
-				defer prep.Done()
-				o.dispatchRetry(n.InstanceID, proto.Command{Type: proto.CmdSetMode, Mode: "ucast"}, 45*time.Second, 2)
-			}(n)
-		}
-		prep.Wait()
+	prep.Wait()
+	// Purge stale ucast destinations on EVERY node before measuring.
+	//
+	// `rtt` deregisters itself on exit, but a killed/crashed rtt (timeout, cancel,
+	// OOM) leaves an entry behind. In ucast mode the replicator echoes each packet
+	// to EVERY registered destination, so a single stale entry doubles the per-packet
+	// TX work on that node and shifts its whole p50 distribution into the ms range.
+	// Purging here makes each campaign start from a clean registry.
+	o.hub.Emit("job", map[string]any{"status": "progress", "kind": "ucast", "variation": p.Variation,
+		"phase": "prepare", "msg": "initiating test"})
+	var purge sync.WaitGroup
+	for _, n := range nodes {
+		purge.Add(1)
+		go func(n Node) {
+			defer purge.Done()
+			o.dispatchRetry(n.InstanceID, proto.Command{Type: proto.CmdPurgeDests}, 30*time.Second, 2)
+		}(n)
 	}
+	purge.Wait()
 	o.mu.Lock()
 	o.lastMcastFwd = "" // a ucast run leaves replicators in ucast mode
 	o.mu.Unlock()
 
 	var done int64
+	var rejected int64 // pairs refused by the loss gate (ran fine, numbers unusable)
 	perPair := 30 * time.Second
-	for ri, round := range rounds {
+	// MaxParallel caps concurrent pairs per round. 0 or negative = unlimited (legacy).
+	// For correctness, use 1 (serial) or low values (2-4) to avoid NIC/softirq contention.
+	maxPar := p.MaxParallel
+	if maxPar <= 0 {
+		maxPar = len(nodes) // effectively unlimited (more than any round can have)
+	}
+
+	for si, s := range nodes {
 		if o.cancelled() {
 			o.hub.Emit("job", map[string]any{"status": "cancelled", "kind": "ucast", "variation": p.Variation,
 				"done": atomic.LoadInt64(&done), "total": total})
 			log.Printf("campaign ucast/%s cancelled after %d/%d", p.Variation, atomic.LoadInt64(&done), total)
+			o.dispatchRetry(s.InstanceID, proto.Command{Type: proto.CmdEnsureHost,
+				Host: &proto.HostStateParams{Profile: proto.HostEchoUcast}}, 60*time.Second, 1)
 			return
 		}
+
+		// This node becomes the measurer: stop its replicator so no AF_XDP
+		// zero-copy socket owns the RX queue its echoes return on, and attach the
+		// XDP program standalone so xdp mode still stamps. Grouping the matrix by
+		// SOURCE keeps this to exactly TWO transitions per node for the whole
+		// campaign; flipping per node-disjoint round would cost O(rounds x nodes)
+		// systemctl operations instead.
+		hres, herr := o.dispatchRetry(s.InstanceID, proto.Command{Type: proto.CmdEnsureHost,
+			Host: &proto.HostStateParams{Profile: proto.HostClient}}, 60*time.Second, 2)
+		if herr != nil || !hres.OK {
+			o.hub.Emit("job", map[string]any{"status": "progress", "kind": "ucast", "variation": p.Variation,
+				"phase": "prepare", "ok": false, "src": s.PrivateIP,
+				"err": "could not put node into client profile: " + firstErr(herr, hres.Err)})
+			continue
+		}
+
 		var wg sync.WaitGroup
-		for _, pr := range round { // pairs in a round are node-disjoint -> safe to run concurrently
-			s, d := nodes[pr[0]], nodes[pr[1]]
+		sem := make(chan struct{}, maxPar)
+		for _, d := range nodes {
+			if d.InstanceID == s.InstanceID {
+				continue
+			}
 			wg.Add(1)
-			// Pairs in this round are node-disjoint: no node is sender or receiver
-			// in two simultaneous pairs, so they run without mutual interference.
-			go func(s, d Node, ri int) {
+			sem <- struct{}{} // block if maxPar measurements already in flight
+			go func(s, d Node) {
 				defer wg.Done()
+				defer func() { <-sem }()
 				cmd := proto.Command{Type: proto.CmdRunRTT, RTT: &proto.RTTParams{
 					TargetIP: d.PrivateIP, DataPort: p.DataPort, ListenIP: s.PrivateIP, ListenPort: p.ListenPort,
 					Count: p.Count, Rate: p.Rate, Warmup: p.Warmup, SendCPU: -1, RecvCPU: -1,
-					XdpTx: xdpTx, XdpTxQueue: 1, XdpRx: xdpRx,
+					XdpTx: xdpTx, XdpTxQueue: 1, XdpRx: xdpRx, MaxLossPct: p.MaxLossPct,
 				}}
 				res, err := o.dispatchRetry(s.InstanceID, cmd, perPair, 2)
 				n := atomic.AddInt64(&done, 1)
 				ev := map[string]any{"status": "progress", "done": n, "total": total,
-					"src": s.PrivateIP, "dst": d.PrivateIP, "round": ri + 1, "rounds": len(rounds)}
+					"src": s.PrivateIP, "dst": d.PrivateIP, "source": si + 1, "sources": len(nodes)}
 				if err != nil || !res.OK {
 					ev["ok"] = false
-					ev["err"] = firstErr(err, res.Err)
+					e := firstErr(err, res.Err)
+					ev["err"] = e
+					// Surface a loss-gate rejection distinctly from a genuine
+					// failure: the run executed fine, we are refusing its numbers.
+					if strings.Contains(e, "loss gate:") {
+						ev["rejected"] = "loss"
+						atomic.AddInt64(&rejected, 1)
+					}
 				} else {
 					ev["ok"] = true
 				}
 				o.hub.Emit("job", ev)
-			}(s, d, ri)
+			}(s, d)
 		}
-		wg.Wait() // barrier: the next round starts only once this round's pairs finish
+		wg.Wait() // all of this source's measurements are done
+
+		// Restore this node to the echo profile so it can serve as a destination
+		// for the remaining sources. Second and final transition for this node.
+		o.dispatchRetry(s.InstanceID, proto.Command{Type: proto.CmdEnsureHost,
+			Host: &proto.HostStateParams{Profile: proto.HostEchoUcast}}, 60*time.Second, 2)
 	}
+	rej := atomic.LoadInt64(&rejected)
 	o.hub.Emit("job", map[string]any{"status": "done", "kind": "ucast", "variation": p.Variation,
-		"done": atomic.LoadInt64(&done), "total": total})
-	log.Printf("campaign ucast/%s complete (%d/%d)", p.Variation, atomic.LoadInt64(&done), total)
+		"done": atomic.LoadInt64(&done), "total": total,
+		"rejected_loss": rej, "max_loss_pct": p.MaxLossPct})
+	if rej > 0 {
+		log.Printf("campaign ucast/%s complete (%d/%d) — %d pair(s) REJECTED by the loss gate (>%.2f%% loss); "+
+			"their percentiles were discarded, not recorded",
+			p.Variation, atomic.LoadInt64(&done), total, rej, p.MaxLossPct)
+	} else {
+		log.Printf("campaign ucast/%s complete (%d/%d)", p.Variation, atomic.LoadInt64(&done), total)
+	}
 }
 
 func firstErr(err error, s string) string {
@@ -338,16 +387,23 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 	// One-time: free the AF_XDP queue on the transient app nodes. Skip the (slow)
 	// replicator STOP when it's already inactive from a prior run — but always run
 	// the cheap cleanup (detach stale XDP / kill leftover procs) for robustness.
-	if source.ReplicatorSvc == "active" {
-		o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdReplicatorSvc, SvcAction: "stop"}, svcT)
+	// Converge source + destinations to the mcast endpoint profile: replicator
+	// stopped and XDP detached, because mcast_send / mcast_receive bind their own
+	// AF_XDP sockets and load their own program. EnsureHostState is idempotent, so
+	// nodes already in that state cost one state read and no service work — this
+	// replaces the previous heartbeat-guessing plus unconditional cleanup, and is
+	// what makes a ucast -> mcast switchover converge in a single pass per node.
+	var mprep sync.WaitGroup
+	endpoints := append([]Node{*source}, dests...)
+	for _, n := range endpoints {
+		mprep.Add(1)
+		go func(n Node) {
+			defer mprep.Done()
+			o.DispatchAgent(n.InstanceID, proto.Command{Type: proto.CmdEnsureHost,
+				Host: &proto.HostStateParams{Profile: proto.HostMcastEndpoint}}, runSetup)
+		}(n)
 	}
-	o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
-	for _, d := range dests {
-		if d.ReplicatorSvc == "active" {
-			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdReplicatorSvc, SvcAction: "stop"}, svcT)
-		}
-		o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
-	}
+	mprep.Wait()
 	o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "phase": "prepare",
 		"msg": "freed AF_XDP queues on source + destinations"})
 
@@ -358,14 +414,16 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			log.Printf("campaign mcast cancelled")
 			return
 		}
-		// Skip the (costly, replicator-restarting) set_mode when the replicator is
-		// already in mcast/<mode> — a quick check for cheap heartbeat re-runs.
+		// EnsureHostState is idempotent and collapses a mode+fwd change into a
+		// single restart, so the cached-mode guard is only an extra fast path: if
+		// the replicator is already in mcast/<mode> the agent does no service work.
 		o.mu.Lock()
 		skip := replicator.ReplicatorMode == "mcast" && o.lastMcastFwd == mode
 		o.mu.Unlock()
 		if !skip {
 			if res, err := o.DispatchAgent(replicator.InstanceID,
-				proto.Command{Type: proto.CmdSetMode, Mode: "mcast", FwdMode: mode}, svcT); err != nil || !res.OK {
+				proto.Command{Type: proto.CmdEnsureHost, Host: &proto.HostStateParams{
+					Profile: proto.HostMcastReplicator, FwdMode: mode}}, svcT); err != nil || !res.OK {
 				o.hub.Emit("job", map[string]any{"status": "error", "mode": mode, "stage": "set_mode", "err": firstErr(err, res.Err)})
 				continue
 			}
@@ -375,15 +433,25 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 		}
 		o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
 			"msg": "replicator in mcast/" + mode + " — destinations joining group + clock sync"})
+		// kernel (XDP_TX) mode is a single-destination passthrough — it cannot
+		// fan out to multiple receivers. Use only the first destination as the
+		// representative measurement; copy/inplace test the full fan-out.
+		modeDests := dests
+		if mode == "kernel" && len(dests) > 1 {
+			modeDests = dests[:1]
+			o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
+				"msg": fmt.Sprintf("kernel mode: single-destination only (XDP_TX passthrough) — using %s", dests[0].PrivateIP)})
+			log.Printf("mcast/kernel: limiting to 1 destination (%s) — XDP_TX is single-dest passthrough", dests[0].PrivateIP)
+		}
 		// Destinations (re)join the group behind the replicator + clock-gate.
-		for _, d := range dests {
+		for _, d := range modeDests {
 			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdJoinGroup,
 				Mcast: &proto.McastParams{ReplicatorIP: replicator.PrivateIP, Group: p.Group}}, runSetup)
 			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
 		}
 		o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
 		if o.cancelled() {
-			for _, d := range dests {
+			for _, d := range modeDests {
 				o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 			}
 			o.hub.Emit("job", map[string]any{"status": "cancelled", "kind": "mcast", "modes": p.Modes})
@@ -391,7 +459,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			return
 		}
 		o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
-			"msg": fmt.Sprintf("sending %d packets source→replicator→%d dest(s)", p.Count, len(dests))})
+			"msg": fmt.Sprintf("sending %d packets source→replicator→%d dest(s)", p.Count, len(modeDests))})
 
 		// Run (retryable): start each destination receiver (blocks in-agent until
 		// count/timeout), fire the source send, await. On failure, retry the batch
@@ -409,7 +477,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 				break
 			}
 			var wg sync.WaitGroup
-			results = make([]rr, len(dests))
+			results = make([]rr, len(modeDests))
 			// Cancel watcher: if a cancel arrives mid-measurement, kill the in-flight
 			// mcast_receive/mcast_send (cleanup) so the blocking dispatches return.
 			stopWatch := make(chan struct{})
@@ -423,7 +491,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 					case <-t.C:
 						if o.cancelled() {
 							o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
-							for _, d := range dests {
+							for _, d := range modeDests {
 								o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 							}
 							return
@@ -431,7 +499,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 					}
 				}
 			}()
-			for i, d := range dests {
+			for i, d := range modeDests {
 				i, d := i, d
 				wg.Add(1)
 				go func() {
@@ -461,13 +529,13 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			}
 			if !ok && attempt < 2 {
 				log.Printf("mcast/%s attempt %d failed; retrying", mode, attempt)
-				for _, d := range dests {
+				for _, d := range modeDests {
 					o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 				}
 			}
 		}
 		if o.cancelled() {
-			for _, d := range dests {
+			for _, d := range modeDests {
 				o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 			}
 			o.hub.Emit("job", map[string]any{"status": "cancelled", "kind": "mcast", "modes": p.Modes})
@@ -479,7 +547,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
 				"src": source.PrivateIP, "dst": r.dst, "ok": pairOK, "err": firstErr(r.err, r.res.Err)})
 		}
-		for _, d := range dests { // release the queue for the next mode
+		for _, d := range modeDests { // release the queue for the next mode
 			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 		}
 		o.hub.Emit("job", map[string]any{"status": "mode_done", "kind": "mcast", "mode": mode, "ok": ok})

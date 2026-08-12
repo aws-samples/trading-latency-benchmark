@@ -91,7 +91,7 @@ if [ -d "$CP_DIR/agent" ]; then
   [ -n "$GOVER" ] || { echo "FATAL: could not resolve Go version from go.dev"; exit 1; }
   curl -fsSL "https://go.dev/dl/${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tgz || { echo "FATAL: Go toolchain download failed"; exit 1; }
   rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz
-  ( cd "$CP_DIR" && GOFLAGS=-mod=mod GOCACHE=/tmp/gocache GOPATH=/tmp/go PATH=/usr/local/go/bin:$PATH \
+  ( cd "$CP_DIR" && GOFLAGS="-mod=mod -buildvcs=false" GOCACHE=/tmp/gocache GOPATH=/tmp/go PATH=/usr/local/go/bin:$PATH \
       go build -o /opt/af-xdp/afxdp-agent ./agent )
   [ -x /opt/af-xdp/afxdp-agent ] || { echo "FATAL: afxdp-agent did not build"; exit 1; }
   echo "afxdp-agent built"

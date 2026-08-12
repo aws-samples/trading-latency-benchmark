@@ -28,7 +28,7 @@ if (!keyPairName) {
 // Formats:
 //   --context fleet='[{"count":2}]'                        (inline JSON)
 //   --context fleet=@path/to/file.json                     (load from file)
-//   --context scenario=ucast/az-cpg-3x                     (from scenarios/)
+//   --context scenario=ucast-az-cpg-3                      (from scenarios/)
 //
 function resolveFleet(): FleetEntry[] {
   const fleetRaw     = app.node.tryGetContext('fleet');
@@ -81,7 +81,7 @@ function resolveFleet(): FleetEntry[] {
   if (!fleetData) {
     throw new Error(
       'Fleet spec required. Provide one of:\n' +
-      '  --context scenario=ucast/az-cpg-3x      (from scenarios/)\n' +
+      '  --context scenario=ucast-az-cpg-3         (from scenarios/)\n' +
       '  --context fleet=@path/to/file.json       (from file)\n' +
       '  --context fleet=\'[{"count":2}]\'          (inline JSON)'
     );

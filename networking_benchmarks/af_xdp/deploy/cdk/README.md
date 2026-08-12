@@ -11,7 +11,7 @@ Fleet-driven CDK infrastructure for the AF_XDP latency benchmark. Deploys EC2 in
 | Directory | Description | Details |
 |-----------|-------------|---------|
 | [`lib/`](lib/README.md) | CDK stack constructs (FleetStack, AmiBuilderStack, ControlPlaneStack) | Placement validation, cross-region peering |
-| [`scenarios/`](scenarios/README.md) | Pre-built fleet topologies (ucast + mcast) | 8 scenarios, cost estimates, custom format |
+| [`scenarios/`](scenarios/README.md) | Pre-built fleet topologies (ucast + mcast + all) | 6 scenarios, cost estimates, custom format |
 | [`scripts/`](scripts/README.md) | AMI bake script and configs applied | Binaries, sysctl, chrony, systemd units, Go agent |
 | `bin/` | CDK app entry point | Fleet resolution, deployment type routing |
 
@@ -39,7 +39,7 @@ npm install
 
 # ── Option A: afxdpctl (recommended) ──────────────────────────────────────
 afxdpctl up --key virginia --git-repo <repo-url> --git-ref main \
-            --scenario ucast/az-cpg-3 --bake
+            --scenario ucast-az-cpg-3 --bake
 
 # ── Option B: manual CDK commands ─────────────────────────────────────────
 
@@ -55,11 +55,11 @@ npx cdk deploy --context deploymentType=control-plane \
 
 # 3. Deploy fleet (instant readiness — baked AMI resolved from SSM)
 npx cdk deploy --context keyPairName=virginia \
-               --context scenario=ucast/az-cpg-3
+               --context scenario=ucast-az-cpg-3
 
 # 4. Deploy fleet with stock AMI (needs provisioning via ansible)
 npx cdk deploy --context keyPairName=virginia \
-               --context scenario=ucast/az-cpg-2 \
+               --context scenario=ucast-az-cpg-3 \
                --context amiId=ami-xxxxxx
 ```
 
@@ -75,9 +75,9 @@ JSON array of `FleetEntry` objects — all fields optional with sensible default
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | `c7i.2xlarge` | EC2 instance type |
+| `type` | string | `c7i.4xlarge` | EC2 instance type |
 | `count` | number | `1` | Number of instances to create |
-| `role` | string | `replicator` | Logical role: `source`, `replicator`, or `destination` |
+| `role` | string | `destination` | Logical role: `source`, `replicator`, or `destination` |
 | `az` | string | `a` | AZ suffix (e.g. `"a"`) or full name (e.g. `"us-east-1a"`) |
 | `pgType` | string | none | Placement strategy: `cluster`, `spread`, or `partition` |
 | `pgName` | string | auto | Group label — entries with the same name share a placement group |
@@ -87,7 +87,7 @@ JSON array of `FleetEntry` objects — all fields optional with sensible default
 
 ```bash
 # From a scenarios/ file (recommended):
---context scenario=ucast/az-cpg-3
+--context scenario=ucast-az-cpg-3
 
 # From any JSON file:
 --context fleet=@path/to/file.json
@@ -124,7 +124,7 @@ Entries whose `region` differs from the primary region create a **second** Fleet
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `scenario` | — | Scenario path (e.g. `ucast/az-cpg-3`) — from `scenarios/` |
+| `scenario` | — | Scenario path (e.g. `ucast-az-cpg-3`) — from `scenarios/` |
 | `fleet` | — | Inline JSON array or `@file.json` path |
 | `amiId` | SSM-resolved | Custom/baked AMI for the primary region |
 | `secondaryAmiId` | AL2023 latest | AMI for the secondary region |
@@ -160,24 +160,24 @@ Entries whose `region` differs from the primary region create a **second** Fleet
 Deploy multiple independent fleets by varying `stackName`:
 
 ```bash
-npx cdk deploy --context scenario=ucast/az-cpg-3 --context stackName=cpg-bench \
+npx cdk deploy --context scenario=ucast-az-cpg-3 --context stackName=cpg-bench \
                --context keyPairName=virginia
-npx cdk deploy --context scenario=ucast/xaz-xcpg-10 --context stackName=xcpg-bench \
+npx cdk deploy --context scenario=ucast-xaz-xcpg-10 --context stackName=xcpg-bench \
                --context keyPairName=virginia
 
 # Destroy one:
 npx cdk destroy --context stackName=cpg-bench --context keyPairName=virginia \
-                --context scenario=ucast/az-cpg-3
+                --context scenario=ucast-az-cpg-3
 ```
 
 ## Cleanup
 
 ```bash
 # Single fleet:
-npx cdk destroy --context keyPairName=virginia --context scenario=ucast/az-cpg-3
+npx cdk destroy --context keyPairName=virginia --context scenario=ucast-az-cpg-3
 
 # All stacks (via afxdpctl):
-afxdpctl down --key virginia --scenario ucast/az-cpg-3
+afxdpctl down --key virginia --scenario ucast-az-cpg-3
 ```
 
 All resources use `RemovalPolicy.DESTROY` — no manual cleanup needed.

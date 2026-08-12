@@ -15,6 +15,7 @@ const (
 	SubjectRegister  = "fleet.register"  // agent -> backend, once per (re)connect
 	SubjectHeartbeat = "fleet.heartbeat" // agent -> backend, periodic liveness
 	SubjectTelemetry = "fleet.telemetry" // agent -> backend, measurement stream
+	SubjectError     = "fleet.error"     // agent -> backend, error event (proactive)
 	SubjectCmdAll    = "fleet.cmd.all"   // backend -> every agent (broadcast)
 
 	// Wildcards the backend subscribes to.

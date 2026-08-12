@@ -16,7 +16,7 @@ func TestCollectorApplyAndKey(t *testing.T) {
 	c := NewCollector()
 	c.Apply(tel("kernel", "a", "b", 10))
 	c.Apply(tel("kernel", "a", "b", 12)) // same edge -> update
-	c.Apply(tel("xdp-tx", "a", "b", 5))  // different variation -> distinct edge
+	c.Apply(tel("xdp", "a", "b", 5))  // different variation -> distinct edge
 	c.Apply(tel("kernel", "b", "a", 9))  // reverse direction -> distinct edge
 	if got := len(c.Snapshot()); got != 3 {
 		t.Fatalf("want 3 distinct edges, got %d", got)
@@ -89,7 +89,7 @@ func TestCollectorConcurrentLoad(t *testing.T) {
 			}
 		}()
 	}
-	vars := []string{"kernel", "xdp-tx", "copy"}
+	vars := []string{"kernel", "xdp", "copy"}
 	for w := 0; w < 8; w++ {
 		writers.Add(1)
 		go func(w int) {

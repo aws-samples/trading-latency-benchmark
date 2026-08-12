@@ -30,7 +30,7 @@ export function renderEdges(ctx) {
   const baseOpacity = (avg) => {
     if (avg > p60) return 0.07;
     const t = p60 > pMin ? (avg - pMin) / (p60 - pMin) : 0;
-    return +(0.6 - t * 0.3).toFixed(3);
+    return +(0.18 - t * 0.06).toFixed(3);   // fast/green de-emphasised further
   };
 
   for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {

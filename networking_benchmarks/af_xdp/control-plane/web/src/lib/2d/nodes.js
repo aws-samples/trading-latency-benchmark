@@ -5,9 +5,9 @@
 //           Multiple nodes can be pinned simultaneously.
 // Click again (or Deselect All) → unpin and remove the table.
 
-import { nodeRadius, getNodeColors, esc } from './palette.js';
+import { nodeRadius, capabilityColor, buildCapabilityScale, esc } from './palette.js';
 import { enhancePinned } from './panels.js';
-import { buildPeerTable } from './tables.js';
+import { nodeTipHTML } from './tables.js';
 import { applySel } from './selection.js';
 
 const ROLE_LABEL = { source: 'src', replicator: 'relay', destination: 'dst' };
@@ -15,14 +15,10 @@ const ROLE_CSS   = { source: 'src', replicator: 'relay', destination: 'dst' };
 
 const PANEL_GAP = 8, PANEL_TOP = 80;
 
-// Build the HTML content of a tooltip/pinned table for node i.
+// Build the HTML content of a tooltip/pinned table for node i. Delegates to the
+// SHARED builder (2d/tables.js) so the 2D and 3D latency panels are identical.
 function tipHTML(ctx, i) {
-  const node = ctx.fleet.nodes[i];
-  const roleBadge = (node.role && ROLE_LABEL[node.role])
-    ? ' <span class="role-badge role-' + esc(ROLE_CSS[node.role] || node.role) + '">' + ROLE_LABEL[node.role] + '</span>' : '';
-  return '<h3>' + esc(node.public_ip || node.private_ip || node.ec2_name) + roleBadge + '</h3>'
-    + '<div class="direction">Outbound</div>' + buildPeerTable(ctx, i, false)
-    + '<div class="direction" style="margin-top:6px">Inbound</div>' + buildPeerTable(ctx, i, true);
+  return nodeTipHTML(ctx.fleet, ctx.matrix, i);
 }
 
 
@@ -108,21 +104,22 @@ export function renderNodes(ctx) {
   ctx.disposers.push(unpinAll);
 
   // ── Node elements ─────────────────────────────────────────────────────────
+  const capScale = buildCapabilityScale(fleet.nodes);   // uniform blue→green over present types
   fleet.nodes.forEach((node, i) => {
-    const r = nodeRadius(node), colors = getNodeColors(node.type);
+    const r = nodeRadius(node), colors = capabilityColor(node, capScale);
     const el = document.createElement('div');
     el.className = 'node' + (node.role ? ' role-' + node.role : '') + (node.online === false ? ' offline' : '');
     el.style.width = el.style.height = (r * 2) + 'px';
     el.style.left = (positions[i].x - r) + 'px';
     el.style.top  = (positions[i].y - r) + 'px';
     el.style.background = colors.bg;
-    // Border: role colour (solid) overrides the instance-family colour when a role is set.
+    // Border: role colour (solid) overrides the capability tint when a role is set.
     const ROLE_BORDER = { replicator: '#f0883e', source: '#1f6feb', destination: '#2ea043' };
     el.style.borderColor = ROLE_BORDER[node.role] || colors.border;
     el.style.borderStyle = 'solid';
 
     const pgBadge = (node.cpg_name && node.cpg_name !== 'unknown')
-      ? '<span class="pg-badge">' + esc(node.cpg_name) + '</span>' : '';
+      ? '<span class="pg-badge" title="' + esc(node.cpg_name) + '">' + esc(node.cpg_name.slice(0, 8)) + '</span>' : '';
     const roleLabel = node.role && ROLE_LABEL[node.role];
     const roleBadge = roleLabel
       ? '<span class="role-badge role-' + esc(ROLE_CSS[node.role] || node.role) + '">' + roleLabel + '</span>' : '';

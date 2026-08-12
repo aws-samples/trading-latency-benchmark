@@ -82,9 +82,18 @@
       const res = await fetch(url);
       if (!res.ok) throw new Error(`GET ${url} -> ${res.status}`);
       fleet = validateFleet(await res.json());
+      // Infer kind from the data: if nodes have source+replicator+destination roles → mcast.
+      const roles = new Set((fleet.nodes || []).map(n => n.role).filter(Boolean));
+      if (roles.has('source') && roles.has('replicator') && roles.has('destination')) {
+        kind = 'mcast';
+      } else if ((label || url).includes('mcast')) {
+        kind = 'mcast';
+      } else {
+        kind = 'ucast';
+      }
       loading = false; remount();
       panel?.setStats(statsFromFleet(fleet));
-      panel?.setStatus(`loaded ${label || url}`);
+      panel?.setStatus(`loaded ${label || url} (${kind})`);
     } catch (e) { loading = false; error = e.message || String(e); panel?.setStatus('load failed: ' + error); }
   }
 
@@ -167,7 +176,7 @@
     const pfx = (() => { const w = cohesionCheck(body); return w.length ? '\u26a0 ' + w.join(' · ') + ' — ' : ''; })();
     try {
       if (body.kind === 'ucast' && body.variation === 'all') {
-        for (const v of ['kernel', 'xdp-tx', 'xdp-rx', 'xdp-txrx']) {
+        for (const v of ['kernel', 'xdp']) {
           if (runCancelled) break;
           panel?.setStatus(`${pfx}running ucast/${v}…`);
           await runCampaign({ ...body, variation: v });
@@ -191,7 +200,7 @@
   function startHeartbeat(body) {
     stopHeartbeat();
     hbBody = body;
-    const ms = Math.max(10, body.intervalSec || 30) * 1000;   // 10s floor keeps it resource-sane
+    const ms = Math.max(60, body.intervalSec || 60) * 1000;
     const tick = async () => { if (hbRunning || !hbBody) return; hbRunning = true; try { await doRun(hbBody); } finally { hbRunning = false; } };
     tick();                                    // fire immediately
     hbTimer = setInterval(tick, ms);
@@ -211,10 +220,11 @@
         if (!fleet || !(fleet.nodes || []).length) { panel?.setStatus('no data to report yet'); return; }
         const html = buildReportHTML(fleet, kind, variation);
         const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
-        const a = document.createElement('a');
-        a.href = url; a.download = `afxdp-report-${kind}-${variation}-${Date.now()}.html`;
-        document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        const a = Object.assign(document.createElement('a'), {
+          href: url, download: `afxdp-report-${kind}-${variation}-${Date.now()}.html`,
+        });
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
         panel?.setStatus(`downloaded report ${kind}/${variation}`);
       },
       onRun: doRun,

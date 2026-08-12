@@ -48,6 +48,7 @@ func main() {
 	if err := startIngest(nc, reg, coll, hub); err != nil {
 		log.Fatalf("ingest: %v", err)
 	}
+	errReg := NewErrorRegistry(nc, hub)
 	orch, err := NewOrchestrator(nc, reg, hub)
 	if err != nil {
 		log.Fatalf("orchestrator: %v", err)
@@ -57,7 +58,7 @@ func main() {
 	if web == "" {
 		web = webDirDefault()
 	}
-	srv := &Server{reg: reg, coll: coll, hub: hub, orch: orch, web: web}
+	srv := &Server{reg: reg, coll: coll, hub: hub, orch: orch, errReg: errReg, web: web}
 	log.Printf("backend up: nats=%s http=%s web=%q", *natsURL, *addr, web)
 	if err := http.ListenAndServe(*addr, srv.routes()); err != nil {
 		log.Fatalf("http: %v", err)

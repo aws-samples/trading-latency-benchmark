@@ -61,7 +61,11 @@ void Replicator::addDestination(const std::string& ipAddress, uint16_t port) {
     }
 
     std::lock_guard<std::mutex> lock(destinations_mutex_);
-    all_destinations_.emplace(ipAddress, dest);
+    // insert_or_assign (NOT emplace): a re-registration from the same IP must
+    // REFRESH the port and the freshly-resolved MAC. emplace() silently keeps the
+    // first entry, so a second run from the same host would keep echoing to the
+    // previous run's (now dead) port.
+    all_destinations_.insert_or_assign(ipAddress, dest);
     std::cout << "Added destination: " << ipAddress << ":" << port << std::endl;
 }
 

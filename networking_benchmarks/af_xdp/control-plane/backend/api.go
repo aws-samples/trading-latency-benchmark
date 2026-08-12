@@ -11,11 +11,12 @@ import (
 )
 
 type Server struct {
-	reg  *Registry
-	coll *Collector
-	hub  *Hub
-	orch *Orchestrator
-	web  string // static web dir (may be empty)
+	reg    *Registry
+	coll   *Collector
+	hub    *Hub
+	orch   *Orchestrator
+	errReg *ErrorRegistry
+	web    string // static web dir (may be empty)
 }
 
 func (s *Server) routes() *http.ServeMux {
@@ -25,6 +26,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/run", s.handleRun)
 	mux.HandleFunc("/api/cancel", s.handleCancel)
 	mux.HandleFunc("/api/cmd", s.handleCmd)
+	mux.HandleFunc("/api/errors", s.handleErrors)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	if s.web != "" {
 		mux.Handle("/", http.FileServer(http.Dir(s.web)))
@@ -165,6 +167,16 @@ func writeSSE(w http.ResponseWriter, data []byte) {
 	w.Write([]byte("data: "))
 	w.Write(data)
 	w.Write([]byte("\n\n"))
+}
+
+// GET /api/errors — all node errors (or ?node=<id> for one node).
+func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.URL.Query().Get("node")
+	if nodeID != "" {
+		writeJSON(w, http.StatusOK, s.errReg.ErrorsFor(nodeID))
+	} else {
+		writeJSON(w, http.StatusOK, s.errReg.AllErrors())
+	}
 }
 
 func webDirDefault() string {

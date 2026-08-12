@@ -2,25 +2,22 @@
 
 Pre-built fleet specifications for common benchmark topologies.
 
-Load via: `--context scenario=<subdir>/<name>` (e.g. `--context scenario=ucast/az-cpg-3`)
+Load via: `--context scenario=<name>` (e.g. `--context scenario=ucast-az-cpg-3`)
 
 ## ucast/ — Unicast RTT benchmarks
 
-All nodes act as peers (role defaults to `replicator`). Measures point-to-point latency.
+All nodes act as peers (role is irrelevant for ucast — the orchestrator uses all online nodes). Measures point-to-point latency.
 
 **Instance type: `c7i.4xlarge`** (set per entry). Unicast co-locates the replicator
 poll thread + rtt sender + rtt receiver on the *same* node, needing 5 dedicated cores
-(OS, ENA IRQ, replicator poll, rtt send, rtt recv) — more than a `c7i.2xlarge` has
-after `nosmt` (4 online). Core pinning is derived **dynamically at runtime** from the
+(OS, ENA IRQ, replicator poll, rtt send, rtt recv). Core pinning is derived **dynamically at runtime** from the
 isolated set (`run_ucast.yaml` `auto_pin` + the replicator's `initializeCpuCores`), so
 the same AMI/code adapts to any size.
 
 | File | Topology | Instances | Notes |
 |------|----------|:---------:|-------|
-| `az-cpg-2.json` | Same AZ (a), single cluster PG — minimal ucast pair | 2 | Cheapest ucast test |
-| `az-cpg-3.json` | Same AZ (a), single cluster PG | 3 | Standard ucast triangle |
-| `xaz-xcpg-10.json` | Cross AZ (a+b): 2 CPGs + 2 SPGs + 2 unplaced | 10 | Full placement matrix |
-| `xregion-4.json` | Cross region (us-east-1 ↔ eu-west-2), 1 cluster PG per region | 4 | Cross-region latency |
+| `ucast-az-cpg-3.json` | Same AZ (a), single cluster PG | 3 | Standard ucast triangle |
+| `ucast-xaz-xcpg-10.json` | Cross AZ (a+b): 2 CPGs + 2 SPGs + 2 unplaced | 10 | Full placement matrix |
 
 ## mcast/ — Multicast fan-out benchmarks
 
@@ -32,10 +29,25 @@ app) fit a 2xlarge — the cost-efficient choice.
 
 | File | Topology | Instances | Notes |
 |------|----------|:---------:|-------|
-| `az-cpg-3.json` | Same AZ (a): source + replicator + destination in one cluster PG | 3 | Minimal mcast test |
-| `xregion-3.json` | Cross region: source+replicator CPG (us), destination (eu) | 3 | Cross-region fan-out |
-| `xregion-8.json` | Source+replicator CPG (us), 2 CPGs + 1 SPG of destinations (eu) | 8 | Multi-PG cross-region |
-| `xregion-xaz-xpg-6.json` | Source+replicator CPG (us-east-1a) → destinations across az-a/b + eu-west-2 | 6 | Mixed topology |
+| `mcast-az-cpg-3.json` | Same AZ (a): source + replicator + destination in one cluster PG | 3 | Minimal mcast test |
+| `mcast-xregion-3.json` | Cross region: source+replicator CPG (us), destination (eu) | 3 | Cross-region fan-out |
+| `mcast-xregion-xaz-xpg-6.json` | Source+replicator CPG (us-east-1a) → destinations across az-a/b + eu-west-2 | 6 | Mixed topology |
+
+## all — Combined placement comparison
+
+A large fleet for comparing placement strategies in one deployment. Uses the mcast
+datapath with multiple replicator and destination placement strategies.
+
+| File | Topology | Instances | Notes |
+|------|----------|:---------:|-------|
+| `all.json` | 2 sources + 14 replicators (7 CPG + 7 SPG) + 8 destinations (7 CPG + 1 cross-region) | 24 | Placement comparison — see note below |
+
+**Note on orchestrator behavior:** The control-plane `RunMcastMatrix` picks **one source**
+and **one replicator** (first online match) and fans out to **all destinations**. The extra
+sources and replicators are present to enable **targeted runs** via ansible (where you
+explicitly select the replicator IP) or future orchestrator extensions that iterate over
+replicators. With the control-plane as-is, only 1 source → 1 replicator → 8 destinations
+will be exercised per campaign.
 
 ## Custom Scenarios
 
@@ -53,9 +65,9 @@ Create any JSON file with the `FleetEntry` schema:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | `c7i.2xlarge` | EC2 instance type |
+| `type` | string | `c7i.4xlarge` | EC2 instance type |
 | `count` | number | `1` | Number of instances |
-| `role` | string | `replicator` | `source`, `replicator`, or `destination` |
+| `role` | string | `destination` | `source`, `replicator`, or `destination` |
 | `az` | string | `a` | AZ suffix (e.g. `"b"`) or full name (e.g. `"eu-west-2a"`) |
 | `pgType` | string | none | `cluster`, `spread`, or `partition` |
 | `pgName` | string | auto | Group label. Entries sharing a name share one placement group. Also recorded per-node in the `FleetManifest` as a reporting/clustering label. |
@@ -65,7 +77,7 @@ Create any JSON file with the `FleetEntry` schema:
 
 ```bash
 # Named scenario (from this directory):
---context scenario=ucast/az-cpg-3
+--context scenario=ucast-az-cpg-3
 
 # From any file on disk:
 --context fleet=@/path/to/my-custom.json
@@ -82,7 +94,7 @@ CDK validates at synth time:
 - **Comment-only entries** (objects with only `_comment` key) are silently filtered out
 - **Empty fleet** → error listing all available scenarios
 
-### Example: `ucast/xaz-xcpg-10.json`
+### Example: `ucast-xaz-xcpg-10.json`
 
 ```json
 [
