@@ -1,22 +1,22 @@
 """
-Integration tests for the AF_XDP benchmark suite using the kernel-mode replicator.
+Integration tests for the AF_XDP benchmark suite using the echo-mode replicator.
 
-Kernel mode (``replicator --kernel-mode``) implements the same control protocol
+echo mode (``replicator --echo-mode``) implements the same control protocol
 (ADD/REMOVE/LIST on the control port) and UDP echo as the AF_XDP replicator, but
 over standard kernel sockets — no root, no XDP/BPF. That makes these tests
 runnable in containers / CI / macOS. They exercise the *real* measurement client
 (``rtt``) and the ``replicator_ctl`` / ``udp_send`` binaries end-to-end;
-the echo/control server is a lightweight stand-in (src/KernelEcho.cpp), so this
+the echo/control server is a lightweight stand-in (src/Replicator/KernelEcho.cpp), so this
 is a functional/contract smoke test — the production AF_XDP datapath itself is
 validated separately on EC2 (run_ucast).
 
 Ports are off the production defaults (see conftest.py) so the suite does not
 collide with a live replicator.service. The control port is exported via
-AFXDP_CONTROL_PORT (conftest) and honoured by all binaries (src/ControlPort.hpp).
+AFXDP_CONTROL_PORT (conftest) and honoured by all binaries (src/common/ControlPort.hpp).
 
 Usage:
   cd networking_benchmarks/af_xdp
-  make all            # or: make kernel-mode
+  make all            # or: make echo-mode
   pytest tests/ -v
 """
 
@@ -32,8 +32,8 @@ from pathlib import Path
 import pytest
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-# dev/tests/ → af_xdp root is three levels up (binaries built by `make` at the root).
-AF_XDP_DIR = Path(__file__).parent.parent.parent
+# tests/ → af_xdp root is two levels up (binaries built by `make` at the root).
+AF_XDP_DIR = Path(__file__).parent.parent
 REPLICATOR = AF_XDP_DIR / "replicator"
 RTT = AF_XDP_DIR / "rtt"
 REPLICATOR_CTL = AF_XDP_DIR / "replicator_ctl"
@@ -51,12 +51,12 @@ os.environ["AFXDP_CONTROL_PORT"] = str(CONTROL_PORT)
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 @pytest.fixture(scope="module")
 def replicator_process():
-    """Start kernel-mode replicator for the test module."""
+    """Start echo-mode replicator for the test module."""
     if not REPLICATOR.exists():
         pytest.skip(f"Binary not found: {REPLICATOR}. Run 'make all' first.")
 
     proc = subprocess.Popen(
-        [str(REPLICATOR), "--kernel-mode", LISTEN_IP, str(DATA_PORT)],
+        [str(REPLICATOR), "--echo-mode", LISTEN_IP, str(DATA_PORT)],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -108,6 +108,18 @@ def _register(ctrl_socket, port: int):
     assert _ctrl_roundtrip(ctrl_socket, _add_msg(LISTEN_IP, port)) == b"\x01"
 
 
+# Control opcodes (see src/Replicator/Replicator.hpp / KernelEcho.cpp).
+CTRL_ADD, CTRL_REMOVE, CTRL_LIST, CTRL_MCAST_JOIN, CTRL_MCAST_LEAVE = 1, 2, 3, 4, 5
+
+
+def _mcast_join_msg(group: str) -> bytes:
+    return bytes([CTRL_MCAST_JOIN]) + socket.inet_aton(group)
+
+
+def _mcast_leave_msg(group: str) -> bytes:
+    return bytes([CTRL_MCAST_LEAVE]) + socket.inet_aton(group)
+
+
 # ── Test: Binary existence ────────────────────────────────────────────────────
 class TestBinaries:
     def test_replicator_exists(self):
@@ -121,6 +133,55 @@ class TestBinaries:
 
     def test_udp_send_exists(self):
         assert UDP_SEND.exists(), f"Missing: {UDP_SEND}"
+
+
+# ── Test: Replicator launch options (ucast / mcast / echo) ──────────────────
+# Container-safe coverage of the binary's launch-option surface: argument-layer
+# validation (usage, arg counts, invalid combos) + the echo-mode control
+# contract. The *real* AF_XDP launches — ucast/mcast with zero-copy on/off — need
+# root + an XDP-capable NIC, so they are exercised on EC2 via
+# deploy/ansible/run_ucast.yaml (unicast) and run_mcast.yaml (multicast).
+class TestReplicatorLaunchOptions:
+    def test_no_args_usage(self):
+        r = subprocess.run([str(REPLICATOR)], capture_output=True, text=True, timeout=5)
+        assert r.returncode != 0
+        assert "Usage" in (r.stdout + r.stderr)
+
+    def test_echo_mode_missing_args_usage(self):
+        """`--echo-mode` with no listen_ip/port → usage + non-zero."""
+        r = subprocess.run([str(REPLICATOR), "--echo-mode"],
+                           capture_output=True, text=True, timeout=5)
+        assert r.returncode != 0
+        out = r.stdout + r.stderr
+        assert "Usage" in out and "--echo-mode" in out
+
+    def test_usage_documents_launch_options(self):
+        """Usage must advertise every launch mode/option: echo-mode, ucast
+        zero_copy, mcast (m2u), and upstream ctrl/producer forwarding."""
+        r = subprocess.run([str(REPLICATOR)], capture_output=True, text=True, timeout=5)
+        out = r.stdout + r.stderr
+        for token in ("--echo-mode", "zero_copy", "--mcast", "--ctrl", "--producer"):
+            assert token in out, f"replicator usage missing {token!r}: {out}"
+
+    def test_ctrl_without_producer_rejected(self):
+        """--ctrl without --producer is an invalid combination → non-zero exit.
+        The pairing check runs before the Replicator/XDP is constructed, so this
+        is container-safe (no NIC touched)."""
+        r = subprocess.run(
+            [str(REPLICATOR), "eth0", LISTEN_IP, str(DATA_PORT), "--ctrl", "224.0.31.51:5001"],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert r.returncode != 0
+
+    def test_mcast_join_not_acked_by_echo_mode(self, replicator_process, ctrl_socket):
+        """CTRL_MCAST_JOIN is wire-recognized but must NOT be falsely acked as
+        success by the unicast/echo-mode backend (ack 0x00, not 0x01)."""
+        ack = _ctrl_roundtrip(ctrl_socket, _mcast_join_msg("224.0.31.50"))
+        assert ack == b"\x00", f"echo-mode should NAK MCAST_JOIN, got {ack!r}"
+
+    def test_mcast_leave_not_acked_by_echo_mode(self, replicator_process, ctrl_socket):
+        ack = _ctrl_roundtrip(ctrl_socket, _mcast_leave_msg("224.0.31.50"))
+        assert ack == b"\x00", f"echo-mode should NAK MCAST_LEAVE, got {ack!r}"
 
 
 # ── Test: Control protocol (happy path) ───────────────────────────────────────
@@ -329,10 +390,20 @@ class TestRTTMeasurement:
             [str(RTT), LISTEN_IP, str(DATA_PORT), LISTEN_IP, "29030", "100", "100", "--xdp-tx"],
             capture_output=True, text=True, timeout=5,
         )
-        # kernel-mode builds reject --xdp-tx outright; full builds require --iface.
+        # echo-mode builds reject --xdp-tx outright; full builds require --iface.
         assert result.returncode != 0
         out = (result.stdout + result.stderr).lower()
-        assert "iface" in out or "kernel-mode" in out
+        assert "iface" in out or "echo-mode" in out
+
+    def test_rtt_usage_documents_flags(self):
+        """Usage must advertise the ucast-sender launch options: --xdp-tx (AF_XDP
+        TX backend), --iface, and --xdp-rx."""
+        if not RTT.exists():
+            pytest.skip("rtt binary not found")
+        r = subprocess.run([str(RTT), LISTEN_IP], capture_output=True, text=True, timeout=5)
+        out = r.stdout + r.stderr
+        for token in ("--xdp-tx", "--iface", "--xdp-rx"):
+            assert token in out, f"rtt usage missing {token!r}: {out}"
 
 
 # ── Test: replicator_ctl CLI round-trip ───────────────────────────────────────
@@ -363,6 +434,15 @@ class TestReplicatorCtl:
         assert result.returncode != 0
         assert "Usage" in (result.stdout + result.stderr)
 
+    def test_ctl_usage_documents_commands(self):
+        """Usage must advertise every control command, incl. the mcast join/leave."""
+        if not REPLICATOR_CTL.exists():
+            pytest.skip("replicator_ctl binary not found")
+        result = subprocess.run([str(REPLICATOR_CTL)], capture_output=True, text=True, timeout=5)
+        out = result.stdout + result.stderr
+        for token in ("add", "remove", "list", "mcast", "mcast-leave"):
+            assert token in out, f"ctl usage missing {token!r}: {out}"
+
 
 # ── Test: udp_send ────────────────────────────────────────────────────────────
 class TestUdpSend:
@@ -373,11 +453,19 @@ class TestUdpSend:
         assert result.returncode != 0
         assert "Usage" in result.stdout or "Usage" in result.stderr
 
+    def test_udp_send_usage_documents_iface(self):
+        """Usage must advertise --iface and the multicast target option."""
+        if not UDP_SEND.exists():
+            pytest.skip("udp_send binary not found")
+        result = subprocess.run([str(UDP_SEND)], capture_output=True, text=True, timeout=5)
+        out = result.stdout + result.stderr
+        assert "--iface" in out and "multicast" in out.lower()
+
 
 # ── Test: mcast_send / mcast_receive (CLI only) ───────────────────────────────
-# The mcast tools require root + XDP + a real NIC (GRE datapath), so only their
-# argument-parsing/usage layer is container-testable here. The GRE build,
-# AF_XDP TX/RX, and per-hop (source→replicator→destination) latency are
+# The mcast tools require root + XDP + a real NIC (m2u AF_XDP datapath), so only
+# their argument-parsing/usage layer is container-testable here. The AF_XDP
+# TX/RX and per-hop (source→replicator→destination) one-way latency are
 # validated on EC2 via deploy/ansible/run_mcast.yaml.
 class TestMcastBinaries:
     def test_mcast_send_exists(self):
@@ -417,6 +505,16 @@ class TestMcastSendCli:
         assert r.returncode != 0
         assert "Usage" in (r.stdout + r.stderr)
 
+    def test_help_documents_options(self):
+        """`-h` must advertise the source launch options: -D (required tunnel dst),
+        -g group, -p port, -c count, -i interval."""
+        if not MCAST_SEND.exists():
+            pytest.skip("mcast_send binary not found")
+        r = self._run("-h")
+        out = r.stdout + r.stderr
+        for token in ("-D", "-g", "-p", "-c", "-i"):
+            assert token in out, f"mcast_send help missing {token!r}: {out}"
+
 
 class TestMcastReceiveCli:
     """mcast_receive arg parsing (runs before XDP attach / AF_XDP)."""
@@ -447,3 +545,13 @@ class TestMcastReceiveCli:
         r = self._run("-Z")
         assert r.returncode != 0
         assert "Usage" in (r.stdout + r.stderr)
+
+    def test_help_documents_options(self):
+        """`-h` must advertise the sink launch options: -I (required iface),
+        -g group, -p port, -c count, -t timeout."""
+        if not MCAST_RECEIVE.exists():
+            pytest.skip("mcast_receive binary not found")
+        r = self._run("-h")
+        out = r.stdout + r.stderr
+        for token in ("-I", "-g", "-p", "-c", "-t"):
+            assert token in out, f"mcast_receive help missing {token!r}: {out}"

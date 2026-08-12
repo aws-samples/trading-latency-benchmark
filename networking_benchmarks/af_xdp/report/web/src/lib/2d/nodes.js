@@ -24,7 +24,11 @@ export function renderNodes(ctx) {
 
   const tipHTML = (i) => {
     const node = fleet.nodes[i];
-    return '<h3>' + node.ec2_name + '</h3>'
+    const roleBadge = (node.role && node.role !== 'unknown')
+      ? ' <span class="role-badge role-' + node.role + '">' + node.role + '</span>' : '';
+    // The relay's hops are real edges now (src->relay, relay->dst), so the normal
+    // peer tables show them: Inbound = hop1 (from source), Outbound = hop2 (to dest).
+    return '<h3>' + node.ec2_name + roleBadge + '</h3>'
       + '<div class="direction">Outbound</div>' + buildPeerTable(ctx, i, false)
       + '<div class="direction" style="margin-top:6px">Inbound</div>' + buildPeerTable(ctx, i, true);
   };
@@ -54,13 +58,14 @@ export function renderNodes(ctx) {
 
   fleet.nodes.forEach((node, i) => {
     const r = nodeRadius(node), colors = getNodeColors(node.type);
-    const el = document.createElement('div'); el.className = 'node';
+    const el = document.createElement('div'); el.className = 'node' + (node.role && node.role !== 'unknown' ? ' role-' + node.role : '');
     el.style.width = el.style.height = (r * 2) + 'px';
     el.style.left = (positions[i].x - r) + 'px'; el.style.top = (positions[i].y - r) + 'px';
     el.style.background = colors.bg; el.style.borderColor = colors.border;
     el.innerHTML = '<span class="ip ip-private">' + node.private_ip + '</span>'
       + '<span class="ip ip-public">' + (node.public_ip || '\u2014') + '</span>'
-      + ((node.cpg_name && node.cpg_name !== 'unknown') ? '<span class="pg-badge" title="Placement group">' + node.cpg_name + '</span>' : '');
+      + ((node.cpg_name && node.cpg_name !== 'unknown') ? '<span class="pg-badge" title="Placement group">' + node.cpg_name + '</span>' : '')
+      + (node.role === 'replicator' ? '<span class="role-badge relay" title="Relay / fan-out hop — carries hop1+hop2 of the flows through it">relay</span>' : '');
     root.appendChild(el); nodeEls[i] = el;
 
     el.addEventListener('mouseenter', () => { tooltip.innerHTML = tipHTML(i); tooltip.classList.add('visible'); if (selected.size === 0) applySel(ctx, i); });

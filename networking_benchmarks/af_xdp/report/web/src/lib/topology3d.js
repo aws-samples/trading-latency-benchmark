@@ -133,9 +133,10 @@ export function mountTopology3D(container, fleet) {
     mesh.scale.setScalar(nodeRadius3D(n)); mesh.position.copy(positions[i]);
     mesh.userData.idx = i; mesh.userData.baseEmissive = emissive.clone();
     scene.add(mesh); nodeMeshes.push(mesh);
-    const div = document.createElement('div'); div.className = 'node-label';
+    const div = document.createElement('div'); div.className = 'node-label' + (n.role && n.role !== 'unknown' ? ' role-' + n.role : '');
     div.innerHTML = (n.public_ip ? '<div class="ipp">' + n.public_ip + '</div>' : '')
-      + '<div class="ipv">' + n.private_ip + '</div>';
+      + '<div class="ipv">' + n.private_ip + '</div>'
+      + (n.role === 'replicator' ? '<div class="role-badge relay" title="Relay / fan-out hop">relay</div>' : '');
     const lab = new CSS2DObject(div); lab.position.set(0, 0, 0); mesh.add(lab);   // centered on node
   });
 

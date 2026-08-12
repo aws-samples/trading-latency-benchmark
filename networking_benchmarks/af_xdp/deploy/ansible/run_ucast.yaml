@@ -67,10 +67,27 @@
     prewarm_rate: "5000"      # 5000 msgs @ 5000/s ≈ 1s — spans the ARP-resolution window
     data_port: "5000"
     listen_port: "19020"
-    send_cpu: "3"
-    recv_cpu: "2"
+    send_cpu: "4"
+    recv_cpu: "3"
+    # Match the measured run's derivation (dynamic from the isolated set); the
+    # literals above are only the auto_pin=false fallback.
+    auto_pin: true
 
   tasks:
+
+    - name: Read the isolated CPU range (for auto_pin)
+      ansible.builtin.command: cat /sys/devices/system/cpu/isolated
+      register: isol_raw
+      changed_when: false
+      when: auto_pin | bool
+
+    - name: Derive rtt CPU pins from the isolated set
+      when: auto_pin | bool
+      vars:
+        isol_lo: "{{ ((isol_raw.stdout | default('') | trim) or '1').split(',')[0].split('-')[0] | int }}"
+      ansible.builtin.set_fact:
+        recv_cpu: "{{ isol_lo | int + 2 }}"
+        send_cpu: "{{ isol_lo | int + 3 }}"
 
     - name: Prewarm RTT to each peer (discard results)
       ansible.builtin.shell: |
@@ -98,10 +115,14 @@
     warmup: "1000"
     data_port: "5000"
     listen_port: "19020"
-    # Pin onto isolated cores (see bake-ami.sh): core 1 = replicator poll,
-    # core 2 = rtt receiver, core 3 = rtt sender, core 0 = OS/IRQ.
-    send_cpu: "3"
-    recv_cpu: "2"
+    # rtt client CPU pins. Layout (>=4xlarge min): core 0 = OS, core 1 = ENA IRQ
+    # (isolated[0]), core 2 = replicator poll (isolated[1]), so the rtt client takes
+    # cores 3/4. With auto_pin=true (default) these are DERIVED per host from the
+    # isolated set (dynamic across 4xlarge -> metal); the literals below are only the
+    # fallback used when auto_pin=false.
+    send_cpu: "4"
+    recv_cpu: "3"
+    auto_pin: true
     # Optional AF_XDP zero-copy TX for the send leg (kernel-bypass). The sender
     # binds a dedicated queue (default 1) so it does not clash with the local
     # replicator's AF_XDP socket on queue 0. RX stays kernel-socket.
@@ -114,6 +135,24 @@
 
   tasks:
 
+    - name: Read the isolated CPU range (for auto_pin)
+      ansible.builtin.command: cat /sys/devices/system/cpu/isolated
+      register: isol_raw
+      changed_when: false
+      when: auto_pin | bool
+
+    # Derive rtt cores by OFFSET from the first isolated core (lo): core lo = ENA IRQ,
+    # lo+1 = replicator poll, so the rtt client takes lo+2 (recv) and lo+3 (send).
+    # Dynamic across instance sizes (4xlarge -> metal); assumes a contiguous isolcpus
+    # range (the baked default). Falls back to send_cpu/recv_cpu when auto_pin=false.
+    - name: Derive rtt CPU pins from the isolated set
+      when: auto_pin | bool
+      vars:
+        isol_lo: "{{ ((isol_raw.stdout | default('') | trim) or '1').split(',')[0].split('-')[0] | int }}"
+      ansible.builtin.set_fact:
+        recv_cpu: "{{ isol_lo | int + 2 }}"
+        send_cpu: "{{ isol_lo | int + 3 }}"
+
     - name: Run RTT to each peer
       ansible.builtin.shell: |
         IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
@@ -125,7 +164,7 @@
         mv /tmp/rtt_results.json /tmp/{{ private_ip_address }}-{{ hostvars[item].private_ip_address }}.json 2>/dev/null || true
       loop: "{{ groups['replicator'] | difference([inventory_hostname]) }}"
       loop_control:
-        label: "{{ private_ip_address }} → {{ hostvars[item].private_ip_address }}{{ ' [xdp-tx]' if xdp_tx | bool else '' }}{{ ' [xdp-rx]' if xdp_rx | bool else '' }}"
+        label: "{{ private_ip_address }} → {{ hostvars[item].private_ip_address }}{{ ' [xdp-tx]' if xdp_tx | bool else '' }}{{ ' [xdp-rx]' if xdp_rx | bool else '' }} (send={{ send_cpu }} recv={{ recv_cpu }})"
       ignore_errors: yes
 
     - name: Fetch per-pair results

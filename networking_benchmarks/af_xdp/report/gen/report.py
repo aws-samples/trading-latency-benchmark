@@ -134,6 +134,19 @@ def load_fleet_metadata(results_dir: Path) -> dict:
                 fleet.setdefault("account", account_override)
                 for nd in fleet.get("nodes", []):
                     nd.setdefault("account", account_override)
+            # Backfill role from per-node metadata for older fleet.json that
+            # predate role capture, so the viewer can distinguish the relay.
+            for nd in fleet.get("nodes", []):
+                if nd.get("role"):
+                    continue
+                mf = results_dir / f"{nd.get('private_ip') or nd.get('name')}_metadata.json"
+                if mf.exists():
+                    try:
+                        nd["role"] = json.loads(mf.read_text()).get("role") or "unknown"
+                    except json.JSONDecodeError:
+                        nd["role"] = "unknown"
+                else:
+                    nd["role"] = "unknown"
             return fleet
         except json.JSONDecodeError:
             print(f"  Warning: could not parse {fleet_path}")
@@ -159,6 +172,7 @@ def load_fleet_metadata(results_dir: Path) -> dict:
             "vpc_id": m.get("vpc_id") or "unknown",
             "cpg_name": m.get("pg_name") or "unknown",
             "pg_type": m.get("pg_type") or "unknown",
+            "role": m.get("role") or "unknown",
         })
 
     if not nodes:
@@ -178,6 +192,11 @@ def parse_result_json(filepath: Path) -> Optional[dict]:
         svc = raw.get("service_rtt_us", {})
         if not svc:
             return None
+        # Multicast per-pair JSON also carries the two-hop split (source->replicator,
+        # replicator->dest); ucast results omit these (left as None). Surfacing them
+        # is the whole point of the mcast measurement, so thread them through.
+        hop1 = raw.get("hop1_us") or {}
+        hop2 = raw.get("hop2_us") or {}
         return {
             "min_us": svc.get("min", 0),
             "p50_us": svc.get("p50", 0),
@@ -187,6 +206,10 @@ def parse_result_json(filepath: Path) -> Optional[dict]:
             "p999_us": svc.get("p999", 0),
             "max_us": svc.get("max", 0),
             "mean_us": svc.get("mean", 0),
+            "hop1_p50_us": hop1.get("p50"),
+            "hop1_p99_us": hop1.get("p99"),
+            "hop2_p50_us": hop2.get("p50"),
+            "hop2_p99_us": hop2.get("p99"),
             "messages": raw.get("messages", 0),
             "lost": raw.get("lost", 0),
             "loss_pct": raw.get("loss_pct", 0.0),
@@ -273,6 +296,36 @@ def build_matrix(results_dir: Path, fleet: dict) -> Tuple[List[str], Dict[Tuple[
                     node_names.append(src_name)
                 if dst_name not in node_names:
                     node_names.append(dst_name)
+
+    # ── Multicast: render the real datapath as two hops through the relay ──
+    # A measured pair is source->dest end-to-end, but the packet actually travels
+    # source -> replicator -> dest. Replace each such direct edge with two hop
+    # edges — hop1 (src->relay) and hop2 (relay->dst) — so the topology shows the
+    # true path and the replicator becomes a rendered waypoint instead of an
+    # isolated node. Only when exactly one replicator exists (routing is then
+    # unambiguous); otherwise the direct edges are left as-is.
+    replicators = [n["name"] for n in nodes if n.get("role") == "replicator"]
+    if len(replicators) == 1:
+        relay = replicators[0]
+        hop_edges: Dict[Tuple[str, str], dict] = {}
+        drop: List[Tuple[str, str]] = []
+        for (s, d), data in matrix.items():
+            if s == relay or d == relay:
+                continue
+            h1, h2 = data.get("hop1_p50_us"), data.get("hop2_p50_us")
+            if h1 is None and h2 is None:
+                continue
+            msgs, loss = data.get("messages", 0), data.get("loss_pct", 0.0)
+            if h1 is not None:
+                hop_edges[(s, relay)] = {"p50_us": h1, "p99_us": data.get("hop1_p99_us", 0),
+                                         "loss_pct": loss, "messages": msgs, "hop_kind": "hop1"}
+            if h2 is not None:
+                hop_edges[(relay, d)] = {"p50_us": h2, "p99_us": data.get("hop2_p99_us", 0),
+                                         "loss_pct": loss, "messages": msgs, "hop_kind": "hop2"}
+            drop.append((s, d))
+        for k in drop:
+            matrix.pop(k, None)
+        matrix.update(hop_edges)
 
     node_names = sorted(set(node_names))
     return node_names, matrix
@@ -454,6 +507,9 @@ def generate_html_report(node_names: List[str], matrix: dict, fleet: dict,
                                    f"p99.9={fmt_lat(data.get('p999_us',0))}  "
                                    f"max={fmt_lat(data.get('max_us',0))}  "
                                    f"loss={data.get('loss_pct',0):.2f}%")
+                        # Multicast: mark which hop of the src->relay->dst path this is.
+                        if data.get("hop_kind"):
+                            tooltip += f"\\n[{data['hop_kind']} of the multicast fan-out path]"
                         cells += (f"<td style='background:{color}' title='{tooltip}'>"
                                   f"<strong>{fmt_lat(val)}</strong></td>")
                     else:
@@ -575,6 +631,7 @@ def _build_topology_fleet_json(node_names: List[str], matrix: dict, fleet: dict)
             "vpc_id": meta.get("vpc_id", fleet.get("vpc_id", "unknown")),
             "cpg_name": meta.get("cpg_name", fleet.get("cpg_name", "unknown")),
             "pg_type": meta.get("pg_type", "unknown"),
+            "role": meta.get("role", "unknown"),   # source | replicator | destination
             # Hardware metadata (per-node overrides > lookup table)
             "enis": meta.get("enis", hw["enis"]),
             "bw_gbps": meta.get("bw_gbps", hw["bw_gbps"]),
@@ -596,14 +653,19 @@ def _build_topology_fleet_json(node_names: List[str], matrix: dict, fleet: dict)
             else:
                 data = matrix.get((src, dst))
                 if data:
-                    row.append({
+                    cell = {
                         "p50": data.get("p50_us", 0),
                         "p90": data.get("p90_us", 0),
                         "p99": data.get("p99_us", 0),
                         "p999": data.get("p999_us", 0),
                         "max": data.get("max_us", 0),
                         "loss": data.get("loss_pct", 0),
-                    })
+                    }
+                    # Multicast hop edges (src->relay / relay->dst) are tagged so
+                    # the viewer can label the link as hop1/hop2.
+                    if data.get("hop_kind"):
+                        cell["hop_kind"] = data["hop_kind"]
+                    row.append(cell)
                 else:
                     row.append(None)
         js_matrix.append(row)

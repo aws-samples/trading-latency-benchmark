@@ -4,6 +4,16 @@ import { fmtLat, edgeSigma, jitterColor } from './palette.js';
 
 const EDGE_WIDTH = 2.5;
 
+// Mean p50 across only the directions actually measured. For a one-way edge
+// (e.g. a multicast hop src->relay) this returns that direction's value rather
+// than halving it by averaging in a missing 0.
+function meanP50(ab, ba) {
+  const v = [];
+  if (ab && ab.p50 != null) v.push(ab.p50);
+  if (ba && ba.p50 != null) v.push(ba.p50);
+  return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : 0;
+}
+
 export function renderEdges(ctx) {
   const { fleet, matrix, N, root, svg, positions, edgeElements, edgeLabelEls, W, H } = ctx;
   const { minSigma, maxSigma } = ctx.ranges;
@@ -13,7 +23,7 @@ export function renderEdges(ctx) {
   for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
     const ab = matrix[i] && matrix[i][j], ba = matrix[j] && matrix[j][i];
     if (!ab && !ba) continue;
-    const avgP50 = Math.round((((ab && ab.p50) || 0) + ((ba && ba.p50) || 0)) / 2);
+    const avgP50 = meanP50(ab, ba);
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
     line.setAttribute('x1', positions[i].x); line.setAttribute('y1', positions[i].y);
     line.setAttribute('x2', positions[j].x); line.setAttribute('y2', positions[j].y);
@@ -51,7 +61,7 @@ export function renderEdges(ctx) {
   for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
     const ab = matrix[i] && matrix[i][j], ba = matrix[j] && matrix[j][i];
     if (!ab && !ba) continue;
-    const avgP50 = Math.round((((ab && ab.p50) || 0) + ((ba && ba.p50) || 0)) / 2);
+    const avgP50 = meanP50(ab, ba);
     const x1 = positions[i].x, y1 = positions[i].y, x2 = positions[j].x, y2 = positions[j].y;
     const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
     let ang = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;

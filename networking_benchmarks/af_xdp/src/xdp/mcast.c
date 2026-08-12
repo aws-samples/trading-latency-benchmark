@@ -80,6 +80,30 @@ struct {
     __type(value, struct unicast_config);
 } config_map SEC(".maps");
 
+// Kernel-side forward target (REPLICATOR_FWD_MODE=kernel). When enabled != 0 for
+// a matched config slot, the XDP program rewrites the frame's L2/L3/L4 headers for
+// this destination, stamps replicator_ns, and XDP_TX's it back out the NIC —
+// forwarding the packet entirely in the kernel, no AF_XDP/userspace round-trip.
+// Populated from userspace (Replicator) on join when in kernel mode. Parallel to
+// config_map (same slot index). All addresses network byte order.
+struct fwd_target {
+    __u8  dmac[6];   // destination MAC
+    __u8  smac[6];   // replicator (source) MAC
+    __u32 dip;       // destination IP
+    __u32 sip;       // replicator (source) IP
+    __u16 dport;     // destination UDP port
+    __u16 sport;     // replicator (source) UDP port
+    __u8  enabled;   // 0 = redirect to XSK (default); 1 = kernel XDP_TX forward
+    __u8  pad[3];
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, MAX_GROUPS);
+    __type(key, __u32);
+    __type(value, struct fwd_target);
+} fwd_map SEC(".maps");
+
 // Update statistics counter
 static inline void increment_counter(int index)
 {
@@ -139,23 +163,60 @@ int mcast(struct xdp_md *ctx)
 
     // ── Config map scan: match {group, udp dst port} up to MAX_GROUPS ─────────
     // Entries are populated sequentially; target_ip == 0 means unused slot.
-    __u8 matched = 0;
+    int matched_idx = -1;
     #pragma unroll
     for (int _idx = 0; _idx < MAX_GROUPS; _idx++) {
-        if (!matched) {
+        if (matched_idx < 0) {
             __u32 _k = (__u32)_idx;
             struct unicast_config *cfg = bpf_map_lookup_elem(&config_map, &_k);
             if (!cfg || cfg->target_ip == 0)
                 continue;
             if (group == cfg->target_ip && udp->dest == cfg->target_port)
-                matched = 1;
+                matched_idx = _idx;
         }
     }
 
-    if (!matched)
+    if (matched_idx < 0)
         return XDP_PASS;
 
-    // ── Match — redirect whole frame to AF_XDP (zero-copy on ENA) ────────────
+    // ── Kernel-side forward (REPLICATOR_FWD_MODE=kernel) ──────────────────────
+    // If a forward target is enabled for the matched slot, rewrite the frame's
+    // headers for the destination, stamp replicator_ns (CLOCK_REALTIME), and
+    // XDP_TX it back out the NIC — no AF_XDP/userspace round-trip.
+    {
+        __u32 fk = (__u32)matched_idx;
+        struct fwd_target *ft = bpf_map_lookup_elem(&fwd_map, &fk);
+        if (ft && ft->enabled) {
+            // L2: dst = destination, src = replicator
+            __builtin_memcpy(eth->h_dest,   ft->dmac, 6);
+            __builtin_memcpy(eth->h_source, ft->smac, 6);
+            // L3: rewrite IPs + recompute the 20-byte IPv4 header checksum
+            iph->daddr = ft->dip;
+            iph->saddr = ft->sip;
+            iph->check = 0;
+            __u32 csum = 0;
+            __u16 *ipw = (__u16 *)iph;
+            #pragma unroll
+            for (int i = 0; i < 10; i++)
+                csum += ipw[i];
+            csum = (csum & 0xffff) + (csum >> 16);
+            csum = (csum & 0xffff) + (csum >> 16);
+            iph->check = (__u16)~csum;
+            // L4: rewrite ports, disable UDP checksum (optional for IPv4)
+            udp->dest   = ft->dport;
+            udp->source = ft->sport;
+            udp->check  = 0;
+            // NOTE: replicator_ns is NOT stamped here — BPF has no CLOCK_REALTIME
+            // helper (only MONOTONIC bpf_ktime_get_ns, a different epoch than the
+            // source/receiver's CLOCK_REALTIME). Left as the source's zero, so the
+            // receiver reports the valid one-way total and simply omits the hop
+            // split for kernel-forwarded packets (kernel proc time is ~0 anyway).
+            increment_counter(2);
+            return XDP_TX;
+        }
+    }
+
+    // ── Default: redirect whole frame to AF_XDP (zero-copy on ENA) ───────────
     // The userspace reader (replicator / mcast_receive) strips Eth/IP/UDP + the
     // 8-byte m2u header to reach the payload.
     __u32 queue_idx = ctx->rx_queue_index;

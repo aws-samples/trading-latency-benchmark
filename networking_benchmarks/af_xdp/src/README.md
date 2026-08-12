@@ -1,7 +1,7 @@
 # src/ — AF_XDP replicator engine
 
 Core of the benchmark: an **AF_XDP zero-copy UDP packet replicator** plus a
-kernel-mode fallback echo server. Paired with the `tools/` clients (`rtt`,
+echo-mode fallback echo server. Paired with the `tools/` clients (`rtt`,
 `mcast_send`, `mcast_receive`, `replicator_ctl`) it measures point-to-point
 (unicast) and fan-out (multicast-over-m2u) latency between EC2 instances with
 sub-microsecond timing resolution.
@@ -10,13 +10,19 @@ sub-microsecond timing resolution.
 
 | File | Description |
 |------|-------------|
-| `ReplicatorMain.cpp` | Entry point — CLI parsing, mode dispatch (`--kernel-mode` vs AF_XDP) |
-| `Replicator.cpp/hpp` | AF_XDP replicator: multi-queue RX, per-group fan-out, control protocol |
-| `XdpSocket.cpp/hpp` | AF_XDP socket wrapper: UMEM, fill/comp/rx/tx rings, batched zero-copy TX/RX |
-| `XdpTxSend.hpp` | TX-only AF_XDP sender used by the `rtt` probe (bypasses the kernel TX stack) |
-| `KernelEcho.cpp` | Kernel-mode UDP echo server — same control protocol, no root/XDP (CI, tests) |
-| `NicConfig.cpp/hpp` | NIC helpers: queue count, coalescing, MTU, RSS |
-| `ControlPort.hpp` | Shared control-port resolver (`AFXDP_CONTROL_PORT`, default 12345) |
+| `Replicator/Main.cpp` | Entry point — CLI parsing, mode dispatch (`--echo-mode` vs AF_XDP) |
+| `Replicator/Replicator.hpp` | AF_XDP replicator — single class declaration (multi-queue RX, per-group fan-out, control protocol) |
+| `Replicator/Internal.hpp` | Shared internal header for the `Replicator/*.cpp` units (common includes + debug macros) |
+| `Replicator/Core.cpp` | Replicator impl — lifecycle (ctor/dtor/move), thread start/stop, statistics, CPU affinity |
+| `Replicator/Init.cpp` | Replicator impl — XDP program load, per-queue AF_XDP socket setup, `config_map` seeding |
+| `Replicator/Groups.cpp` | Replicator impl — dynamic BPF group slots (ref-counted) + kernel XDP_TX forward target |
+| `Replicator/Control.cpp` | Replicator impl — control protocol thread + message handling + upstream forwarding |
+| `Replicator/Destinations.cpp` | Replicator impl — `Destination` type, destination registry, thread-local fan-out cache |
+| `Replicator/DataPath.cpp` | Replicator impl — RX busy-poll, replicate/fan-out, UDP/m2u parse, zero-copy TX, packet build |
+| `Replicator/Net.cpp` | Replicator impl — IP/MAC helpers, interface discovery, ARP/gateway resolution |
+| `Replicator/XdpSocket.cpp/hpp` | AF_XDP socket wrapper (replicator datapath): UMEM, fill/comp/rx/tx rings, batched zero-copy TX/RX |
+| `Replicator/KernelEcho.cpp` | Echo-mode replicator backend — UDP echo server, same control protocol, no root/XDP (CI, tests) |
+| `common/ControlPort.hpp` | Shared control-port resolver (`AFXDP_CONTROL_PORT`, default 12345) — used by the replicator and `tools/` |
 | `xdp/ucast.c` | eBPF XDP program — unicast filter (steers matching UDP to the AF_XDP socket) |
 | `xdp/mcast.c` | eBPF XDP program — intercepts m2u-tagged multicast UDP, steers to AF_XDP |
 
@@ -25,9 +31,9 @@ sub-microsecond timing resolution.
 ```bash
 make all          # full AF_XDP build (needs libxdp, libbpf) — EC2
 make full         # all + multicast tools (mcast_send/receive)
-make kernel-mode  # -DKERNEL_MODE_ONLY, no libxdp — containers / CI / macOS
+make echo-mode  # -DECHO_MODE_ONLY, no libxdp — containers / CI / macOS
 ```
-`#ifdef KERNEL_MODE_ONLY` guards exclude all XDP/BPF code paths (and `XdpTxSend`)
+`#ifdef ECHO_MODE_ONLY` guards exclude all XDP/BPF code paths (and the AF_XDP TX sender inlined in `tools/rtt.cpp`)
 so the control-protocol + echo logic can be unit-tested without root or a NIC.
 
 ---
@@ -44,7 +50,7 @@ into fixed frames shared with the kernel:
 - `TX_BATCH_SIZE = 64` — TX is submitted in batches to amortize the syscall/kick.
 - Attach flags: `XDP_FLAGS_DRV_MODE | XDP_FLAGS_ZERO_COPY` (native driver + ZC).
 
-**Destination** (`Replicator.hpp`) — one fan-out target:
+**Destination** (`Replicator/Replicator.hpp`) — one fan-out target:
 `{ ip_address, port, sockaddr_in addr, uint8_t mac[6] }`. The **MAC is resolved
 via ARP at registration time** so fan-out frames carry a real unicast dst MAC
 (otherwise ENA drops broadcast-dst frames).
@@ -107,7 +113,7 @@ to the replicator, intercepted by XDP. No kernel tunnel device is involved.
 2. **m2u framing** — `mcast_send` builds the frame in userspace and sends it via
    AF_XDP zero-copy straight to the replicator (`-D <replicator_ip>`). Frame on
    the wire: `Eth / IPv4 (proto 17=UDP) / UDP / m2u{magic(4), group(4)} / payload`
-   (50 B of headers, vs 66 B for the old encapsulation).
+   (50 B of headers, vs 66 B for the old encapsulation). Inspired by [mcast2ucast](../../mcast2ucast/).
 3. **Replicator (mcast mode)** — loads `mcast.o` instead of `ucast.o`. It parses
    `Eth/IP/UDP` + the 8-byte m2u tag, reads the group from the header, and matches
    `{group, dst port}` against `config_map`; match → redirect to the AF_XDP socket
@@ -121,6 +127,24 @@ to the replicator, intercepted by XDP. No kernel tunnel device is involved.
    socket. Multicast latency is **one-way** (source→dest), so it requires
    synchronized clocks (see accuracy).
 
+## Latency-critical RX/TX paths
+
+- **In-app NAPI busy-poll** (`XdpSocket::receive`) — on an empty RX peek the loop
+  issues `recvfrom(fd, …, MSG_DONTWAIT)`; with `SO_PREFER_BUSY_POLL`+`SO_BUSY_POLL`
+  set on the XSK fd this runs the NAPI poll in *this* (pinned) thread, so the
+  NIC→ring fill doesn't wait on the deferred hard IRQ. This is what makes hop1
+  (source→replicator) independent of `gro_flush_timeout`. The small gro (10µs) is
+  only the backstop for the windows when the thread is busy fanning-out rather than
+  polling — **not** the primary delivery path. (`gro=0` breaks this → multi-second
+  bursts; `gro=200µs` makes the backstop the primary path → ~200µs/hop.)
+- **Fan-out hot path** (`Replicator::replicatePacket` → `createUdpPacket`) — the
+  source IP is parsed once at `initialize()` (`cached_iface_saddr_nbo_`), not per
+  packet (`inet_aton` was on the hot path); TX completions are drained once per
+  fan-out batch (not per destination); one driver kick covers all K destinations.
+- **CPU layout** — the busy-poll thread is pinned to an isolated CPU and the ENA
+  hard IRQ to a *different* isolated CPU (see `deploy/ansible/run_mcast.yaml` /
+  `ena-irq-affinity.service`), so the IRQ never preempts the poll loop.
+
 ---
 
 ## How packets are sent (`rtt` TX)
@@ -129,7 +153,7 @@ Two send backends, selected by `rtt --xdp-tx`:
 
 - **Kernel `sendto`** (default): a normal UDP socket. Simple; incurs the full
   kernel TX stack (~3–5 µs) inside the measured send leg.
-- **AF_XDP TX** (`XdpTxSend.hpp`, `--xdp-tx[=queue] --iface`): a **TX-only**
+- **AF_XDP TX** (inlined in `tools/rtt.cpp`, `--xdp-tx[=queue] --iface`): a **TX-only**
   AF_XDP socket opened with `XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD` (no XDP program
   loaded — egress is independent of RSS). The full `Eth|IPv4|UDP|payload` frame
   is built **once into every UMEM frame** at startup (dst MAC via ARP); per
@@ -291,7 +315,7 @@ unicast round-trip (single-host `CLOCK_REALTIME`) path.
 
 ## Control protocol (default port 12345, configurable via `AFXDP_CONTROL_PORT`)
 
-Binary UDP, identical in AF_XDP and kernel-mode:
+Binary UDP, identical in AF_XDP and echo-mode:
 
 | Opcode | Payload | Action |
 |--------|---------|--------|

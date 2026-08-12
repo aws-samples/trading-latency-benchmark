@@ -14,28 +14,40 @@ XDP_PROGRAMS = src/xdp/ucast.o
 MCAST_XDP = src/xdp/mcast.o
 
 # ── Replicator object files ──────────────────────────────────────────────────
-REPLICATOR_SRCS = src/XdpSocket.cpp src/NicConfig.cpp src/Replicator.cpp src/KernelEcho.cpp
+# Replicator implementation lives under src/Replicator/ (all share
+# src/Replicator/Internal.hpp; single class decl in src/Replicator/Replicator.hpp).
+# This includes the AF_XDP socket wrapper (XdpSocket) and the echo-mode echo
+# backend (KernelEcho) — both consumed only by the replicator. Shared headers
+# live in src/common/ (e.g. ControlPort.hpp), resolved via -I./src.
+REPLICATOR_SRCS = src/Replicator/XdpSocket.cpp \
+                  src/Replicator/Core.cpp src/Replicator/Init.cpp src/Replicator/Groups.cpp \
+                  src/Replicator/Control.cpp src/Replicator/Destinations.cpp \
+                  src/Replicator/DataPath.cpp src/Replicator/Net.cpp \
+                  src/Replicator/KernelEcho.cpp
 REPLICATOR_OBJS = $(REPLICATOR_SRCS:.cpp=.o)
 
 # ── Build modes ──────────────────────────────────────────────────────────────
 # make all         → full AF_XDP build (requires libxdp, libbpf, root to run)
-# make kernel-mode → no libxdp/libbpf dep (containers, CI, any Linux)
+# make echo-mode → no libxdp/libbpf dep (containers, CI, any Linux)
 # make full        → all + multicast targets
 all: $(CORE_TARGETS) $(XDP_PROGRAMS)
 full: all mcast
 mcast: $(MCAST_TARGETS) $(MCAST_XDP)
 
-# ── Kernel-mode build (recursive make with overridden variables) ──────────────
-# Builds replicator (kernel-mode only) + tools without any libxdp/libbpf dependency.
-kernel-mode:
+# ── Echo-mode build (recursive make with overridden variables) ──────────────
+# Builds replicator (echo-mode only) + tools without any libxdp/libbpf dependency.
+echo-mode:
 	$(MAKE) clean
 	$(MAKE) replicator rtt replicator_ctl udp_send \
-		CXXFLAGS="$(CXXFLAGS) -DKERNEL_MODE_ONLY" \
+		CXXFLAGS="$(CXXFLAGS) -DECHO_MODE_ONLY" \
 		LDLIBS="-lpthread" \
-		REPLICATOR_OBJS="src/NicConfig.o src/KernelEcho.o"
+		REPLICATOR_OBJS="src/Replicator/KernelEcho.o"
 
 # ── Pattern rules ────────────────────────────────────────────────────────────
 src/%.o: src/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+src/Replicator/%.o: src/Replicator/%.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 tools/%.o: tools/%.cpp
@@ -45,7 +57,7 @@ src/xdp/%.o: src/xdp/%.c
 	clang -O2 -g -Wall -target bpf -c $< -o $@
 
 # ── Core: replicator ─────────────────────────────────────────────────────────
-replicator: src/ReplicatorMain.o $(REPLICATOR_OBJS)
+replicator: src/Replicator/Main.o $(REPLICATOR_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 # ── Tools: measurement instruments ───────────────────────────────────────────
@@ -70,4 +82,4 @@ clean:
 	find . -name '*.o' -o -name '*.d' | xargs rm -f
 	rm -f $(CORE_TARGETS) $(MCAST_TARGETS)
 
-.PHONY: all full mcast kernel-mode clean
+.PHONY: all full mcast echo-mode clean

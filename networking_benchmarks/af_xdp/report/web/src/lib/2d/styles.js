@@ -26,6 +26,19 @@ export const CSS = `
 .t2d-root .node .pg-badge { position: absolute; top: -9px; left: 50%; background: #f0883e; color: #fff;
   font-size: 11px; font-weight: 700; min-width: 22px; height: 21px; padding: 0 9px; border-radius: 11px;
   display: flex; align-items: center; justify-content: center; border: 2px solid #0d1117; white-space: nowrap; letter-spacing: 0.2px; }
+/* Relay (replicator) node badge — sits at the bottom, teal, to mark the fan-out hop. */
+.t2d-root .node .role-badge.relay { position: absolute; bottom: -9px; left: 50%; transform: translateX(-50%);
+  background: #2ea043; color: #fff; font-size: 9px; font-weight: 700; height: 16px; padding: 0 7px;
+  border-radius: 8px; display: flex; align-items: center; border: 2px solid #0d1117; letter-spacing: .3px;
+  text-transform: uppercase; }
+.t2d-root .node.role-replicator { border-style: dashed; }
+/* role badge inside the tooltip title */
+.t2d-root .node-tooltip .role-badge { font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 8px;
+  vertical-align: middle; text-transform: uppercase; letter-spacing: .3px; }
+.t2d-root .node-tooltip .role-badge.role-replicator { background: #2ea043; color: #fff; }
+.t2d-root .node-tooltip .role-badge.role-source { background: #1f6feb; color: #fff; }
+.t2d-root .node-tooltip .role-badge.role-destination { background: #8957e5; color: #fff; }
+.t2d-root .node-tooltip .relay-note { color: #8b949e; font-size: 11px; line-height: 1.5; max-width: 260px; }
 .t2d-root .node-tooltip { position: absolute; z-index: 100; background: rgba(22,27,34,0.97); border: 1px solid #30363d;
   border-radius: 8px; padding: 12px 14px; font-size: 11px; pointer-events: none; backdrop-filter: blur(8px);
   box-shadow: 0 8px 32px rgba(0,0,0,0.6); white-space: nowrap; opacity: 0; transition: opacity 0.15s; min-width: 260px; }

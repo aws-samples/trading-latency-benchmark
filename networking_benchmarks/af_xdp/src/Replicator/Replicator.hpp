@@ -74,13 +74,19 @@ private:
 
     // Interface IP and MAC cached once at initialize() — never re-queried on hot path
     std::string cached_iface_ip_;
+    uint32_t    cached_iface_saddr_nbo_ = 0;  // parsed once at initialize(); createUdpPacket() hot path avoids per-packet inet_aton
     uint8_t     cached_iface_mac_[6]{};
     int num_queues_;
     bool mcast_mode_;         // mcast mode: m2u-tagged unicast UDP carries the multicast group
+    // Forward path (REPLICATOR_FWD_MODE env): 0=copy (build packet in a TX-pool frame),
+    // 1=inplace (patch the RX frame's headers + TX that same UMEM frame — no payload copy),
+    // 2=kernel (XDP program forwards via XDP_TX; userspace fan-out is bypassed).
+    int  fwd_mode_ = 0;
 
     // ── Dynamic group tracking (mcast mode) / static seed (unicast mode) ─────
     // config_map_fd_: BPF map fd retained after initialize() for runtime updates.
     int config_map_fd_{-1};
+    int fwd_map_fd_{-1};   // kernel XDP_TX forward targets (REPLICATOR_FWD_MODE=kernel)
 
     // Per-group BPF state.  All maps keyed by group IP in network byte order,
     // protected by group_mutex_.  Used by mcast mode only.
@@ -324,7 +330,7 @@ private:
      * Returns inner IP datagram (IPv4+UDP+payload) verbatim in payloadData/payloadLen.
      * group_nbo receives the inner IP destination (multicast group).
      */
-    bool extractUdpPayloadM2u(const uint8_t* packetData, size_t packetLen,
+    bool extractUdpPayloadMulticast(const uint8_t* packetData, size_t packetLen,
                               const uint8_t*& payloadData, size_t& payloadLen,
                               uint32_t& group_nbo);
 
@@ -365,6 +371,22 @@ private:
      */
     size_t createUdpPacket(const Destination& destination, const uint8_t* payload, size_t payloadLen,
                           uint8_t* buffer, size_t bufferSize);
+
+    /**
+     * In-place forward header patch (REPLICATOR_FWD_MODE=inplace): rewrite the
+     * RX frame's Eth/IP/UDP for `destination` (dst+src MAC/IP, UDP dst port, IP
+     * checksum) and stamp replicator_tx_ns — no payload copy. `frame` points at
+     * the start of the RX frame (Ethernet header); `frame_len` is its length.
+     * Returns true if the frame was long enough to patch.
+     */
+    bool patchHeadersInPlace(const Destination& destination, uint8_t* frame, size_t frame_len);
+
+    /**
+     * Populate/clear the kernel XDP_TX forward target (REPLICATOR_FWD_MODE=kernel)
+     * for the config_map slot of `group_nbo`, so mcast.o forwards this group's
+     * frames to `dest` entirely in the kernel. No-op unless fwd_mode_ == kernel.
+     */
+    void updateKernelFwdTarget(uint32_t group_nbo, const Destination& dest, bool enable);
 
 
     /**

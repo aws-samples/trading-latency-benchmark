@@ -61,7 +61,8 @@ static constexpr int         DEF_PORT        = 5000;
 static constexpr int         DEF_COUNT       = 10000;
 static constexpr int         DEF_INTERVAL_US = 1000;
 static constexpr int         DEF_SIZE        = 64;
-static constexpr int         HDR_SIZE        = 24;   /* seq(8) + ts_ns(8) + replicator_ns(8) */
+static constexpr int         DEF_TX_QUEUE    = 1;   /* queue 0 is RSS-pinned (carries SSH/ctrl); bind TX off it */
+static constexpr int         HDR_SIZE        = 32;   /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
 
 /* Light mcast->ucast tunnel tag ("M2CU"): an 8-byte header {magic, group}
  * prepended to the UDP payload. Kept in
@@ -84,11 +85,13 @@ static constexpr int PAYLOAD_OFF    = 14 + 20 + 8 + M2U_HDR_LEN;
 static constexpr int SEQ_OFF        = PAYLOAD_OFF;
 static constexpr int TS_OFF         = PAYLOAD_OFF + 8;
 static constexpr int REPLICATOR_TS_OFF  = PAYLOAD_OFF + 16;  /* written by replicator, not sender */
+static constexpr int REPLICATOR_TX_TS_OFF = PAYLOAD_OFF + 24;  /* written by replicator at TX submit, not sender */
 
 struct __attribute__((packed)) pkt_hdr {
 	uint64_t seq;
 	uint64_t ts_ns;
-	uint64_t replicator_ns;  /* 0 until Replicator overwrites in transit */
+	uint64_t replicator_ns;     /* 0 until Replicator overwrites at RX entry */
+	uint64_t replicator_tx_ns;  /* 0 until Replicator overwrites just before TX submit */
 };
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
@@ -277,9 +280,10 @@ static void usage(const char *prog)
 	       "  -c <count>       number of packets         (default: %d)\n"
 	       "  -i <interval_us> inter-packet gap µs       (default: %d)\n"
 	       "  -s <size>        payload bytes             (default: %d, min: %d)\n"
+	       "  -q <queue>       AF_XDP TX queue           (default: %d)\n"
 	       "  -h               this help\n",
 	       prog, DEF_IFACE, DEF_GROUP, DEF_PORT,
-	       DEF_COUNT, DEF_INTERVAL_US, DEF_SIZE, HDR_SIZE);
+	       DEF_COUNT, DEF_INTERVAL_US, DEF_SIZE, HDR_SIZE, DEF_TX_QUEUE);
 }
 
 int main(int argc, char *argv[])
@@ -291,9 +295,10 @@ int main(int argc, char *argv[])
 	int count       = DEF_COUNT;
 	int interval_us = DEF_INTERVAL_US;
 	int pkt_size    = DEF_SIZE;
+	int tx_queue    = DEF_TX_QUEUE;
 
 	int opt;
-	while ((opt = getopt(argc, argv, "I:D:g:p:c:i:s:h")) != -1) {
+	while ((opt = getopt(argc, argv, "I:D:g:p:c:i:s:q:h")) != -1) {
 		switch (opt) {
 		case 'I': iface       = optarg;          break;
 		case 'D': replicator_ip_s = optarg;          break;
@@ -302,6 +307,7 @@ int main(int argc, char *argv[])
 		case 'c': count       = atoi(optarg);    break;
 		case 'i': interval_us = atoi(optarg);    break;
 		case 's': pkt_size    = atoi(optarg);    break;
+		case 'q': tx_queue    = atoi(optarg);    break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
 		}
@@ -393,18 +399,18 @@ int main(int argc, char *argv[])
 		.xdp_flags    = XDP_FLAGS_DRV_MODE,   /* native ZC; falls back to SKB */
 		.bind_flags   = XDP_USE_NEED_WAKEUP,
 	};
-	err = xsk_socket__create(&xsk, iface, 0, umem, nullptr, &tx_ring, &xsk_cfg);
+	err = xsk_socket__create(&xsk, iface, tx_queue, umem, nullptr, &tx_ring, &xsk_cfg);
 	if (err) {
 		fprintf(stderr, "native XDP failed (%s), trying SKB mode\n", strerror(-err));
 		xsk_cfg.xdp_flags = XDP_FLAGS_SKB_MODE;
-		err = xsk_socket__create(&xsk, iface, 0, umem, nullptr, &tx_ring, &xsk_cfg);
+		err = xsk_socket__create(&xsk, iface, tx_queue, umem, nullptr, &tx_ring, &xsk_cfg);
 	}
 	if (err) { fprintf(stderr, "xsk_socket__create: %s\n", strerror(-err)); return 1; }
 	int xsk_fd = xsk_socket__fd(xsk);
 
-	printf("Sending %d packets to replicator %s (inner %s:%d) via %s  "
+	printf("Sending %d packets to replicator %s (inner %s:%d) via %s q%d  "
 	       "payload=%dB  interval=%dus\n\n",
-	       count, replicator_ip_s, group, port, iface, pkt_size, interval_us);
+	       count, replicator_ip_s, group, port, iface, tx_queue, pkt_size, interval_us);
 
 	uint64_t interval_ns = (uint64_t)interval_us * 1000ULL;
 	uint32_t outstanding = 0;

@@ -195,6 +195,17 @@ public:
     void submitTxRing(int count);
 
     /**
+     * In-place zero-copy forward: submit an already-populated UMEM frame (an RX
+     * buffer whose headers were patched in place) straight to the TX ring — no
+     * copy into a TX-pool frame. The frame is excluded from fill-queue recycling
+     * and is returned to the fill queue by pollTxCompletions() on TX completion
+     * (addr-range routed). Returns false if the TX ring is full after a retry.
+     *
+     * @param rx_addr UMEM address of the RX frame (offset from getUmemBuffer())
+     * @param len     packet length to transmit
+     */
+    bool forwardFrameInPlace(uint64_t rx_addr, uint32_t len);
+    /**
      * Receive packets
      * 
      * @param offsets Vector to store packet offsets

@@ -8,24 +8,36 @@ Load via: `--context scenario=<subdir>/<name>` (e.g. `--context scenario=ucast/a
 
 All nodes act as peers (role defaults to `replicator`). Measures point-to-point latency.
 
-Cost/hr figures are rough and assume the default instance type (`c7i.2xlarge`);
-use the AWS pricing calculator for current rates.
+**Instance type: `c7i.4xlarge`** (set per entry). Unicast co-locates the replicator
+poll thread + rtt sender + rtt receiver on the *same* node, needing 5 dedicated cores
+(OS, ENA IRQ, replicator poll, rtt send, rtt recv) — more than a `c7i.2xlarge` has
+after `nosmt` (4 online). Core pinning is derived **dynamically at runtime** from the
+isolated set (`run_ucast.yaml` `auto_pin` + the replicator's `initializeCpuCores`), so
+the same AMI/code adapts to any size. Cost/hr assumes `c7i.4xlarge` (~2× the 2xlarge
+rate); use the AWS pricing calculator for current rates.
 
 | File | Topology | Instances | Cost/hr |
 |------|----------|-----------|---------|
-| `az-cpg-3` | Same AZ (a), single cluster PG | 3 | ~$1.07 |
-| `xaz-xcpg-10` | Cross AZ (a+b): 2 CPGs + 2 SPGs + 2 unplaced | 10 | ~$3.57 |
-| `xregion-4` | Cross region (us-east-1 ↔ eu-west-2), 1 cluster PG × 2 per region | 4 | ~$1.43 + transfer |
+| `az-cpg-2` | Same AZ (a), single cluster PG — minimal ucast pair | 2 | ~$1.43 |
+| `az-cpg-3` | Same AZ (a), single cluster PG | 3 | ~$2.14 |
+| `xaz-xcpg-10` | Cross AZ (a+b): 2 CPGs + 2 SPGs + 2 unplaced | 10 | ~$7.14 |
+| `xregion-4` | Cross region (us-east-1 ↔ eu-west-2), 1 cluster PG × 2 per region | 4 | ~$2.85 + transfer |
 
 ## mcast/ — Multicast fan-out benchmarks
 
 Explicit roles: source → replicator → destination(s). Measures fan-out latency.
 
+**Instance type: `c7i.2xlarge`** (set per entry). Each node runs a single busy-poll app
+(`mcast_send` | replicator poll | `mcast_receive`), so 3 dedicated cores (OS, ENA IRQ,
+app) fit a 2xlarge — the cost-efficient choice. Pinning is derived dynamically, same as
+ucast.
+
 | File | Topology | Instances | Cost/hr |
 |------|----------|-----------|---------|
-| `xaz-cpg-3` | Cross AZ: source+replicator cluster PG (az a), destination in az b | 3 | ~$1.07 |
+| `az-cpg-3` | Same AZ (a): source + replicator + destination in one cluster PG | 3 | ~$1.07 |
 | `xregion-3` | Cross region: source+replicator CPG, destination in eu-west-2 | 3 | ~$1.07 + transfer |
 | `xregion-8` | Cross region: source+replicator us CPG, 2 CPGs + 1 SPG in eu-west-2 | 8 | ~$2.85 + transfer |
+| `xregion-xaz-xpg-6` | Source+replicator CPG (az a) → destinations across az a/b + eu-west-2 | 6 | ~$2.14 + transfer |
 
 ## Custom scenarios
 

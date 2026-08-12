@@ -19,8 +19,7 @@ deploy/
 Dev/iteration tooling lives outside deploy/, under af_xdp/dev/:
 
     dev/
-    ├── tests/             pytest integration suite (kernel-mode)
-    ├── docker/Dockerfile  local build + test harness (mirrors the AMI bake)
+    ├── Dockerfile         local build + test harness (mirrors the AMI bake)
     └── ansible/           provision.yaml, sync.yaml, run_tests.yaml (+ inventory symlink)
 ```
 
@@ -81,11 +80,44 @@ Assigned via CDK fleet spec `role` field (or manual EC2 tags for BYOI), used as 
 
 | Role | Description | Baked behavior (on boot) |
 |------|-------------|--------------------------|
-| `source` | Market data origin (exchange simulator) | Replicator in kernel-mode |
-| `replicator` | Packet replicator (AF_XDP or kernel) | Replicator in kernel-mode |
-| `destination` | Latency measurement endpoint | Replicator in kernel-mode |
+| `source` | Market data origin (exchange simulator) | Replicator in echo-mode |
+| `replicator` | Packet replicator (AF_XDP or kernel) | Replicator in echo-mode |
+| `destination` | Latency measurement endpoint | Replicator in echo-mode |
 
 All nodes boot the same — role determines topology wiring at runtime (via ansible or test scripts).
+
+## Instance sizing (cost vs cores)
+
+The CDK **scenarios pick the instance type per workload** (via the FleetEntry `type`
+field): **mcast → `c7i.2xlarge`** (cost-efficient), **ucast → `c7i.4xlarge`**. Instances
+run `nosmt` (SMT off) for latency stability, so **online cores = vCPUs / 2**, and
+`bake-ami.sh` isolates a block for the datapath (`isolcpus=1-4`). Core budget per node —
+core 0 = OS, core 1 = ENA hard IRQ (`isolated[0]`), then one dedicated core per
+busy-poll/measurement thread:
+
+| Workload | Instance | Online cores | Datapath cores needed | Fits? |
+|----------|----------|:------------:|-----------------------|:-----:|
+| **mcast** | `c7i.2xlarge` | 4 (0-3) | 3 — OS + IRQ + 1 app (`send` \| poll \| `receive`) | ✅ |
+| **ucast** | `c7i.4xlarge` | 8 (0-7) | 5 — OS + IRQ + replicator-poll + rtt-send + rtt-recv | ✅ |
+
+- **Why the split.** mcast runs a *single* busy-poll app per node → 3 cores, so a
+  2xlarge suffices. ucast co-locates the replicator poll thread **and** the rtt sender
+  **and** the rtt receiver on the same node, and each wants its own core alongside OS +
+  a **separate** ENA-IRQ core (keeping the IRQ off the poll core removes the `--xdp-tx`
+  tail jitter) → 5 cores, which needs a 4xlarge. A 2xlarge (4 online cores) cannot host
+  ucast under this clean separation, so ucast scenarios pin `c7i.4xlarge`.
+- **The code adapts dynamically — one AMI, no per-size variant.** Core pinning is
+  derived at runtime from the isolated set on whatever instance the scenario deploys:
+  the replicator's `initializeCpuCores` (poll thread = first isolated core after the
+  IRQ), `run_ucast.yaml` `auto_pin` (rtt `recv = lo+2`, `send = lo+3`), and `run_mcast`
+  (app = `isolated[1]`). `isolcpus=1-4` is a safe superset the runtime narrows.
+
+```bash
+# ucast (c7i.4xlarge scenarios): cdk deploy --context scenario=ucast/az-cpg-2
+ansible-playbook run_ucast.yaml
+# mcast (c7i.2xlarge scenarios): cdk deploy --context scenario=mcast/az-cpg-3
+ansible-playbook run_mcast.yaml
+```
 
 ## Key Decisions
 

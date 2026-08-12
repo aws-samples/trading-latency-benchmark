@@ -82,7 +82,7 @@
           - "--exclude=.git"
           - "--exclude=node_modules"
           # Do not ship host build artifacts (see sync.yaml): a stale .o compiled
-          # with -DKERNEL_MODE_ONLY would be relinked into a kernel-only binary.
+          # with -DECHO_MODE_ONLY would be relinked into a kernel-only binary.
           - "--exclude=*.o"
           - "--exclude=*.d"
           - "--exclude=/replicator"
@@ -197,8 +197,19 @@
       ansible.builtin.replace:
         path: /etc/default/grub
         regexp: '^(GRUB_CMDLINE_LINUX_DEFAULT="(?!.*isolcpus=).*)"$'
-        replace: '\1 isolcpus=1-3 nohz_full=1-3 rcu_nocbs=1-3 nosmt"'
+        replace: '\1 isolcpus=1-4 nohz_full=1-4 rcu_nocbs=1-4 nosmt"'
       register: grub_isol
+      when: not (rebuild | default(false) | bool)
+
+    # Converge an EXISTING isolation range to 1-4 (e.g. a pre-baked AMI carrying
+    # isolcpus=1-3). Idempotent: no change when already 1-4. This is what lets the
+    # playbook *update* the config on running instances instead of only seeding it.
+    - name: Converge CPU-isolation range to 1-4 (update pre-baked 1-3 etc.)
+      ansible.builtin.replace:
+        path: /etc/default/grub
+        regexp: 'isolcpus=[0-9,\-]+ nohz_full=[0-9,\-]+ rcu_nocbs=[0-9,\-]+'
+        replace: 'isolcpus=1-4 nohz_full=1-4 rcu_nocbs=1-4'
+      register: grub_isol_upd
       when: not (rebuild | default(false) | bool)
 
     - name: Enable low-latency cmdline (C-states + reserved hugepages) if absent
@@ -211,7 +222,20 @@
 
     - name: Regenerate grub config
       ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
-      when: not (rebuild | default(false) | bool) and (grub_isol.changed or grub_lowlat.changed)
+      when: not (rebuild | default(false) | bool) and (grub_isol.changed or grub_isol_upd.changed or grub_lowlat.changed)
+
+    # Kernel cmdline (isolcpus/nohz_full/...) only takes effect after a reboot.
+    # Gated on an actual grub change so re-runs are no-ops. Set grub_reboot=false
+    # to defer (e.g. batch the reboot yourself). ansible.builtin.reboot waits for
+    # SSH to return before continuing.
+    - name: Reboot to apply new kernel cmdline (isolcpus)
+      ansible.builtin.reboot:
+        reboot_timeout: 300
+        post_reboot_delay: 15
+      when:
+        - not (rebuild | default(false) | bool)
+        - (grub_isol.changed or grub_isol_upd.changed or grub_lowlat.changed)
+        - (grub_reboot | default(true) | bool)
 
     - name: Disable irqbalance (keep IRQs off isolated cores)
       ansible.builtin.systemd:
@@ -236,18 +260,22 @@
           WantedBy=multi-user.target
       when: not (rebuild | default(false) | bool)
 
-    - name: Install ena-napi-defer.service (let busy-poll own the queue)
+    - name: Install ena-rx-lowlat.service (deferred-IRQ + small gro backstop for AF_XDP busy-poll RX)
       ansible.builtin.copy:
-        dest: /etc/systemd/system/ena-napi-defer.service
+        dest: /etc/systemd/system/ena-rx-lowlat.service
         content: |
           [Unit]
-          Description=Defer ENA hardirqs so AF_XDP busy-poll owns the RX queue
+          Description=Low-latency NAPI for AF_XDP busy-poll RX (defer hard IRQs + 10us gro backstop)
           After=network-online.target
           Wants=network-online.target
           [Service]
           Type=oneshot
           RemainAfterExit=yes
-          ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | grep -oP "dev \K\S+" | head -1); echo 2 > /sys/class/net/${IFACE:-eth0}/napi_defer_hard_irqs 2>/dev/null || true; echo 200000 > /sys/class/net/${IFACE:-eth0}/gro_flush_timeout 2>/dev/null || true'
+          # Deferred-IRQ + busy-poll regime: napi_defer_hard_irqs hands NAPI to the
+          # app's busy-poll; gro_flush_timeout is the backstop for busy-poll gaps.
+          # 10us — NOT 0 (strands packets in gaps -> multi-second bursts) and NOT the
+          # old 200us (dominates hop latency -> ~200us/hop). See dev/roadmap.md.
+          ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | grep -oP "dev \K\S+" | head -1); echo 2 > /sys/class/net/${IFACE:-eth0}/napi_defer_hard_irqs 2>/dev/null || true; echo 10000 > /sys/class/net/${IFACE:-eth0}/gro_flush_timeout 2>/dev/null || true'
           [Install]
           WantedBy=multi-user.target
       when: not (rebuild | default(false) | bool)
@@ -259,7 +287,7 @@
         daemon_reload: true
       loop:
         - cpu-performance.service
-        - ena-napi-defer.service
+        - ena-rx-lowlat.service
       when: not (rebuild | default(false) | bool)
 
     - name: Reboot to activate PHC

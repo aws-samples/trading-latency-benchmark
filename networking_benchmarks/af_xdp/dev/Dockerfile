@@ -4,7 +4,7 @@
 # xdp-tools from source, then `make full` — validating that the code COMPILES
 # exactly as the bake will, before spending ~12 min on an EC2 bake.
 #
-# It then runs the pytest suite in kernel mode (replicator --kernel-mode): no
+# It then runs the pytest suite in echo mode (replicator --echo-mode): no
 # root, no XDP/BPF at runtime, so it works in an unprivileged container. The
 # real AF_XDP datapath still requires EC2 (run_ucast).
 #
@@ -12,7 +12,7 @@
 # linux/amd64 (emulated on Apple Silicon):
 #
 #   cd networking_benchmarks/af_xdp
-#   docker build --platform linux/amd64 -f dev/docker/Dockerfile -t afxdp-test .
+#   docker build --platform linux/amd64 -f dev/Dockerfile -t afxdp-test .
 #   docker run --rm --platform linux/amd64 afxdp-test          # build already ran; runs pytest
 #
 FROM --platform=linux/amd64 amazonlinux:2023
@@ -45,15 +45,15 @@ RUN pip3 install --no-cache-dir pytest
 ENV LIBXDP_OBJECT_PATH=/usr/lib64/bpf
 
 # ── Source (only what the build/tests need — keeps context small) ─────────────
-# Preserve the repo's dev/tests/ layout so tests resolve AF_XDP_DIR (three
+# The suite lives at the repo's top-level tests/, so it resolves AF_XDP_DIR (two
 # parents up) to /src both here and locally.
 WORKDIR /src
 COPY Makefile ./
 COPY src/   ./src/
 COPY tools/ ./tools/
-COPY dev/tests/ ./dev/tests/
+COPY tests/ ./tests/
 
 # Build validation: full AF_XDP build must compile (mirrors the AMI bake).
 RUN make full
 
-CMD ["pytest", "dev/tests/", "-v", "--tb=short"]
+CMD ["pytest", "tests/", "-v", "--tb=short"]

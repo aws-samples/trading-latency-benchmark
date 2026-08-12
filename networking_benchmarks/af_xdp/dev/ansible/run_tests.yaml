@@ -21,7 +21,7 @@
         name: pytest
         state: present
 
-    # The pytest suite spawns its own kernel-mode replicator on control port
+    # The pytest suite spawns its own echo-mode replicator on control port
     # 12345 — the same port the production replicator.service binds. Stop the
     # service for the duration of the tests, then always bring it back.
     - name: Run integration tests (service stopped during pytest)
@@ -38,7 +38,7 @@
             cd /home/ec2-user/af_xdp 2>/dev/null || \
             cd /opt/af-xdp/../trading-latency-benchmark/networking_benchmarks/af_xdp 2>/dev/null || \
             cd /home/ec2-user/trading-latency-benchmark/networking_benchmarks/af_xdp
-            pytest dev/tests/ -v --tb=short 2>&1
+            pytest tests/ -v --tb=short 2>&1
           register: test_result
           ignore_errors: yes
 

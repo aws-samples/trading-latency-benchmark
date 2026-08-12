@@ -1,8 +1,8 @@
 [
-  {"role": "source", "az":"a", "pgName":"cpg-a", "pgType": "cluster"},
-  {"role": "replicator", "az":"a", "pgName":"cpg-a", "pgType": "cluster"},
-  {"role": "destination", "az":"a", "pgName":"cpg-a", "pgType": "cluster"},
-  {"role": "destination", "az":"a"},
-  {"role": "destination", "az":"b"},
-  {"role": "destination", "region": "eu-west-2", "az":"a"}
+  {"role": "source",      "type": "c7i.2xlarge", "az": "a", "pgName": "cpg-a", "pgType": "cluster"},
+  {"role": "replicator",  "type": "c7i.2xlarge", "az": "a", "pgName": "cpg-a", "pgType": "cluster"},
+  {"role": "destination", "type": "c7i.2xlarge", "az": "a", "pgName": "cpg-a", "pgType": "cluster"},
+  {"role": "destination", "type": "c7i.2xlarge", "az": "a"},
+  {"role": "destination", "type": "c7i.2xlarge", "az": "b"},
+  {"role": "destination", "type": "c7i.2xlarge", "region": "eu-west-2", "az": "a"}
 ]

@@ -5,8 +5,7 @@ test, and hot-deploy code to a running fleet during development.
 
 ```
 dev/
-├── tests/            pytest integration suite (kernel-mode; see tests/README.md)
-├── docker/           Dockerfile — local build + test harness (mirrors the AMI bake)
+├── Dockerfile        local build + test harness (mirrors the AMI bake)
 └── ansible/          dev playbooks + shared-inventory symlink
     ├── sync.yaml         rsync local source → EC2s, rebuild, restart replicator
     ├── provision.yaml    full install on stock AL2023 (no baked AMI)
@@ -14,17 +13,20 @@ dev/
     └── inventory.aws_ec2.yml → symlink to ../../deploy/ansible/inventory.aws_ec2.yml
 ```
 
-## docker/ — local build + test
+The pytest integration suite now lives at the repo top-level `tests/` (see
+[`../tests/README.md`](../tests/README.md)).
 
-Mirrors the AMI bake (xdp-tools + `make full`), then runs pytest in kernel mode
+## Dockerfile — local build + test
+
+Mirrors the AMI bake (xdp-tools + `make full`), then runs pytest in echo mode
 (no root/XDP). Validates that the code compiles exactly as the bake will, before
 spending ~12 min on an EC2 bake. Build for `linux/amd64` (the Makefile targets
 x86_64; emulated on Apple Silicon):
 
 ```bash
 # from af_xdp/
-docker build --platform linux/amd64 -f dev/docker/Dockerfile -t afxdp-test .
-docker run  --rm --platform linux/amd64 afxdp-test            # runs pytest dev/tests/
+docker build --platform linux/amd64 -f dev/Dockerfile -t afxdp-test .
+docker run  --rm --platform linux/amd64 afxdp-test            # runs pytest tests/
 ```
 
 ## ansible/ — dev iteration on a running fleet

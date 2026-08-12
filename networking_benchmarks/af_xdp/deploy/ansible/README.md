@@ -135,6 +135,16 @@ ansible-playbook -i inventory.aws_ec2.yml provision.yaml -e rebuild=true
 | `base_mcast_group` | `224.0.31.50` | Per-destination group base (last octet incremented) |
 | `data_port` | `5000` | UDP data port |
 
+### `run_ucast.yaml` — dynamic CPU pinning
+
+Unicast runs on `c7i.4xlarge` (see [deploy README → Instance sizing](../README.md#instance-sizing-cost-vs-cores)).
+Core pins are derived dynamically per host, so no size-specific tuning is needed.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `auto_pin` | `true` | Derive `send_cpu`/`recv_cpu` per host from the isolated range: `recv = lo+2`, `send = lo+3` (above the ENA-IRQ core `lo` and the replicator-poll core `lo+1`). Adapts across `c7i.4xlarge` → metal. Set `false` to force the literals below. |
+| `send_cpu` / `recv_cpu` | `4` / `3` | Literal rtt pins used only when `auto_pin=false`. |
+
 ## Multicast: groups & destinations (capability + future dev)
 
 **Replicator core (supported today):** the replicator handles **up to 16 multicast
@@ -193,7 +203,7 @@ Pass `-e rebuild=true` to skip deps/configs and only rsync + rebuild binaries.
 
 - Amazon Linux 2023 (x86_64) — primary target
 - Any RHEL 9 / Fedora derivative with `dnf` should work (untested)
-- Requires ENA NIC for AF_XDP mode; kernel-mode works on any Linux
+- Requires ENA NIC for AF_XDP mode; echo-mode works on any Linux
 
 
 

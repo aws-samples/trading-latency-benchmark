@@ -36,12 +36,12 @@ Runs on a temporary c7i.xlarge instance, takes ~9-10 minutes, produces a univers
 | `ena-coalescing.service` | Disable interrupt coalescing (`adaptive-rx off`, rx-usecs=0, tx-usecs=0) |
 | `ena-xdp-queues.service` | Pin RSS to queue 0 (`ethtool -X equal 1`) — all RX lands on the AF_XDP socket's queue |
 | `ena-mtu.service` | Set MTU 3498 (ENA native XDP single-page requirement) |
-| `ena-irq-affinity.service` | Pin ENA NIC IRQs to CPU0 (keep isolated cores 1-3 quiet); irqbalance disabled |
+| `ena-irq-affinity.service` | Pin ENA NIC IRQs to CPU0 (keep isolated cores 1-4 quiet); irqbalance disabled |
 | `replicator.service` | Packet replicator daemon (mode from `/etc/default/replicator`) |
 
 ### CPU isolation (grub cmdline)
 
-The bake appends `isolcpus=1-3 nohz_full=1-3 rcu_nocbs=1-3 nosmt` to
+The bake appends `isolcpus=1-4 nohz_full=1-4 rcu_nocbs=1-4 nosmt` to
 `GRUB_CMDLINE_LINUX_DEFAULT` (active after first boot). On a 4-physical-core
 `c7i.2xlarge`: core 0 = OS + NIC IRQs, core 1 = replicator poll thread, core 2 =
 rtt receiver, core 3 = rtt sender — non-competing busy-polling.
@@ -50,7 +50,7 @@ rtt receiver, core 3 = rtt sender — non-competing busy-polling.
 
 | Binary | Description |
 |--------|-------------|
-| `replicator` | AF_XDP zero-copy replicator + kernel-mode echo |
+| `replicator` | AF_XDP zero-copy replicator + echo-mode echo |
 | `rtt` | RTT measurement client (kernel `sendto` or `--xdp-tx` AF_XDP send; SO_TIMESTAMP RX + TSC) |
 | `mcast_send` | Multicast sender |
 | `mcast_receive` | Multicast receiver |

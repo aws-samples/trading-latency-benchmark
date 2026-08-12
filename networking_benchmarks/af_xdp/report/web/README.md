@@ -13,6 +13,12 @@ npm install            # svelte, vite, three
 npm run dev            # http://localhost:5173  (loads public/fleet.json)
 ```
 
+**Browse menu** — under `npm run dev` the toolbar shows a **Browse results…** dropdown
+listing every `fleet.json` under `af_xdp/results/` (newest first). Pick one and the app
+loads it live — no copying into `public/`, no `?data=` juggling. Backed by a dev-only
+API in `vite.config.js` (`/api/results`, `/api/fleet?path=…`); a static `build`/`preview`
+has no API, so the menu simply hides and `?data=` / bundled `fleet.json` still work.
+
 Point it at any results dir's data:
 
 ```bash

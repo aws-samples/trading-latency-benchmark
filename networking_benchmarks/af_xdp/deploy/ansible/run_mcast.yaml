@@ -62,10 +62,43 @@
       become: false
       run_once: true
 
-    # Lightweight re-verify of the clock gate (configure_mcast did the makestep +
-    # full convergence). Catches drift between config and run; captures the offset
-    # for the run metadata so results are self-documenting.
-    - name: Re-verify clock sync + capture offset (us)
+    # ── Reproducibility: free the AF_XDP queue on the transient app nodes ──
+    # A prior run's mcast_send/mcast_receive (or a stale XDP program) can hold
+    # queue 0; with RSS collapsed to queue 0 a stuck receiver ALSO starves SSH
+    # (it owns all RX). Kill leftovers + detach XDP on source/destination BEFORE
+    # each run so the benchmark is repeatable at will. NOT on the replicator —
+    # its mcast.o fan-out program must stay attached.
+    - name: Pre-run cleanup — free AF_XDP queue (source/destination only)
+      ansible.builtin.shell: |
+        pkill -9 -x mcast_receive 2>/dev/null || true
+        pkill -9 -x mcast_send    2>/dev/null || true
+        sleep 1
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ip link set "$IFACE" xdp off        2>/dev/null || true
+        ip link set "$IFACE" xdpgeneric off 2>/dev/null || true
+        ip link set "$IFACE" xdpdrv off     2>/dev/null || true
+        xdp-loader unload "$IFACE" --all     2>/dev/null || true
+      when: "'source' in group_names or 'destination' in group_names"
+      changed_when: false
+
+    # ── Reproducibility: force deterministic clock convergence per run ──
+    # One-way latency = rx(dest CLOCK_REALTIME) - tx(source CLOCK_REALTIME). A
+    # drifted or freshly-rebooted node whose clock lags the source produces
+    # rx<tx, which the receiver clamps to 0 (looks like "no data"). makestep +
+    # burst re-converges here so the run is valid on its own — no dependency on
+    # configure_mcast having just run, and no need for the allow_unsynced bypass
+    # (which silently yields the clamped-to-0 garbage).
+    - name: Force clock convergence (makestep + burst)
+      ansible.builtin.shell: |
+        chronyc makestep >/dev/null 2>&1 || true
+        chronyc burst 3/4 >/dev/null 2>&1 || true
+        for i in $(seq 1 10); do
+          chronyc tracking 2>/dev/null | grep -q "Leap status *: *Normal" && break
+          sleep 1
+        done
+      changed_when: false
+
+    - name: Measure clock offset (us)
       ansible.builtin.shell: |
         t=$(chronyc tracking 2>/dev/null)
         last=$(printf '%s\n' "$t" | awk -F': *' '/Last offset/{print $2}' | awk '{print $1}')
@@ -82,11 +115,43 @@
           configure_mcast, or bypass with -e allow_unsynced=true.
       when: not (allow_unsynced | default(false) | bool)
 
+    # ── Pin ENA IRQs off CPU0 to the first isolated CPU + stop irqbalance ──
+    # Hard IRQs default to CPU0 (shared with OS/SSH); moving them to a dedicated
+    # isolated core removes the P99 jitter that leaks into hop latency. Runs on
+    # all roles (source/replicator/dest all carry the datapath NIC).
+    - name: Pin ENA IRQs to an isolated CPU + disable irqbalance
+      ansible.builtin.shell: |
+        systemctl stop irqbalance 2>/dev/null || true
+        systemctl disable irqbalance 2>/dev/null || true
+        ISOL=$(cat /sys/devices/system/cpu/isolated 2>/dev/null)
+        [ -z "$ISOL" ] && exit 0
+        CPU=${ISOL%%-*}                       # first isolated CPU (apps use CPU+1)
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        # Low-latency NAPI: small gro_flush_timeout (10us) as a safety net for the
+        # in-app busy-poll — NOT 0 (thrashes into multi-second bursts) and NOT the
+        # baked 200us (adds ~200us/hop). 10us bounds the busy-poll gap window while
+        # sitting above the NAPI/timer granularity. defer_hard_irqs lets busy-poll own NAPI.
+        echo 2     > /sys/class/net/$IFACE/napi_defer_hard_irqs 2>/dev/null || true
+        echo 10000 > /sys/class/net/$IFACE/gro_flush_timeout    2>/dev/null || true
+        for irq in $(grep -iE "${IFACE}|ena" /proc/interrupts | awk -F: '{print $1}' | tr -d ' '); do
+          echo "$CPU" > /proc/irq/$irq/smp_affinity_list 2>/dev/null || true
+        done
+        echo "ENA IRQs -> CPU $CPU; gro=20us defer=2"
+      changed_when: false
+
     # ── Start receivers on destinations (AF_XDP, background) ───────────────
     - name: Start mcast_receive on destinations
       ansible.builtin.shell: |
         IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
-        nohup /opt/af-xdp/mcast_receive \
+        # Pin to an isolated CPU when present — the general scheduler may only
+        # have CPU0 (shared with OS/IRQs), which starves the poll-based drain
+        # loop and yields multi-second bursty latencies.
+        ISOL=$(cat /sys/devices/system/cpu/isolated 2>/dev/null)
+        # Apps run on (first isolated CPU + 1). The ENA hard IRQ is pinned to the
+        # first isolated CPU (see the IRQ-affinity task), so the busy-poll thread
+        # sits on a different core and is never preempted by the hard IRQ.
+        PIN=""; [ -n "$ISOL" ] && { F=${ISOL%%-*}; PIN="taskset -c $((F+1))"; }
+        nohup $PIN /opt/af-xdp/mcast_receive \
           -I "$IFACE" \
           -g {{ mcast_group }} \
           -p {{ data_port }} \
@@ -98,6 +163,19 @@
       register: receiver_pid
       when: "'destination' in group_names"
 
+    # ── Pin the replicator fan-out to an isolated CPU (avoid CPU0 starvation) ─
+    - name: Pin replicator process to an isolated CPU
+      ansible.builtin.shell: |
+        ISOL=$(cat /sys/devices/system/cpu/isolated 2>/dev/null)
+        [ -z "$ISOL" ] && exit 0
+        F=${ISOL%%-*}; CPU=$((F+1))
+        for pid in $(pgrep -x replicator); do
+          for t in $(ls /proc/$pid/task 2>/dev/null); do taskset -pc "$CPU" "$t" >/dev/null 2>&1 || true; done
+        done
+        echo "pinned replicator to CPU $CPU"
+      when: "'replicator' in group_names"
+      changed_when: false
+
     # ── Wait for XDP attach on destinations ────────────────────────────────
     - name: Wait for receivers to attach XDP
       ansible.builtin.pause:
@@ -108,7 +186,12 @@
     - name: Run mcast_send from source
       ansible.builtin.shell: |
         IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
-        /opt/af-xdp/mcast_send \
+        ISOL=$(cat /sys/devices/system/cpu/isolated 2>/dev/null)
+        # Apps run on (first isolated CPU + 1). The ENA hard IRQ is pinned to the
+        # first isolated CPU (see the IRQ-affinity task), so the busy-poll thread
+        # sits on a different core and is never preempted by the hard IRQ.
+        PIN=""; [ -n "$ISOL" ] && { F=${ISOL%%-*}; PIN="taskset -c $((F+1))"; }
+        $PIN /opt/af-xdp/mcast_send \
           -I "$IFACE" \
           -D {{ replicator_private_ip }} \
           -g {{ mcast_group }} \
@@ -141,6 +224,19 @@
         dest: "{{ results_dir }}/{{ hostvars[groups['source'][0]].private_ip_address }}-{{ private_ip_address }}.json"
         flat: yes
       when: "'destination' in group_names and (groups['source'] | default([]) | length > 0)"
+
+    # ── Reproducibility: release the AF_XDP queue after the run ────────────
+    # Results are already fetched; free queue 0 + detach XDP on the destination so
+    # the next invocation (or SSH) is never blocked by a lingering receiver.
+    - name: Post-run cleanup — release AF_XDP queue on destination
+      ansible.builtin.shell: |
+        pkill -9 -x mcast_receive 2>/dev/null || true
+        sleep 1
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ip link set "$IFACE" xdp off 2>/dev/null || true
+        xdp-loader unload "$IFACE" --all 2>/dev/null || true
+      when: "'destination' in group_names"
+      changed_when: false
 
     # ── Metadata ───────────────────────────────────────────────────────────
     - name: Collect node metadata

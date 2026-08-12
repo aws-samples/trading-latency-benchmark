@@ -5,7 +5,7 @@
  * protocol on port 12345 + data echo) but uses standard kernel sockets.
  * No root, no XDP, no BPF — runs anywhere.
  *
- * Used with: ./replicator --kernel-mode <listen_ip> <port>
+ * Used with: ./replicator --echo-mode <listen_ip> <port>
  *
  * Limitations vs AF_XDP mode:
  *   - ~10-50x higher latency (kernel network stack overhead)
@@ -31,7 +31,7 @@
 #include <arpa/inet.h>
 #include <poll.h>
 
-#include "ControlPort.hpp"
+#include "common/ControlPort.hpp"
 
 // Shared with ReplicatorMain.cpp signal handler
 extern volatile bool g_running;
@@ -153,9 +153,9 @@ static void handle_data(int data_fd) {
 }
 
 // ── Main loop ────────────────────────────────────────────────────────────────
-int run_kernel_mode(const std::string& listen_ip, uint16_t listen_port) {
+int run_echo_mode(const std::string& listen_ip, uint16_t listen_port) {
     const uint16_t CONTROL_PORT = afxdp_control_port();
-    std::cout << "=== Replicator (kernel mode) ===" << std::endl;
+    std::cout << "=== Replicator (echo mode) ===" << std::endl;
     std::cout << "Listen:   " << listen_ip << ":" << listen_port << std::endl;
     std::cout << "Control:  port " << CONTROL_PORT << std::endl;
     std::cout << "Mode:     kernel UDP echo (no AF_XDP, no root required)" << std::endl;
@@ -203,7 +203,7 @@ int run_kernel_mode(const std::string& listen_ip, uint16_t listen_port) {
         if (fds[1].revents & POLLIN) handle_control(ctrl_fd);
     }
 
-    std::cout << "\nShutting down kernel-mode replicator." << std::endl;
+    std::cout << "\nShutting down echo-mode replicator." << std::endl;
     close(data_fd);
     close(ctrl_fd);
     return 0;

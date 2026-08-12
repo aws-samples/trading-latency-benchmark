@@ -19,11 +19,16 @@ import {
 } from 'aws-cdk-lib/aws-ec2';
 import { Tags, RemovalPolicy } from 'aws-cdk-lib';
 
-// c7i.2xlarge = 8 vCPU / 4 physical cores. Non-competing busy-polling needs a
-// dedicated physical core each for: replicator poll thread, rtt sender,
-// rtt receiver, plus one core for OS + NIC IRQs. c7i.xlarge (2 physical
-// cores) forces these threads to share physical cores/HT siblings, injecting
-// jitter. See bake-ami.sh CPU-isolation section (isolcpus=1-3, nosmt).
+// DEFAULT is c7i.2xlarge = 8 vCPU / 4 physical cores (nosmt -> 4 online), which
+// suits MULTICAST: each node runs a single busy-poll app so it needs only 3
+// dedicated cores (OS, ENA IRQ, app). UNICAST is heavier: the sender co-locates
+// the replicator poll thread AND the rtt sender AND the rtt receiver, and each
+// wants its own physical core alongside OS + a SEPARATE ENA-IRQ core (keeping the
+// IRQ off the poll core avoids the tail jitter that hit --xdp-tx) = 5 cores, so
+// ucast scenarios pin c7i.4xlarge. One AMI serves both: core pinning is derived
+// dynamically at runtime from the isolated set (bake-ami.sh isolcpus, the
+// replicator's initializeCpuCores, and run_ucast.yaml auto_pin), so it adapts to
+// whatever instance a scenario deploys — 2xlarge -> 4xlarge -> metal.
 const DEFAULT_INSTANCE_TYPE = 'c7i.2xlarge';
 const DEFAULT_ROLE = 'replicator';
 const DEFAULT_PRIMARY_CIDR = '10.61.0.0/16';

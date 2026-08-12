@@ -4,7 +4,7 @@
  * Defaults to 12345 (production). Override with the AFXDP_CONTROL_PORT env var
  * so integration tests can run on a non-production port without colliding with
  * a live replicator.service (which binds 12345 on INADDR_ANY). Used by the
- * replicator (server), the kernel-mode echo server, rtt and
+ * replicator (server), the echo-mode echo server, rtt and
  * replicator_ctl (clients) so all four always agree on the port.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.

@@ -15,7 +15,7 @@
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#ifndef KERNEL_MODE_ONLY
+#ifndef ECHO_MODE_ONLY
 #include "Replicator.hpp"
 #endif
 #include <iostream>
@@ -25,7 +25,7 @@
 #include <signal.h>
 #include <unistd.h>
 
-#ifndef KERNEL_MODE_ONLY
+#ifndef ECHO_MODE_ONLY
 static std::unique_ptr<Replicator> g_replicator;
 #endif
 volatile bool g_running = true;
@@ -33,24 +33,24 @@ volatile bool g_running = true;
 void signalHandler(int signum) {
     std::cout << "\nReceived signal " << signum << ", shutting down..." << std::endl;
     g_running = false;
-#ifndef KERNEL_MODE_ONLY
+#ifndef ECHO_MODE_ONLY
     if (g_replicator) {
         g_replicator->stop();
     }
 #endif
 }
 
-// Forward declaration for kernel-mode echo server
-extern int run_kernel_mode(const std::string& listen_ip, uint16_t listen_port);
+// Forward declaration for echo-mode echo server
+extern int run_echo_mode(const std::string& listen_ip, uint16_t listen_port);
 
 void printUsage(const char* progName) {
     std::cout << "Usage: " << progName
-              << " [--kernel-mode] <interface> <listen_ip> <listen_port> [zero_copy] [--mcast]"
+              << " [--echo-mode] <interface> <listen_ip> <listen_port> [zero_copy] [--mcast]"
               << " [--ctrl <group>:<port>] [--producer <ip>:<port>]" << std::endl;
     std::cout << std::endl;
-    std::cout << "  --kernel-mode Use standard UDP sockets instead of AF_XDP." << std::endl;
+    std::cout << "  --echo-mode Use standard UDP sockets instead of AF_XDP." << std::endl;
     std::cout << "                No root required. Works in containers and on macOS." << std::endl;
-    std::cout << "                Usage: " << progName << " --kernel-mode <listen_ip> <listen_port>" << std::endl;
+    std::cout << "                Usage: " << progName << " --echo-mode <listen_ip> <listen_port>" << std::endl;
     std::cout << std::endl;
     std::cout << "  interface:    Network interface to bind to (e.g., eth0)" << std::endl;
     std::cout << "  listen_ip:    Unicast IP to listen on (unicast mode), or inner multicast" << std::endl;
@@ -84,7 +84,7 @@ void printUsage(const char* progName) {
     std::cout << "  List destinations:  [3]" << std::endl;
 }
 
-#ifndef KERNEL_MODE_ONLY
+#ifndef ECHO_MODE_ONLY
 void printStatisticsLoop() {
     while (g_running) {
         std::this_thread::sleep_for(std::chrono::seconds(10));
@@ -101,22 +101,22 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Kernel mode: simple UDP echo, no AF_XDP, no root required
-    if (std::string(argv[1]) == "--kernel-mode") {
+    // echo mode: simple UDP echo, no AF_XDP, no root required
+    if (std::string(argv[1]) == "--echo-mode") {
         if (argc < 4) {
-            std::cerr << "Usage: " << argv[0] << " --kernel-mode <listen_ip> <listen_port>" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " --echo-mode <listen_ip> <listen_port>" << std::endl;
             return 1;
         }
         signal(SIGINT, signalHandler);
         signal(SIGTERM, signalHandler);
         std::string ip = argv[2];
         uint16_t port = static_cast<uint16_t>(std::stoi(argv[3]));
-        return run_kernel_mode(ip, port);
+        return run_echo_mode(ip, port);
     }
 
-#ifdef KERNEL_MODE_ONLY
-    std::cerr << "Error: This binary was built in kernel-mode-only configuration." << std::endl;
-    std::cerr << "AF_XDP mode is not available. Use --kernel-mode flag." << std::endl;
+#ifdef ECHO_MODE_ONLY
+    std::cerr << "Error: This binary was built in echo-mode-only configuration." << std::endl;
+    std::cerr << "AF_XDP mode is not available. Use --echo-mode flag." << std::endl;
     return 1;
 #else
     if (argc < 4) {
@@ -128,7 +128,7 @@ int main(int argc, char* argv[]) {
     if (getuid() != 0) {
         std::cerr << "Error: This program must be run as root for AF_XDP access" << std::endl;
         std::cerr << "Please run with: sudo " << argv[0] << " ..." << std::endl;
-        std::cerr << "Or use --kernel-mode for testing without root." << std::endl;
+        std::cerr << "Or use --echo-mode for testing without root." << std::endl;
         return 1;
     }
 
@@ -266,5 +266,5 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Packet replicator stopped" << std::endl;
     return 0;
-#endif  // KERNEL_MODE_ONLY
+#endif  // ECHO_MODE_ONLY
 }

@@ -25,7 +25,7 @@
 #include <unistd.h>
 #include <errno.h>
 
-#include "ControlPort.hpp"
+#include "common/ControlPort.hpp"
 
 class ReplicatorCtl {
 private:

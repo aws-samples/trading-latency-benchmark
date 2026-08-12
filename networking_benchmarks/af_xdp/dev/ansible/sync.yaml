@@ -31,8 +31,8 @@
           - "--exclude=node_modules"
           - "--exclude=cdk.out"
           # Never ship host build artifacts: a stale .o/.d (e.g. one compiled
-          # with -DKERNEL_MODE_ONLY) would be seen as up-to-date by make and
-          # relinked into the binary, silently producing a kernel-mode-only
+          # with -DECHO_MODE_ONLY) would be seen as up-to-date by make and
+          # relinked into the binary, silently producing a echo-mode-only
           # build that rejects ucast/AF_XDP mode.
           - "--exclude=*.o"
           - "--exclude=*.d"
@@ -57,11 +57,11 @@
         executable: /bin/bash
       register: build_result
 
-    - name: Verify replicator binary supports AF_XDP (not kernel-mode-only)
+    - name: Verify replicator binary supports AF_XDP (not echo-mode-only)
       ansible.builtin.shell: |
         cd {{ af_xdp_path }}
-        if strings replicator | grep -q "kernel-mode-only configuration"; then
-          echo "ERROR: built replicator is KERNEL_MODE_ONLY; ucast/mcast will fail" >&2
+        if strings replicator | grep -q "echo-mode-only configuration"; then
+          echo "ERROR: built replicator is ECHO_MODE_ONLY; ucast/mcast will fail" >&2
           exit 1
         fi
       changed_when: false

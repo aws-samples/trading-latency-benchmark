@@ -1,7 +1,7 @@
 [
-  {"count": 1, "role": "source", "az": "a", "pgType": "cluster", "pgName": "us-a-cpg-src"},
-  {"count": 1, "role": "replicator", "az": "a", "pgType": "cluster", "pgName": "us-a-cpg-src"},
-  {"count": 2, "role": "destination", "az": "a", "pgType": "cluster", "pgName": "eu-a-cpg-dst", "region": "eu-west-2"},
-  {"count": 2, "role": "destination", "az": "b", "pgType": "cluster", "pgName": "eu-b-cpg-dst", "region": "eu-west-2"},
-  {"count": 2, "role": "destination", "az": "b", "pgType": "spread", "pgName": "eu-b-spg-dst", "region": "eu-west-2"}
+  {"count": 1, "role": "source",      "type": "c7i.2xlarge", "az": "a", "pgType": "cluster", "pgName": "us-a-cpg-src"},
+  {"count": 1, "role": "replicator",  "type": "c7i.2xlarge", "az": "a", "pgType": "cluster", "pgName": "us-a-cpg-src"},
+  {"count": 2, "role": "destination", "type": "c7i.2xlarge", "az": "a", "pgType": "cluster", "pgName": "eu-a-cpg-dst", "region": "eu-west-2"},
+  {"count": 2, "role": "destination", "type": "c7i.2xlarge", "az": "b", "pgType": "cluster", "pgName": "eu-b-cpg-dst", "region": "eu-west-2"},
+  {"count": 2, "role": "destination", "type": "c7i.2xlarge", "az": "b", "pgType": "spread", "pgName": "eu-b-spg-dst", "region": "eu-west-2"}
 ]
