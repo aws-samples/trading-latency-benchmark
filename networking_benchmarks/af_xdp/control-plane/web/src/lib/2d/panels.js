@@ -330,7 +330,11 @@ export function renderPanels(ctx) {
       + '<span style="border:2px dashed rgba(163,113,247,0.4);color:#c084fc">AZ</span>'
       + '<span style="border:1.5px dashed rgba(57,211,83,0.3);color:#39d353">Region</span>'
       + '<span style="border:1.5px solid rgba(248,81,73,0.5);color:#f85149">Account</span></div>'
-      + '<div class="ux-hint"><b>Hover</b> node \u2014 edge labels. <b>Click</b> \u2014 pin table. <b>Drag</b> title to move; click to fold; drag corner to resize.</div>';
+      + '<div class="ux-hint">'
+      + '<div class="hint-row"><b>Hover</b> a node \u2014 show its edge labels</div>'
+      + '<div class="hint-row"><b>Click</b> a node \u2014 pin its latency table</div>'
+      + '<div class="hint-row"><b>Drag</b> a panel title to move it; click to fold; drag its corner to resize</div>'
+      + '</div>';
     // Shared Boundaries toggles — show/hide contour levels (and VPC peering lines).
     // Shared Show toggles — boundary levels + Links (edge) visibility in one row.
     el.appendChild(buildBoundaryToggles((key, on) => {

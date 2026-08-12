@@ -100,10 +100,8 @@ export function createLive({ onUpdate, onJob } = {}) {
           az: n.az || 'unknown',
           region: n.region || 'us-east-1',
           // Topology grouping fields the 2D contours (VPC/Region/Account) and 3D
-          // volumes group by. proto.NodeInfo doesn't model vpc_id/account yet, so
-          // they fall back to 'unknown' (contour is skipped) until the agent/IMDS
-          // self-report supplies them — pass through here so a richer backend
-          // renders the full nested hierarchy with no further UI change.
+          // volumes group by. The agent self-reports vpc_id from IMDS; account is
+          // not modelled and falls back to 'unknown', which skips that contour.
           account: n.account || 'unknown',
           vpc_id: n.vpc_id || 'unknown',
           cpg_name: n.placement_group || 'unknown',
@@ -134,6 +132,7 @@ export function createLive({ onUpdate, onJob } = {}) {
         const cell = {
           p50: m.p50, p90: m.p90, p99: m.p99, p999: m.p999, max: m.max,
           loss: +(e.metrics.loss_pct || 0).toFixed(3),
+          unix: e.unix || 0,
         };
         if (relayIdx >= 0 && i !== relayIdx && j !== relayIdx) {
           matrix[i][relayIdx] = matrix[i][relayIdx] || cell;   // source → replicator (shared)

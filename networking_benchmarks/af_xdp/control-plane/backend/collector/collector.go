@@ -1,10 +1,18 @@
-package main
+package collector
 
 import (
 	"sync"
 
 	"afxdp-cp/proto"
 )
+
+// Sample is one history data point shipped over SSE. Short JSON keys because
+// the 60-deep ring ships on every edge event.
+type Sample struct {
+	Unix int64 `json:"u"`
+	P50  int64 `json:"p50"`
+	P99  int64 `json:"p99"`
+}
 
 // Edge is one directed measurement (src -> dst) for a variation, latest value
 // plus a short history ring for sparklines.
@@ -16,10 +24,11 @@ type Edge struct {
 	TxMode    string        `json:"tx_mode,omitempty"`
 	Metrics   proto.Metrics `json:"metrics"`
 	Unix      int64         `json:"unix"`
-	History   []int64       `json:"history,omitempty"` // recent p50s
+	History   []Sample      `json:"history,omitempty"`
 }
 
-const edgeHistoryLen = 60
+// EdgeHistoryLen is the maximum number of history samples kept per edge.
+const EdgeHistoryLen = 60
 
 // Collector holds the authoritative in-memory NxN state.
 type Collector struct {
@@ -51,9 +60,9 @@ func (c *Collector) Apply(t proto.Telemetry) Edge {
 	if t.TxMode != "" {
 		e.TxMode = t.TxMode
 	}
-	e.History = append(e.History, t.Metrics.ServiceRTT.P50)
-	if len(e.History) > edgeHistoryLen {
-		e.History = e.History[len(e.History)-edgeHistoryLen:]
+	e.History = append(e.History, Sample{Unix: t.Unix, P50: t.Metrics.ServiceRTT.P50, P99: t.Metrics.ServiceRTT.P99})
+	if len(e.History) > EdgeHistoryLen {
+		e.History = e.History[len(e.History)-EdgeHistoryLen:]
 	}
 	return *e
 }

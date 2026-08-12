@@ -17,7 +17,7 @@ import { applySel } from './selection.js';
 
 const STYLE_ID = 'topology2d-styles';
 
-export function mountTopology2D(container, fleet) {
+export function mountTopology2D(container, fleet, opts = {}) {
   if (!document.getElementById(STYLE_ID)) {
     const style = document.createElement('style'); style.id = STYLE_ID; style.textContent = CSS; document.head.appendChild(style);
   }
@@ -34,6 +34,8 @@ export function mountTopology2D(container, fleet) {
     fleet, matrix, N, W, H, CX: W / 2, CY: H / 2, region: fleet.region || 'us-east-1',
     root, svg, deselectBtn, statsEl,
     selected: new Set(), nodeEls: [], edgeElements: [], edgeLabelEls: [], disposers: [],
+    targetIds: opts.targetIds || new Set(),
+    onToggleTarget: opts.onToggleTarget || (() => {}),
   };
 
   // ── global ranges ──────────────────────────────────────────────────────────

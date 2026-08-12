@@ -4,7 +4,7 @@ __pycache__/
 .pytest_cache/
 
 # Local planning (not for the repo)
-dev/roadmap.md
+dev/roadmap
 
 # CLI tool - local build
 afxdpctl

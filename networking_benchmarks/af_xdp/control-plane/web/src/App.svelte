@@ -5,6 +5,7 @@
   import { createLive, runCampaign, cancelCampaign } from './lib/live.js';
   import { mountControls } from './lib/controls.js';
   import { buildReportHTML } from './lib/report.js';
+  import { prunedTargets, countPairs, SCOPE_AMONG, SCOPE_FANOUT } from './lib/pairs.js';
 
   let container;        // viz host (wiped on remount)
   let controlsHost;     // persistent overlay host for the shared panel
@@ -18,6 +19,10 @@
   let view3d = null;   // persisted 3D camera view, kept across live-update remounts
 
   let runs = [];
+
+  // ── Target set — scopes the next run to a subset of nodes ──
+  let targetIds = new Set();
+  let scope = 'among';
 
   // ── backend connection (SSE) — the DATA source. Always open when a backend is
   //    present; independent of "Live mode" (which is the heartbeat mode below). ──
@@ -50,8 +55,8 @@
     container.innerHTML = '';
     try {
       handle = (mode === '2d')
-        ? mountTopology2D(container, fleet)
-        : mountTopology3D(container, fleet, { view: view3d });
+        ? mountTopology2D(container, fleet, { targetIds, onToggleTarget })
+        : mountTopology3D(container, fleet, { view: view3d, targetIds, onToggleTarget });
     } catch (e) {
       console.error('Viz mount failed:', e);
       container.innerHTML = '<pre style="color:#f85149;padding:20px;font:12px monospace;white-space:pre-wrap;max-height:80vh;overflow:auto">'
@@ -103,6 +108,10 @@
     const combos = conn.combos();
     panel?.setCombos(combos, { kind, variation });
     fleet = conn.toFleet(kind, variation);
+    // Prune targetIds: a terminated/offline node cannot silently scope a run.
+    const pruned = prunedTargets(targetIds, fleet.nodes);
+    if (pruned.size !== targetIds.size) targetIds = pruned;
+    updateTargetPanel();
     loading = false; error = ''; remount();
     const s = conn.stats();
     panel?.setStats({ ...s, updated: Date.now() });
@@ -110,6 +119,25 @@
   function scheduleRerender() {
     if (rerenderTimer) return;
     rerenderTimer = setTimeout(() => { rerenderTimer = null; liveRerender(); }, 500);
+  }
+
+  // Push current target state to the control panel.
+  function updateTargetPanel() {
+    if (!panel) return;
+    const N = fleet ? fleet.nodes.filter((n) => n.online !== false).length : 0;
+    const k = targetIds.size;
+    const pairs = countPairs(N, k, scope);
+    panel.setTargets({ count: k, pairs, scope, totalNodes: N });
+  }
+
+  // Target toggle handler — called from 2D checkbox / shift+click and 3D shift+click.
+  function onToggleTarget(instanceId) {
+    if (targetIds.has(instanceId)) targetIds.delete(instanceId);
+    else targetIds.add(instanceId);
+    // D3: auto-switch scope when among yields 0 pairs (k<2).
+    if (scope === SCOPE_AMONG && targetIds.size === 1) scope = SCOPE_FANOUT;
+    updateTargetPanel();
+    remount();
   }
 
   // Human-readable, detailed campaign progress for the status line.
@@ -179,13 +207,13 @@
         for (const v of ['kernel', 'xdp']) {
           if (runCancelled) break;
           panel?.setStatus(`${pfx}running ucast/${v}…`);
-          await runCampaign({ ...body, variation: v });
+          await runCampaign({ ...body, variation: v, nodes: [...targetIds], scope });
           await waitForDone();
         }
         if (!runCancelled) panel?.setStatus('done ucast/all');
       } else {
         panel?.setStatus(`${pfx}launching ${body.kind}/${body.variation || (body.modes || []).join('+')}…`);
-        await runCampaign(body);
+        await runCampaign({ ...body, nodes: [...targetIds], scope });
         await waitForDone();
       }
     } catch (e) {
@@ -200,7 +228,7 @@
   function startHeartbeat(body) {
     stopHeartbeat();
     hbBody = body;
-    const ms = Math.max(60, body.intervalSec || 60) * 1000;
+    const ms = Math.max(30, body.intervalSec || 30) * 1000;
     const tick = async () => { if (hbRunning || !hbBody) return; hbRunning = true; try { await doRun(hbBody); } finally { hbRunning = false; } };
     tick();                                    // fire immediately
     hbTimer = setInterval(tick, ms);
@@ -228,6 +256,9 @@
         panel?.setStatus(`downloaded report ${kind}/${variation}`);
       },
       onRun: doRun,
+      onScopeChange: (s) => { scope = s; updateTargetPanel(); remount(); },
+      onPreset: (ids) => { targetIds = new Set(ids); if (scope === SCOPE_AMONG && targetIds.size === 1) scope = SCOPE_FANOUT; updateTargetPanel(); remount(); },
+      onClearTargets: () => { targetIds = new Set(); scope = SCOPE_AMONG; updateTargetPanel(); remount(); },
     });
 
     const params = new URLSearchParams(location.search);

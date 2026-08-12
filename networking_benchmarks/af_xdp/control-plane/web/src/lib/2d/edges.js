@@ -5,6 +5,7 @@
 // Any edge touching a hovered or selected node always lifts to full opacity.
 
 import { fmtLat, edgeSigma, jitterColor, latencyColor, esc } from './palette.js';
+import { relativeAge, ageFade } from '../lineage.js';
 
 const EDGE_WIDTH = 2.5;
 
@@ -60,9 +61,14 @@ export function renderEdges(ctx) {
     const diff = ab && ba ? Math.abs(ab.p50 - ba.p50) : 0;
     const diffPct = ab && ba && Math.min(ab.p50, ba.p50) > 0 ? ((diff / Math.min(ab.p50, ba.p50)) * 100).toFixed(1) : '0';
     const nameA = esc(nodeA.ec2_name), nameB = esc(nodeB.ec2_name);
+    const now = Date.now();
+    // Variation + relative age annotation (3.2).
+    const variation = ctx.variation || '';
+    const ageAB = ab && ab.unix ? relativeAge(ab.unix, now) : '';
+    const ageBA = ba && ba.unix ? relativeAge(ba.unix, now) : '';
     let html = '<h4>' + nameA + ' \u2194 ' + nameB + '</h4>';
-    if (ab) html += '<div class="dir-block"><div class="dir-label">\u2192 ' + nameA + ' \u2192 ' + nameB + '</div>' + metricRow(ab) + '</div>';
-    if (ba) html += '<div class="dir-block"><div class="dir-label">\u2190 ' + nameB + ' \u2192 ' + nameA + '</div>' + metricRow(ba) + '</div>';
+    if (ab) html += '<div class="dir-block"><div class="dir-label">\u2192 ' + nameA + ' \u2192 ' + nameB + (variation || ageAB ? ' <span style="color:#6e7681;font-size:9px">' + esc(variation) + (ageAB ? ' \u00b7 ' + ageAB : '') + '</span>' : '') + '</div>' + metricRow(ab) + '</div>';
+    if (ba) html += '<div class="dir-block"><div class="dir-label">\u2190 ' + nameB + ' \u2192 ' + nameA + (variation || ageBA ? ' <span style="color:#6e7681;font-size:9px">' + esc(variation) + (ageBA ? ' \u00b7 ' + ageBA : '') + '</span>' : '') + '</div>' + metricRow(ba) + '</div>';
     if (diff > 0) html += '<div class="asymmetry">Asymmetry: \u0394' + diff + '\u03bcs (' + diffPct + '%)</div>';
     edgeTooltip.innerHTML = html; edgeTooltip.classList.add('visible');
   }

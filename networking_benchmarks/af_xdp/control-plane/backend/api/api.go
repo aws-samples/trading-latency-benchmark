@@ -1,4 +1,4 @@
-package main
+package api
 
 import (
 	"encoding/json"
@@ -7,19 +7,26 @@ import (
 	"os"
 	"time"
 
+	"afxdp-cp/backend/collector"
+	"afxdp-cp/backend/errorreg"
+	"afxdp-cp/backend/hub"
+	"afxdp-cp/backend/orchestrator"
+	"afxdp-cp/backend/registry"
 	"afxdp-cp/proto"
 )
 
+// Server holds the dependencies for the HTTP API handlers.
 type Server struct {
-	reg    *Registry
-	coll   *Collector
-	hub    *Hub
-	orch   *Orchestrator
-	errReg *ErrorRegistry
-	web    string // static web dir (may be empty)
+	Reg    *registry.Registry
+	Coll   *collector.Collector
+	Hub    *hub.Hub
+	Orch   *orchestrator.Orchestrator
+	ErrReg *errorreg.ErrorRegistry
+	Web    string // static web dir (may be empty)
 }
 
-func (s *Server) routes() *http.ServeMux {
+// Routes returns the HTTP mux with all API routes registered.
+func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/fleet", s.handleFleet)
 	mux.HandleFunc("/api/events", s.handleEvents)
@@ -28,8 +35,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/cmd", s.handleCmd)
 	mux.HandleFunc("/api/errors", s.handleErrors)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
-	if s.web != "" {
-		mux.Handle("/", http.FileServer(http.Dir(s.web)))
+	if s.Web != "" {
+		mux.Handle("/", http.FileServer(http.Dir(s.Web)))
 	}
 	return mux
 }
@@ -38,8 +45,8 @@ func (s *Server) routes() *http.ServeMux {
 func (s *Server) handleFleet(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"generated_unix": time.Now().Unix(),
-		"nodes":          s.reg.List(),
-		"edges":          s.coll.Snapshot(),
+		"nodes":          s.Reg.List(),
+		"edges":          s.Coll.Snapshot(),
 	})
 }
 
@@ -59,12 +66,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	snap, _ := json.Marshal(struct {
 		Type string `json:"type"`
 		Data any    `json:"data"`
-	}{"snapshot", map[string]any{"nodes": s.reg.List(), "edges": s.coll.Snapshot()}})
+	}{"snapshot", map[string]any{"nodes": s.Reg.List(), "edges": s.Coll.Snapshot()}})
 	writeSSE(w, snap)
 	fl.Flush()
 
-	ch := s.hub.Subscribe()
-	defer s.hub.Unsubscribe(ch)
+	ch := s.Hub.Subscribe()
+	defer s.Hub.Unsubscribe(ch)
 	ka := time.NewTicker(20 * time.Second)
 	defer ka.Stop()
 	ctx := r.Context()
@@ -103,15 +110,15 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(body, &kind)
 	switch kind.Kind {
 	case "mcast":
-		var p McastMatrixParams
+		var p orchestrator.McastMatrixParams
 		if err := json.Unmarshal(body, &p); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		go s.orch.RunMcastMatrix(p)
+		go s.Orch.RunMcastMatrix(p)
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": "started", "kind": "mcast", "modes": p.Modes})
 	default: // ucast
-		var p UcastMatrixParams
+		var p orchestrator.UcastMatrixParams
 		if err := json.Unmarshal(body, &p); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -119,7 +126,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		if p.Variation == "" {
 			p.Variation = "kernel"
 		}
-		go s.orch.RunUcastMatrix(p)
+		go s.Orch.RunUcastMatrix(p)
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": "started", "kind": "ucast", "variation": p.Variation})
 	}
 }
@@ -130,7 +137,7 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	s.orch.Cancel()
+	s.Orch.Cancel()
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "cancelling"})
 }
 
@@ -149,7 +156,7 @@ func (s *Server) handleCmd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	res, err := s.orch.DispatchAgent(req.InstanceID, req.Command, 60*time.Second)
+	res, err := s.Orch.DispatchAgent(req.InstanceID, req.Command, 60*time.Second)
 	if err != nil {
 		writeJSON(w, http.StatusGatewayTimeout, map[string]any{"ok": false, "err": err.Error()})
 		return
@@ -173,13 +180,14 @@ func writeSSE(w http.ResponseWriter, data []byte) {
 func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
 	nodeID := r.URL.Query().Get("node")
 	if nodeID != "" {
-		writeJSON(w, http.StatusOK, s.errReg.ErrorsFor(nodeID))
+		writeJSON(w, http.StatusOK, s.ErrReg.ErrorsFor(nodeID))
 	} else {
-		writeJSON(w, http.StatusOK, s.errReg.AllErrors())
+		writeJSON(w, http.StatusOK, s.ErrReg.AllErrors())
 	}
 }
 
-func webDirDefault() string {
+// WebDirDefault finds a built frontend directory if present.
+func WebDirDefault() string {
 	// Prefer a built frontend if present.
 	for _, d := range []string{"web/dist", "../web/dist"} {
 		if fi, err := os.Stat(d); err == nil && fi.IsDir() {

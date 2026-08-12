@@ -85,6 +85,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1117;
 #legend .ux-hint { margin-top: 10px; padding-top: 8px; border-top: 1px solid #30363d;
   font-size: 10px; color: #8b949e; line-height: 1.6; }
 #legend .ux-hint b { color: #e6edf3; }
+#legend .ux-hint .hint-row { display: block; margin: 3px 0; }
 #itypes { bottom: 16px; left: 16px; width: 360px; }
 #itypes .type-row { display: flex; align-items: center; gap: 12px; margin: 6px 0; padding: 5px 0;
   border-bottom: 1px solid rgba(48,54,61,0.5); }

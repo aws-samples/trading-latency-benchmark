@@ -432,17 +432,6 @@ Cargo.lock
 *.o
 *.obj
 
-# AF_XDP build-output binaries — anchored to the af_xdp dir so a bare
-# 'replicator' does NOT match the src/Replicator/ source directory (macOS git
-# runs core.ignorecase=true, so 'replicator' would otherwise ignore 'Replicator/'
-# and drop the split sources). Names match the Makefile -o targets.
-/networking_benchmarks/af_xdp/replicator
-/networking_benchmarks/af_xdp/rtt
-/networking_benchmarks/af_xdp/mcast_send
-/networking_benchmarks/af_xdp/mcast_receive
-/networking_benchmarks/af_xdp/replicator_ctl
-/networking_benchmarks/af_xdp/udp_send
-
 # Precompiled Headers
 *.gch
 *.pch

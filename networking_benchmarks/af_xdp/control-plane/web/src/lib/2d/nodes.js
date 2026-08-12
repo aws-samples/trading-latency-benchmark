@@ -123,11 +123,24 @@ export function renderNodes(ctx) {
     const roleLabel = node.role && ROLE_LABEL[node.role];
     const roleBadge = roleLabel
       ? '<span class="role-badge role-' + esc(ROLE_CSS[node.role] || node.role) + '">' + roleLabel + '</span>' : '';
-    el.innerHTML = '<span class="ip ip-private">' + esc(node.private_ip) + '</span>'
+    // Target checkbox (D1): visible when target set is non-empty, appears on hover otherwise.
+    const instanceId = node.instance_id || node.private_ip;
+    const isTargeted = ctx.targetIds.has(instanceId);
+    const targetBoxClass = 'target-box' + (isTargeted ? ' checked' : '') + (ctx.targetIds.size > 0 ? ' visible' : '');
+    el.innerHTML = '<span class="' + targetBoxClass + '" data-target-box></span>'
+      + '<span class="ip ip-private">' + esc(node.private_ip) + '</span>'
       + '<span class="ip ip-public">' + (node.public_ip ? esc(node.public_ip) : '\u2014') + '</span>'
       + pgBadge + roleBadge;
+    if (isTargeted) el.classList.add('targeted');
     root.appendChild(el);
     nodeEls[i] = el;
+
+    // Target checkbox click handler: toggle and stopPropagation.
+    const targetBox = el.querySelector('[data-target-box]');
+    targetBox.addEventListener('click', (e) => {
+      e.stopPropagation();
+      ctx.onToggleTarget(instanceId);
+    });
 
     const positionTip = (e) => {
       let tx = e.clientX + 16, ty = e.clientY - 10;
@@ -149,7 +162,9 @@ export function renderNodes(ctx) {
       tooltip.classList.remove('visible');
       applySel(ctx, -1);
     });
-    el.addEventListener('click', () => {
+    el.addEventListener('click', (e) => {
+      // Shift+click on the node body = target toggle accelerator.
+      if (e.shiftKey) { ctx.onToggleTarget(instanceId); return; }
       // Pin/unpin is tracked ONLY by the `pinned` map — independent of the
       // graph `selected` set — so opening or closing one node's latency panel
       // never hides, dims, or otherwise reconfigures the rest of the topology.

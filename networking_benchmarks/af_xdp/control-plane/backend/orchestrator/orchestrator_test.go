@@ -1,4 +1,4 @@
-package main
+package orchestrator
 
 import (
 	"encoding/json"

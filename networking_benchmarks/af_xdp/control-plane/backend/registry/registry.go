@@ -1,4 +1,4 @@
-package main
+package registry
 
 import (
 	"sync"
@@ -23,8 +23,8 @@ type Node struct {
 
 // Registry is the authoritative in-memory fleet, keyed by InstanceID.
 type Registry struct {
-	mu      sync.RWMutex
-	nodes   map[string]*Node
+	mu       sync.RWMutex
+	nodes    map[string]*Node
 	staleSec int64
 }
 
@@ -54,10 +54,6 @@ func (r *Registry) Upsert(reg proto.Registration) *Node {
 	return n
 }
 
-// Heartbeat applies liveness/state. Returns the node (nil if unknown — the
-// caller may then request a re-register) and whether a MATERIAL field changed
-// (state, replicator mode, or online transition) — the last-seen timestamp
-// alone is not material, so callers can suppress a broadcast on every tick.
 // Heartbeat updates liveness and state for a known node. Returns the node and
 // whether a material field (state, replicator mode, or online status) changed.
 // Returns nil when the instance is not in the registry.

@@ -28,6 +28,19 @@ export const CSS = `
 .t2d-root .node .ip-public { color: #8b949e; margin-top: 1px; }
 .t2d-root .node.peer-hover { box-shadow: 0 0 0 3px rgba(88,166,255,0.9), 0 0 14px 3px rgba(88,166,255,0.5); z-index: 31; }
 
+/* Target checkbox (D1): per-node circular checkbox for target-set membership. */
+.t2d-root .node .target-box { position: absolute; top: -6px; left: -6px; width: 14px; height: 14px;
+  border-radius: 50%; border: 2px solid rgba(255,215,0,0.5); background: rgba(13,17,23,0.85);
+  cursor: pointer; z-index: 35; opacity: 0; transition: opacity 0.15s; pointer-events: auto; }
+.t2d-root .node:hover .target-box, .t2d-root .node .target-box.visible { opacity: 1; }
+.t2d-root .node .target-box.checked { background: #ffd700; border-color: #ffd700; opacity: 1; }
+/* Targeted node: gold ring, visually distinct from .selected (table-pinned). */
+.t2d-root .node.targeted { box-shadow: 0 0 0 3px rgba(255,215,0,0.7), 0 0 12px 2px rgba(255,215,0,0.3); z-index: 25; }
+
+/* Target-edge overlay (D4): dashed gold for edges the next run will measure. */
+.t2d-root svg.edges line.edge-line.target-edge { stroke: #ffd700 !important; stroke-dasharray: 6 4;
+  opacity: 0.7 !important; filter: none; }
+
 /* CPG name badge — left edge anchored to the node's horizontal centre axis.
    Left:50% places the LEFT edge of the badge at the node centre. */
 .t2d-root .node .pg-badge { position: absolute; top: -9px; left: 50%; transform: none;
@@ -103,6 +116,7 @@ export const CSS = `
 .t2d-root .vis-legend .contour-samples span { border-radius: 4px; padding: 3px 10px; font-size: 12px; }
 .t2d-root .vis-legend .ux-hint { margin-top: 10px; padding-top: 8px; border-top: 1px solid #30363d; font-size: 11px; color: #8b949e; line-height: 1.6; }
 .t2d-root .vis-legend .ux-hint b { color: #e6edf3; }
+.t2d-root .vis-legend .ux-hint .hint-row { display: block; margin: 3px 0; }
 
 /* Shared Boundaries toggles */
 .t2d-root .boundary-toggles { margin-top: 10px; padding-top: 8px; border-top: 1px solid #30363d; }
@@ -192,4 +206,10 @@ export const CSS = `
 .t2d-root svg.edges line.peering-hit { stroke: transparent; stroke-width: 18; pointer-events: stroke; cursor: help; }
 .t2d-root .peering-label { position: absolute; z-index: 1; transform: translate(-50%,-50%); font-size: 10px; font-weight: 700; color: #58a6ff;
   background: rgba(13,17,23,0.9); border: 1px solid rgba(88,166,255,0.45); border-radius: 4px; padding: 1px 7px; white-space: nowrap; }
+
+/* ── Age hint + sparkline (Phase 3.2, D7) ── */
+.t2d-root .node-tooltip .age-hint { display: block; font-size: 9px; color: #6e7681; margin-top: 1px; }
+.t2d-root .node-tooltip .sparkline-row td { padding: 2px 6px; }
+.t2d-root .node-tooltip .sparkline-row svg.sparkline { display: block; }
+.t2d-root .node-tooltip tr[style*="dashed"] td { border-style: dashed; }
 `;

@@ -13,10 +13,27 @@ function neighborsOf(ctx, set) {
 
 // hover: node index currently hovered, or -1.
 export function applySel(ctx, hover) {
-  const { selected, nodeEls, edgeElements, edgeLabelEls, linksHidden } = ctx;
+  const { selected, nodeEls, edgeElements, edgeLabelEls, linksHidden, targetIds, fleet } = ctx;
   // Nodes are never hidden — a pinned node only gets the selected ring. Pinning
   // a latency panel must not reconfigure the rest of the graph.
   nodeEls.forEach((el, i) => { if (!el) return; el.classList.toggle('selected', selected.has(i)); });
+
+  // Build the set of target-pair edges (indices) when target set is non-empty.
+  const hasTargets = targetIds && targetIds.size > 0;
+  let targetEdgeSet = null;
+  if (hasTargets && fleet && fleet.nodes) {
+    targetEdgeSet = new Set();
+    const idOf = (n) => n.instance_id || n.private_ip;
+    for (let i = 0; i < fleet.nodes.length; i++) {
+      for (let j = i + 1; j < fleet.nodes.length; j++) {
+        const a = idOf(fleet.nodes[i]), b = idOf(fleet.nodes[j]);
+        if (targetIds.has(a) && targetIds.has(b)) {
+          targetEdgeSet.add(`${i}:${j}`);
+        }
+      }
+    }
+  }
+
   // Edge dim/highlight follows hover AND pinned selection: pinning a node FIXES
   // its edges in the hovered state (neighbours highlighted, the rest dimmed) and
   // that persists while the node stays pinned. Unpinning (selected empties) drops
@@ -27,10 +44,19 @@ export function applySel(ctx, hover) {
   edgeElements.forEach(({ line, i, j }) => {
     const active = (hover !== -1 && (i === hover || j === hover)) || selected.has(i) || selected.has(j);
     const baseOp = line.dataset.baseOp || '0.4';
-    line.classList.remove('highlighted', 'dimmed');
+    line.classList.remove('highlighted', 'dimmed', 'target-edge');
+
+    // D4: target-edge overlay when target set is non-empty.
+    const isTargetEdge = targetEdgeSet && targetEdgeSet.has(`${i}:${j}`);
+    if (isTargetEdge) line.classList.add('target-edge');
+
     if (linksHidden) {
-      line.style.opacity = active ? '' : '0';
+      line.style.opacity = active || isTargetEdge ? '' : '0';
       if (active) line.classList.add('highlighted');
+    } else if (hasTargets && !anyFocus) {
+      // Target overlay mode: highlight target edges, dim all others.
+      if (isTargetEdge) { line.style.opacity = ''; }
+      else { line.classList.add('dimmed'); line.style.opacity = ''; }
     } else if (anyFocus) {
       if (active) { line.classList.add('highlighted'); line.style.opacity = ''; }
       else { line.classList.add('dimmed'); line.style.opacity = ''; }

@@ -1,9 +1,13 @@
-package main
+package ingest
 
 import (
 	"encoding/json"
 	"log"
 
+	"afxdp-cp/backend/collector"
+	"afxdp-cp/backend/hub"
+	"afxdp-cp/backend/registry"
+	"afxdp-cp/backend/store"
 	"afxdp-cp/proto"
 
 	"github.com/nats-io/nats.go"
@@ -13,9 +17,9 @@ import (
 // know (e.g. after a restart) so it re-sends its Registration immediately.
 var reregisterCmd, _ = json.Marshal(proto.Command{Type: proto.CmdReregister})
 
-// startIngest wires the agent-outbound streams into the registry, collector,
+// StartIngest wires the agent-outbound streams into the registry, collector,
 // and SSE hub. This is the read side; the orchestrator is the write side.
-func startIngest(nc *nats.Conn, reg *Registry, coll *Collector, hub *Hub) error {
+func StartIngest(nc *nats.Conn, reg *registry.Registry, coll *collector.Collector, hub *hub.Hub, st *store.Store) error {
 	if _, err := nc.Subscribe(proto.SubjectRegister, func(m *nats.Msg) {
 		var r proto.Registration
 		if json.Unmarshal(m.Data, &r) == nil {
@@ -49,6 +53,7 @@ func startIngest(nc *nats.Conn, reg *Registry, coll *Collector, hub *Hub) error 
 		if json.Unmarshal(m.Data, &t) == nil {
 			e := coll.Apply(t)
 			hub.Emit("edge", e)
+			store.RecordMeasurement(st, t, st.CurrentRun())
 		}
 	}); err != nil {
 		return err

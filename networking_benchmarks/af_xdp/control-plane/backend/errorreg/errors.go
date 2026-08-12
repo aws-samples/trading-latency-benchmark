@@ -1,9 +1,10 @@
-package main
+package errorreg
 
 import (
 	"encoding/json"
 	"sync"
 
+	"afxdp-cp/backend/hub"
 	"afxdp-cp/proto"
 
 	"github.com/nats-io/nats.go"
@@ -15,10 +16,10 @@ const maxErrorsPerNode = 20
 type ErrorRegistry struct {
 	mu     sync.RWMutex
 	errors map[string][]proto.ErrorEvent // instance_id -> ring (newest last)
-	hub    *Hub
+	hub    *hub.Hub
 }
 
-func NewErrorRegistry(nc *nats.Conn, hub *Hub) *ErrorRegistry {
+func NewErrorRegistry(nc *nats.Conn, hub *hub.Hub) *ErrorRegistry {
 	r := &ErrorRegistry{errors: make(map[string][]proto.ErrorEvent), hub: hub}
 	nc.Subscribe(proto.SubjectError, r.onError)
 	return r

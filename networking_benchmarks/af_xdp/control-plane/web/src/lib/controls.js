@@ -48,6 +48,11 @@ const CSS = `
 .cp-btn:hover{background:#30363d;color:#fff}
 .cp-btn:active,.cp-btn.running{background:rgba(240,136,62,.22);color:#f0883e;border-color:#f0883e}
 .cp-btn:disabled{opacity:.4;cursor:not-allowed;color:#6e7681;background:#1a1f26;border-color:#21262d}
+.cp-btn-sm{padding:3px 7px;font-size:11px}
+.cp-target-info{color:#8b949e;font:12px inherit;flex:1}
+.cp-target-info.active{color:#ffd700}
+.cp-presets{gap:4px}
+.cp-cost-hint{color:#f0883e;font:10px inherit;margin-left:4px}
 .cp-icon{background:#21262d;color:#adbac7;border:1px solid #30363d;border-radius:6px;padding:4px 9px;cursor:pointer;font:600 14px inherit;line-height:1;flex:0 0 auto}
 .cp-icon:hover{background:#30363d;color:#fff}
 .cp-num{width:58px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:3px 5px;font:12px inherit}
@@ -62,6 +67,7 @@ const CSS = `
 
 import { enhancePanel, foldAllPanels, resetAllPanels } from './2d/panels.js';
 import { esc } from './2d/palette.js';
+import { SCOPES, SCOPE_AMONG, SCOPE_FANOUT, countPairs } from './pairs.js';
 
 export function mountControls(host, opts = {}) {
   const { onSetMode, onToggleLive, onSelectView, onRun, onPickResult, onHeartbeat, onReport } = opts;
@@ -90,6 +96,13 @@ export function mountControls(host, opts = {}) {
           <button class="cp-icon" data-report title="Download report (heatmap + all latencies) for the shown run">\u2913</button>
         </div>
         <div class="cp-hr"></div>
+        <div data-target-block>
+          <div class="row"><span class="cp-section">Target Set</span></div>
+          <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span><button class="cp-btn cp-btn-sm" data-clear-targets style="display:none">Clear</button></div>
+          <div class="row"><span class="cp-lbl">Scope</span><select class="cp-sel" data-scope></select></div>
+          <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">Same PG</button><button class="cp-btn cp-btn-sm" data-preset="az">Same AZ</button><button class="cp-btn cp-btn-sm" data-preset="vpc">Same VPC</button><button class="cp-btn cp-btn-sm" data-preset="region">Same Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm" data-preset="clear">Clear</button></div>
+        </div>
+        <div class="cp-hr"></div>
         <div class="row center"><span class="cp-section">Test Latency</span></div>
         <div class="row"><span class="cp-lbl">Packets</span><input class="cp-num" data-count value="5000" title="Measurement packets per pair (100–1,000,000)"></div>
         <div class="row"><span class="cp-lbl">Rate</span><input class="cp-num" data-rate value="20000" title="Ucast send rate (1,000–1,000,000)"><span class="cp-dim">pps</span></div>
@@ -102,6 +115,7 @@ export function mountControls(host, opts = {}) {
           <span class="cp-btn-group">
             <button class="cp-btn" data-run-ucast="kernel" title="kernel sendto()/recvfrom() — full kernel network stack, AF_XDP echo on remote">kernel</button>
             <button class="cp-btn" data-run-ucast="xdp" title="Kernel bypass on sender - AF_XDP zero-copy TX + RX">xdp</button>
+            <button class="cp-btn" data-run-ucast="all" title="Run both ucast variations sequentially (kernel then xdp)">all</button>
           </span>
         </div>
         <div class="row"><span class="cp-lbl">multicast</span></div>
@@ -118,14 +132,15 @@ export function mountControls(host, opts = {}) {
       <!-- LIVE mode: heartbeat — interval first, then pick a mode to re-run -->
       <div data-live-section style="display:none">
         <div class="row"><span class="cp-lbl">Every</span>
-          <input class="cp-num" data-hb-interval value="60" title="Heartbeat interval — keep >= 60s (a full campaign takes several seconds)">
-          <span class="cp-dim">sec (min 60)</span>
+          <input class="cp-num" data-hb-interval value="30" title="Heartbeat interval - keep >= 30s (a full campaign takes several seconds)">
+          <span class="cp-dim">sec (min 30)</span>
         </div>
         <div class="cp-hr"></div>
         <div class="row"><span class="cp-lbl">unicast</span></div>
         <div class="row"><span class="cp-btn-group">
           <button class="cp-btn" data-hb-ucast="kernel">kernel</button>
           <button class="cp-btn" data-hb-ucast="xdp">xdp</button>
+          <button class="cp-btn" data-hb-ucast="all">all</button>
         </span></div>
         <div class="row"><span class="cp-lbl">multicast</span></div>
         <div class="row"><span class="cp-btn-group">
@@ -258,11 +273,43 @@ export function mountControls(host, opts = {}) {
   // Download report (heatmap + all latencies) for the currently-shown run.
   $('[data-report]').addEventListener('click', () => onReport && onReport());
 
-  // ── Live heartbeat: choose a mode → App re-runs it every interval (min 60s) ──
+  // ── Target set: scope select, presets, clear ────────────────────────────────
+  const { onScopeChange, onPreset, onClearTargets } = opts;
+  const scopeSel = $('[data-scope]');
+  const targetInfo = $('[data-target-info]');
+  const clearBtn = $('[data-clear-targets]');
+  // Populate scope select from SCOPES.
+  scopeSel.innerHTML = SCOPES.map((s) =>
+    `<option value="${s.id}">${s.label}${s.id === 'fanin' ? ' (costly)' : ''}</option>`
+  ).join('');
+  scopeSel.addEventListener('change', () => { onScopeChange && onScopeChange(scopeSel.value); });
+  clearBtn.addEventListener('click', () => { onClearTargets && onClearTargets(); });
+  // Presets call onPreset with an array of instance IDs.
+  el.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => {
+    onPreset && onPreset(b.dataset.preset);
+  }));
+
+  let _lastTargetState = { count: 0, pairs: 0, scope: 'among', totalNodes: 0 };
+  const paintTargetBlock = ({ count, pairs, scope: sc, totalNodes }) => {
+    _lastTargetState = { count, pairs, scope: sc, totalNodes };
+    scopeSel.value = sc;
+    if (count === 0) {
+      const fullPairs = countPairs(totalNodes, 0, 'among');
+      targetInfo.textContent = `No selection \u2014 full mesh (${fullPairs} pairs)`;
+      targetInfo.classList.remove('active');
+      clearBtn.style.display = 'none';
+    } else {
+      targetInfo.textContent = `${count} selected \u00b7 ${pairs} pairs`;
+      targetInfo.classList.add('active');
+      clearBtn.style.display = '';
+    }
+  };
+
+  // ── Live heartbeat: choose a mode -> App re-runs it every interval (min 30s) ──
   const hbIntervalSec = () => {
     const input = $('[data-hb-interval]');
-    let v = parseInt(input.value, 10) || 60;
-    if (v < 60) { v = 60; input.value = '60'; }
+    let v = parseInt(input.value, 10) || 30;
+    if (v < 30) { v = 30; input.value = '30'; }
     return v;
   };
   const hbClick = (btn, sel) => {
@@ -297,6 +344,7 @@ export function mountControls(host, opts = {}) {
     },
     // combos: [{kind,variation,unix}]; sel: {kind,variation} currently shown
     setCombos(combos, sel) { renderCombos(combos, sel); },
+    setTargets(state) { paintTargetBlock(state); },
     dispose() { el.remove(); },
   };
 }
