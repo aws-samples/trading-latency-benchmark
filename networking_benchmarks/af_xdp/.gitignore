@@ -1,5 +1,5 @@
 # Test/results
-deploy/ansible/results/
+results
 __pycache__/
 .pytest_cache/
 

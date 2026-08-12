@@ -8,7 +8,7 @@
 #   ansible-playbook -i inventory.aws_ec2.yml run_ucast.yaml
 #   ansible-playbook -i inventory.aws_ec2.yml run_ucast.yaml -e count=10000 -e rate=10000
 #
-# Results saved to: ./results/<date>/<time>/
+# Results saved to: af_xdp/results/<date>/<time>/
 #   <src_ip>-<dst_ip>.json    — per-pair RTT data
 #   <ip>_metadata.json        — node info (IP, AZ, PG, region)
 
@@ -21,7 +21,7 @@
 
     - name: Compute results path (date/time nested)
       ansible.builtin.set_fact:
-        results_dir: "{{ playbook_dir }}/results/{{ ansible_date_time.date }}/{{ ansible_date_time.hour }}-{{ ansible_date_time.minute }}-{{ ansible_date_time.second }}"
+        results_dir: "{{ playbook_dir }}/../../results/{{ ansible_date_time.date }}/{{ ansible_date_time.hour }}-{{ ansible_date_time.minute }}-{{ ansible_date_time.second }}"
       run_once: true
 
     - name: Create results directory
@@ -183,7 +183,7 @@
 
     - name: Find most recent results dir
       ansible.builtin.shell: |
-        find {{ playbook_dir }}/results -mindepth 2 -maxdepth 2 -type d | sort | tail -1
+        find {{ playbook_dir }}/../../results -mindepth 2 -maxdepth 2 -type d | sort | tail -1
       register: latest_dir
       changed_when: false
 

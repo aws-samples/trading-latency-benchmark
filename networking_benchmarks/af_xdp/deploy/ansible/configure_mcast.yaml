@@ -10,13 +10,13 @@
 # every node (ucast mode) which holds AF_XDP queue 0, so mcast_send/mcast_receive
 # would fail "Device or resource busy" — this playbook stops+disables it on the
 # source and destination (pure sender/receiver) as the first step of each play:
-#   source      — stop replicator (free AF_XDP queue) + GRE tunnel to replicator
+#   source      — stop replicator (free AF_XDP queue); sends via mcast_send -D
 #   replicator  — replicator systemd service in mcast mode
 #   destination — stop replicator + multicast group registration + ARP seed
-#   verify      — best-effort datapath probe (udp_send over GRE)
+#   verify      — best-effort datapath probe (mcast_send m2u burst)
 #
 # Required variable (pass via --extra-vars or inventory host_vars):
-#   replicator_private_ip — private IP of the replicator (GRE tunnel + control channel)
+#   replicator_private_ip — private IP of the replicator (m2u tunnel dst + control channel)
 #
 # Tunable vars (override via --extra-vars):
 #   mcast_group       (default: 224.0.31.50)
@@ -27,8 +27,87 @@
 #   ansible-playbook -i inventory.aws_ec2.yml configure_mcast.yaml \
 #       --extra-vars "replicator_private_ip=10.61.0.5"
 
-# ── Play 1: Source — GRE tunnel to replicator ───────────────────────────────────
-- name: Configure GRE tunnel on source
+# ── Play 0: Clock-sync gate — mcast one-way latency needs cross-host clock ────
+# agreement. The ENA PHC (/dev/ptp0) is Nitro-disciplined to AWS Time Sync
+# (UTC-traceable, ~us, holds across regions), and chrony disciplines the system
+# clock from it. We force a deterministic step and then GATE on the achieved
+# offset so we never measure on an unconverged clock (the 88ms-garbage class of
+# bug). Idempotent: makestep + gate are no-ops once synced. mcast-only — ucast
+# RTT is a single-host round-trip where the offset cancels, so run_ucast never
+# does this.
+- name: Clock-sync convergence gate
+  hosts: all
+  become: yes
+  gather_facts: no
+  vars:
+    max_clock_offset_us: 10     # AWS Time Sync NTP inter-instance is ~us (not sub-us like a local PHC)
+    clock_gate_retries: 20      # x delay(3s) = ~60s budget
+    allow_unsynced: false       # -e allow_unsynced=true to bypass (e.g. cross-region ms runs)
+  tasks:
+    # ROOT-CAUSE FIX: the ENA PHC refclock disciplines each node to its OWN
+    # hardware PHC, and two instances' PHCs disagree by ~100-200us — which
+    # dominates one-way latency (the per-node offset looks sub-us but INTER-node
+    # is ~200us). AWS Time Sync NTP (169.254.169.123, xleave) disciplines every
+    # node to the SAME reference, giving <10us inter-instance (this is what
+    # mcast2ucast relies on). Prefer it over the PHC. Deterministic + idempotent.
+    - name: Prefer AWS Time Sync NTP over the local PHC refclock
+      ansible.builtin.shell: |
+        set -e
+        systemctl is-active --quiet chronyd
+        if [ -f /etc/chrony.d/aws-phc.conf ]; then
+          mv /etc/chrony.d/aws-phc.conf /etc/chrony.d/aws-phc.conf.disabled
+          systemctl restart chronyd
+          sleep 2
+        fi
+      changed_when: false
+
+    - name: Force chrony to step + burst to AWS Time Sync (deterministic convergence)
+      ansible.builtin.shell: |
+        chronyc -a makestep >/dev/null 2>&1 || true
+        chronyc -a 'burst 4/4' >/dev/null 2>&1 || true
+      changed_when: false
+
+    - name: Gate — wait until synchronised and |last offset| <= {{ max_clock_offset_us }}us
+      ansible.builtin.shell: |
+        t=$(chronyc tracking 2>/dev/null)
+        leap=$(printf '%s\n' "$t" | awk -F': *' '/Leap status/{print $2}')
+        last=$(printf '%s\n' "$t" | awk -F': *' '/Last offset/{print $2}' | awk '{print $1}')
+        awk -v l="$last" -v leap="$leap" 'BEGIN{
+          if (leap !~ /Normal/) exit 2;             # chrony not synchronised yet
+          a = (l < 0) ? -l : l;
+          exit (a*1e6 <= {{ max_clock_offset_us }}) ? 0 : 1
+        }'
+      register: clock_gate
+      until: clock_gate.rc == 0
+      retries: "{{ clock_gate_retries | int }}"
+      delay: 3
+      changed_when: false
+      failed_when: false
+
+    - name: Read achieved offset (microseconds)
+      ansible.builtin.shell: |
+        last=$(chronyc tracking 2>/dev/null | awk -F': *' '/Last offset/{print $2}' | awk '{print $1}')
+        awk -v l="$last" 'BEGIN{a=(l<0)?-l:l; printf "%.3f", a*1e6}'
+      register: clock_offset_us
+      changed_when: false
+
+    - name: Hard-fail if the clock did not converge (unless allow_unsynced)
+      ansible.builtin.assert:
+        that: clock_gate.rc == 0
+        fail_msg: >-
+          Clock not within {{ max_clock_offset_us }}us of the PHC on {{ inventory_hostname }}
+          (achieved {{ clock_offset_us.stdout | trim }}us). One-way mcast latency would be
+          dominated by clock offset. Fix PTP/chrony, or bypass with -e allow_unsynced=true
+          (only sensible for cross-region ms-scale hops).
+      when: not (allow_unsynced | default(false) | bool)
+
+    - name: Report achieved clock offset
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: clock offset {{ clock_offset_us.stdout | trim }}us (gate {{ max_clock_offset_us }}us, ref PHC)"
+
+
+# ── Play 1: Source — free AF_XDP queue (no kernel tunnel; mcast_send builds m2u) ──
+- name: Prepare source (free AF_XDP queue; no kernel tunnel needed)
   hosts: source
   become: yes
   gather_facts: yes
@@ -56,35 +135,9 @@
         ip link set dev "$IFACE" xdpgeneric off 2>/dev/null || true
       changed_when: false
 
-    - name: Check if GRE tunnel already exists
-      ansible.builtin.shell: ip tunnel show gre_feed
-      register: gre_check
-      changed_when: false
-      failed_when: false
-
-    - name: Create GRE tunnel to replicator
-      ansible.builtin.shell: |
-        IFACE=$(ip route show default | awk '/default/ {print $5}' | head -1)
-        LOCAL_IP=$(ip -4 addr show "$IFACE" | awk '/inet / {print $2}' | cut -d/ -f1)
-        ip tunnel add gre_feed mode gre remote {{ replicator_private_ip }} local "$LOCAL_IP" ttl 64
-        ip link set gre_feed up
-        ip route add 224.0.0.0/4 dev gre_feed
-      when: gre_check.rc != 0
-
-    - name: Persist GRE tunnel via NetworkManager dispatcher
-      ansible.builtin.copy:
-        dest: /etc/NetworkManager/dispatcher.d/99-gre-feed
-        mode: '0755'
-        content: |
-          #!/bin/bash
-          IFACE="$1"; EVENT="$2"
-          [ "$EVENT" != "up" ] && exit 0
-          ip route show default | grep -q "$IFACE" || exit 0
-          LOCAL_IP=$(ip -4 addr show "$IFACE" | awk '/inet / {print $2}' | cut -d/ -f1)
-          ip tunnel show gre_feed >/dev/null 2>&1 && exit 0
-          ip tunnel add gre_feed mode gre remote {{ replicator_private_ip }} local "$LOCAL_IP" ttl 64
-          ip link set gre_feed up
-          ip route add 224.0.0.0/4 dev gre_feed
+    # The light m2u tunnel needs no kernel tunnel device: mcast_send builds a plain
+    # unicast UDP frame (with the 8-byte m2u header) straight to the replicator
+    # via AF_XDP, using -D <replicator_private_ip>.
 
 
 # ── Play 2: Replicator — configure and start ──────────────────────────────────
@@ -146,17 +199,21 @@
         ip link set dev "$IFACE" xdpgeneric off 2>/dev/null || true
       changed_when: false
 
-    - name: Compute per-destination multicast group
+    - name: Use the shared fan-out multicast group
+      # All destinations join the SAME group so one source stream fans out to
+      # every destination (1 -> N). run_mcast sends to this same group. (The old
+      # base+index scheme gave each dest a distinct group, so only the index-0
+      # dest received the single-group stream from run_mcast.)
       ansible.builtin.set_fact:
-        mcast_group: >-
-          {{ (base_mcast_group | default('224.0.31.50')).split('.')[:-1] | join('.') }}.{{
-             (base_mcast_group | default('224.0.31.50')).split('.')[-1] | int +
-             groups['destination'].index(inventory_hostname) | int }}
+        mcast_group: "{{ base_mcast_group | default('224.0.31.50') }}"
 
     - name: Join multicast group via replicator control channel
       ansible.builtin.shell: >
         /opt/af-xdp/replicator_ctl {{ replicator_private_ip }} mcast {{ mcast_group }}
       register: join_result
+      retries: 4
+      delay: 3
+      until: join_result.rc == 0
       failed_when: join_result.rc != 0
 
     - name: Seed ARP toward the replicator (so the replicator learns this
@@ -170,10 +227,10 @@
         msg: "{{ inventory_hostname }} registered — group {{ mcast_group }}: {{ join_result.stdout }}"
 
 
-# ── Play 4: Verify multicast datapath (source → GRE → replicator XDP) ──────────
+# ── Play 4: Verify multicast datapath (source → m2u → replicator XDP) ──────────
 # Inject a short probe burst from the source to the multicast group via udp_send
-# and confirm the replicator's XDP program redirected it — validates the GRE
-# tunnel, the 224/4 route, and the mcast.o filter end-to-end. Skipped when there
+# and confirm the replicator XDP program redirected it — validates the m2u
+# framing and the mcast.o filter end-to-end. Skipped when there
 # is no source group (e.g. a replicator-only fleet).
 - name: Verify multicast datapath
   hosts: replicator
@@ -191,11 +248,15 @@
       run_once: true
       when: groups['source'] | default([]) | length > 0
 
-    - name: Inject multicast probe from source (udp_send over GRE, ~3s)
+    - name: Inject m2u probe from source (mcast_send, ~3s)
       ansible.builtin.shell: >
-        timeout 3 /opt/af-xdp/udp_send
-        {{ mcast_group | default('224.0.31.50') }} {{ data_port | default(5000) }}
-        20 'mcast-verify' --iface gre_feed || true
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1);
+        timeout 3 /opt/af-xdp/mcast_send
+        -I "$IFACE"
+        -D {{ replicator_private_ip }}
+        -g {{ mcast_group | default('224.0.31.50') }}
+        -p {{ data_port | default(5000) }}
+        -c 20 -i 1000 || true
       delegate_to: "{{ groups['source'][0] }}"
       changed_when: false
       run_once: true
@@ -216,9 +277,8 @@
           {{ 'Datapath probe OK — XDP redirected '
              ~ ((xdp_after.stdout | int) - (xdp_before.stdout | int)) ~ ' packet(s).'
              if (xdp_after.stdout | int) > (xdp_before.stdout | int)
-             else 'Note: udp_send probe saw no XDP redirects. This is expected — the '
-                  ~ 'kernel GRE encapsulation of a socket-sent multicast packet does not '
-                  ~ 'match the mcast.o parser (which expects mcast_send framing). This is a '
+             else 'Note: mcast_send probe saw no XDP redirects — check the replicator '
+                  ~ 'config_map ({group,port}) and that mcast.o is attached. This is a '
                   ~ 'best-effort hint only; the authoritative datapath check is run_mcast.yaml.' }}
       run_once: true
       when: groups['source'] | default([]) | length > 0

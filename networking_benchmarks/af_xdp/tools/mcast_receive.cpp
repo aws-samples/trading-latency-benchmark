@@ -1,12 +1,12 @@
 /*
- * AF_XDP GRE multicast receiver.
+ * AF_XDP multicast receiver (light m2u tunnel).
  *
  * Attaches mcast.o to the NIC via XDP, opens an AF_XDP
  * socket on the chosen queue, and polls the RX ring directly — no
  * kernel IP stack involvement after the XDP redirect.
  *
  * Packet layout received (starting from Ethernet header):
- *   Eth | outer IPv4 | GRE (4B) | inner IPv4 | UDP | payload
+ *   Eth | IPv4 | UDP | m2u{ magic(4), group(4) } | payload
  *
  * Requires root (CAP_NET_ADMIN for XDP attach, CAP_NET_RAW for AF_XDP).
  */
@@ -48,6 +48,8 @@ static constexpr uint32_t RX_SIZE     = 2048;
 static constexpr uint32_t BATCH       = 64;
 static constexpr uint16_t ETH_P_IPV4  = 0x0800;
 static constexpr int      HDR_SIZE    = 24;     /* seq(8) + ts_ns(8) + replicator_ns(8) */
+static constexpr uint32_t M2U_MAGIC   = 0x4D324355;  /* "M2CU" — light mcast->ucast tag */
+static constexpr int      M2U_HDR_LEN = 8;           /* magic(4) + group(4) */
 
 struct __attribute__((packed)) pkt_hdr {
 	uint64_t seq;
@@ -129,9 +131,10 @@ int main(int argc, char *argv[])
 	int  timeout = DEF_TIMEOUT;
 	int  queue   = DEF_QUEUE;
 	bool raw     = false;
+	const char *json_path = nullptr;
 
 	int opt;
-	while ((opt = getopt(argc, argv, "I:g:p:c:t:q:rh")) != -1) {
+	while ((opt = getopt(argc, argv, "I:g:p:c:t:q:rj:h")) != -1) {
 		switch (opt) {
 		case 'I': iface    = optarg;           break;
 		case 'g': group    = optarg;           break;
@@ -140,6 +143,7 @@ int main(int argc, char *argv[])
 		case 't': timeout  = atoi(optarg);     break;
 		case 'q': queue    = atoi(optarg);     break;
 		case 'r': raw      = true;             break;
+		case 'j': json_path = optarg;          break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
 		}
@@ -262,7 +266,7 @@ int main(int argc, char *argv[])
 	}
 
 	/* ── configure the mcast.o filter ─────────────────────────────────── */
-	/* mcast.o only redirects GRE-inner-multicast packets whose {group,port}
+	/* mcast.o only redirects m2u-tagged multicast packets whose {group,port}
 	 * match an entry in config_map; otherwise it XDP_PASSes them to the kernel
 	 * (and our AF_XDP socket never sees them). Seed slot 0 with our target. */
 	{
@@ -365,43 +369,31 @@ int main(int argc, char *argv[])
 			const auto *eth = reinterpret_cast<const struct ethhdr *>(pkt);
 			if (ntohs(eth->h_proto) != ETH_P_IPV4) goto next;
 
-			/* ── Outer IPv4 ─────────────────────────────────────── */
+			/* ── IPv4 ───────────────────────────────────────────── */
 			size_t off = sizeof(struct ethhdr);
 			if (len < off + sizeof(struct iphdr)) goto next;
-			const auto *outer_ip =
+			const auto *ip =
 				reinterpret_cast<const struct iphdr *>(pkt + off);
-			if (outer_ip->protocol != 47) goto next;
-			size_t outer_ip_len = (size_t)outer_ip->ihl * 4;
-			if (outer_ip_len < 20 || len < off + outer_ip_len + 4) goto next;
-			off += outer_ip_len;
+			if (ip->protocol != IPPROTO_UDP) goto next;
+			size_t ip_len = (size_t)ip->ihl * 4;
+			if (ip_len < 20 || len < off + ip_len) goto next;
+			off += ip_len;
 
-			/* ── GRE header ─────────────────────────────────────── */
-			const uint8_t *gre   = pkt + off;
-			uint16_t gre_flags   = (uint16_t)((gre[0] << 8) | gre[1]);
-			uint16_t gre_proto   = (uint16_t)((gre[2] << 8) | gre[3]);
-			if (gre_proto != ETH_P_IPV4) goto next;
-
-			size_t gre_len = 4;
-			if (gre_flags & 0x8000) gre_len += 4;
-			if (gre_flags & 0x2000) gre_len += 4;
-			if (gre_flags & 0x1000) gre_len += 4;
-			off += gre_len;
-
-			/* ── Inner IPv4 ─────────────────────────────────────── */
-			if (len < off + sizeof(struct iphdr)) goto next;
-			const auto *inner_ip =
-				reinterpret_cast<const struct iphdr *>(pkt + off);
-			if (inner_ip->protocol != IPPROTO_UDP) goto next;
-			size_t inner_ip_len = (size_t)inner_ip->ihl * 4;
-			if (inner_ip_len < 20) goto next;
-			off += inner_ip_len;
-
-			/* ── Inner UDP ──────────────────────────────────────── */
+			/* ── UDP ────────────────────────────────────────────── */
 			if (len < off + sizeof(struct udphdr)) goto next;
 			const auto *udp =
 				reinterpret_cast<const struct udphdr *>(pkt + off);
 			if (ntohs(udp->dest) != (uint16_t)port) goto next;
 			off += sizeof(struct udphdr);
+
+			/* ── m2u tunnel header: magic(4) + group(4) ─────────── */
+			if (len < off + (size_t)M2U_HDR_LEN) goto next;
+			{
+				uint32_t magic;
+				memcpy(&magic, pkt + off, 4);
+				if (ntohl(magic) != M2U_MAGIC) goto next;
+			}
+			off += M2U_HDR_LEN;
 
 			/* ── Payload ────────────────────────────────────────── */
 			if (len < off + (size_t)HDR_SIZE) goto next;
@@ -484,7 +476,7 @@ next:
 
 	printf("\n\n");
 	printf("==================================================\n");
-	printf("  GRE Latency Report (AF_XDP)\n");
+	printf("  Multicast Latency Report (AF_XDP)\n");
 	printf("==================================================\n");
 	printf("  Interface:     %s  queue %d\n", iface, queue);
 	printf("  Received:      %d/%d packets (%.1fs)\n", received, count, elapsed);
@@ -525,6 +517,49 @@ next:
 	for (int p : pcts)
 		printf("    P%-3d  %8.1f\n", p, pct(latencies, p) / 1000.0);
 	printf("==================================================\n");
+
+	// Emit a JSON result compatible with report/gen/report.py (service_rtt_us
+	// schema). The primary metric is the one-way source->destination latency;
+	// hop1/hop2 are included as extras (ignored by the matrix builder).
+	if (json_path) {
+		FILE *jf = fopen(json_path, "w");
+		if (!jf) {
+			fprintf(stderr, "warning: cannot open %s: %s\n", json_path, strerror(errno));
+		} else {
+			uint64_t p999 = latencies.empty() ? 0
+			              : latencies[(latencies.size() - 1) * 999 / 1000];
+			int total_pkts = received + lost;
+			double loss_pct = total_pkts > 0 ? 100.0 * lost / total_pkts : 0.0;
+			fprintf(jf, "{\n");
+			fprintf(jf, "  \"messages\": %d,\n", received);
+			fprintf(jf, "  \"lost\": %d,\n", lost);
+			fprintf(jf, "  \"loss_pct\": %.4f,\n", loss_pct);
+			fprintf(jf, "  \"timestamp_rx\": \"xdp_afxdp\",\n");
+			fprintf(jf, "  \"timestamp_tx\": \"clock_realtime\",\n");
+			fprintf(jf, "  \"service_rtt_us\": {\n");
+			fprintf(jf, "    \"min\": %" PRIu64 ",\n", min_lat / 1000);
+			fprintf(jf, "    \"mean\": %" PRIu64 ",\n", avg_lat / 1000);
+			fprintf(jf, "    \"p50\": %" PRIu64 ",\n", pct(latencies, 50) / 1000);
+			fprintf(jf, "    \"p90\": %" PRIu64 ",\n", pct(latencies, 90) / 1000);
+			fprintf(jf, "    \"p95\": %" PRIu64 ",\n", pct(latencies, 95) / 1000);
+			fprintf(jf, "    \"p99\": %" PRIu64 ",\n", pct(latencies, 99) / 1000);
+			fprintf(jf, "    \"p999\": %" PRIu64 ",\n", p999 / 1000);
+			fprintf(jf, "    \"max\": %" PRIu64 "\n", max_lat / 1000);
+			fprintf(jf, "  },\n");
+			if (has_replicator_ts && !latencies_hop1.empty()) {
+				fprintf(jf, "  \"hop1_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
+				        pct(latencies_hop1, 50) / 1000, pct(latencies_hop1, 99) / 1000);
+			}
+			if (has_replicator_ts && !latencies_hop2.empty()) {
+				fprintf(jf, "  \"hop2_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
+				        pct(latencies_hop2, 50) / 1000, pct(latencies_hop2, 99) / 1000);
+			}
+			fprintf(jf, "  \"received\": %d\n", received);
+			fprintf(jf, "}\n");
+			fclose(jf);
+			printf("  JSON results: %s\n", json_path);
+		}
+	}
 
 	if (raw) {
 		printf("\nRaw latencies (ns):\n");

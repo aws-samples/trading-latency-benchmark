@@ -148,7 +148,7 @@ EOF
 # isolcpus removes 1-3 from the scheduler's load balancer; nohz_full stops the
 # scheduler tick on them; rcu_nocbs offloads RCU callbacks; nosmt disables HT
 # siblings so each isolated core is a full physical core (deterministic).
-ISOL="isolcpus=1-3 nohz_full=1-3 rcu_nocbs=1-3 nosmt"
+ISOL="isolcpus=1-3 nohz_full=1-3 rcu_nocbs=1-3 nosmt intel_idle.max_cstate=0 processor.max_cstate=1 default_hugepagesz=2M hugepagesz=2M hugepages=512"
 if ! grep -q "isolcpus=" /etc/default/grub 2>/dev/null; then
   sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=\"|GRUB_CMDLINE_LINUX_DEFAULT=\"${ISOL} |" /etc/default/grub
   grub2-mkconfig -o /boot/grub2/grub.cfg || true
@@ -225,6 +225,38 @@ ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"
 WantedBy=multi-user.target
 EOF
 
+# Pin CPU scaling governor to performance (no P-state ramp latency).
+cat > /etc/systemd/system/cpu-performance.service <<'EOF'
+[Unit]
+Description=Pin CPU scaling governor to performance for low latency
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$g" 2>/dev/null || true; done'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Defer ENA hardirqs so the AF_XDP busy-poll loop owns the RX queue (pairs with
+# SO_PREFER_BUSY_POLL on the XSK fd). Reduces IRQ->wakeup latency.
+cat > /etc/systemd/system/ena-napi-defer.service <<'EOF'
+[Unit]
+Description=Defer ENA hardirqs so AF_XDP busy-poll owns the RX queue
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); echo 2 > /sys/class/net/${IFACE:-eth0}/napi_defer_hard_irqs 2>/dev/null || true; echo 200000 > /sys/class/net/${IFACE:-eth0}/gro_flush_timeout 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 # Replicator start script (mode/port/group from /etc/default/replicator)
 cat > /usr/local/bin/start-replicator.sh <<'EOF'
 #!/bin/bash
@@ -246,7 +278,7 @@ IP=$(ip -4 addr show "$IFACE" | awk '/inet /{print $2}' | cut -d/ -f1)
 case "$MODE" in
   kernel)  exec /opt/af-xdp/replicator --kernel-mode "$IP" "$PORT" ;;
   ucast)   exec /opt/af-xdp/replicator "$IFACE" "$IP" "$PORT" "$ZC" ;;
-  mcast)   exec /opt/af-xdp/replicator "$IFACE" "$MCAST_GROUP" "$PORT" "$ZC" --gre ;;
+  mcast)   exec /opt/af-xdp/replicator "$IFACE" "$MCAST_GROUP" "$PORT" "$ZC" --mcast ;;
   *) echo "Unknown REPLICATOR_MODE=$MODE" >&2; exit 1 ;;
 esac
 EOF
@@ -286,7 +318,7 @@ EOF
 systemctl daemon-reload
 # Disable irqbalance so it can't migrate NIC IRQs onto the isolated cores.
 systemctl disable --now irqbalance 2>/dev/null || true
-systemctl enable ena-coalescing.service ena-xdp-queues.service ena-mtu.service ena-irq-affinity.service replicator.service
+systemctl enable ena-coalescing.service ena-xdp-queues.service ena-mtu.service ena-irq-affinity.service cpu-performance.service ena-napi-defer.service replicator.service
 
 # ── 6. Cleanup ────────────────────────────────────────────────────────────────
 rm -rf /tmp/build-src /opt/xdp-tools

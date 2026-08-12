@@ -1,5 +1,5 @@
 /*
- * AF_XDP TX zero-copy multicast GRE sender.
+ * AF_XDP TX zero-copy multicast sender (light m2u tunnel).
  *
  * All packet headers are built once into every UMEM frame at startup.
  * Per packet the hot path writes only 16 bytes (seq + ts_ns) in-place,
@@ -8,16 +8,19 @@
  *
  * Compared to the AF_PACKET PACKET_TX_RING path this eliminates:
  *   - full packet build (memset + ~80 B header writes) on every packet
- *   - outer IP checksum recomputation (outer->id fixed at 0 per RFC 6864)
+ *   - IP checksum recomputation (id fixed at 0 per RFC 6864)
  *   - kernel dev_queue_xmit path (~1-2 µs)
  * reducing the stamp-to-wire gap from ~3-10 µs to ~1-2 µs.
  *
- * Packet layout:
- *   Eth | outer IPv4 (src=local, dst=replicator) | GRE (4B) |
- *   inner IPv4 (src=local, dst=mcast_group)  | UDP | payload
+ * Packet layout (plain unicast UDP + 8-byte m2u tunnel header):
+ *   Eth | IPv4 (src=local, dst=replicator) | UDP |
+ *   m2u { magic, group } | payload
  *
- * Required flag: -D <replicator-ip>  (outer GRE destination)
- * Interface (-I) must be the real NIC (e.g. eth0), NOT gre_feed.
+ * Flat framing: the XDP filter parses Eth/IP/UDP + the 8-byte m2u tag — no
+ * outer-IP proto-47, no variable tunnel header, no inner IP.
+ *
+ * Required flag: -D <replicator-ip>  (unicast tunnel destination)
+ * Interface (-I) must be the real NIC (e.g. eth0).
  *
  * Requires root (CAP_NET_ADMIN for AF_XDP).
  */
@@ -60,18 +63,24 @@ static constexpr int         DEF_INTERVAL_US = 1000;
 static constexpr int         DEF_SIZE        = 64;
 static constexpr int         HDR_SIZE        = 24;   /* seq(8) + ts_ns(8) + replicator_ns(8) */
 
+/* Light mcast->ucast tunnel tag ("M2CU"): an 8-byte header {magic, group}
+ * prepended to the UDP payload. Kept in
+ * sync with src/xdp/mcast.c, src/Replicator.cpp and tools/mcast_receive.cpp. */
+static constexpr uint32_t    M2U_MAGIC       = 0x4D324355;
+static constexpr int         M2U_HDR_LEN     = 8;   /* magic(4) + group(4) */
+
 /*
  * Fixed offsets within the ethernet frame for the fields updated per packet.
  * All are uint64_t stored big-endian.
  *
- *   Eth(14) + outer IPv4(20) + GRE(4) + inner IPv4(20) + UDP(8) = 66 B
+ *   Eth(14) + IPv4(20) + UDP(8) + m2u(8) = 50 B
  *   payload[0..7]   = seq
  *   payload[8..15]  = ts_ns     (sender stamp, written by sender hot path)
  *   payload[16..23] = replicator_ns (replicator RX stamp, written by Replicator;
  *                                zeroed in template — receiver skips hop
  *                                breakdown if still 0)
  */
-static constexpr int PAYLOAD_OFF    = 14 + 20 + 4 + 20 + 8;
+static constexpr int PAYLOAD_OFF    = 14 + 20 + 8 + M2U_HDR_LEN;
 static constexpr int SEQ_OFF        = PAYLOAD_OFF;
 static constexpr int TS_OFF         = PAYLOAD_OFF + 8;
 static constexpr int REPLICATOR_TS_OFF  = PAYLOAD_OFF + 16;  /* written by replicator, not sender */
@@ -188,7 +197,7 @@ static bool resolve_mac(const char *dst_ip, const char *iface, uint8_t mac[6])
 }
 
 /*
- * Build the full GRE packet template into buf.
+ * Build the full m2u packet template into buf.
  *
  * outer->id is set to 0: with IP_DF set fragmentation is impossible so the
  * ID field is meaningless (RFC 6864 §4.1).  This makes the outer IP header
@@ -197,7 +206,7 @@ static bool resolve_mac(const char *dst_ip, const char *iface, uint8_t mac[6])
  * seq and ts_ns are zeroed as placeholders.  The hot path overwrites them
  * at SEQ_OFF and TS_OFF respectively without touching any other field.
  */
-static int build_gre_pkt(uint8_t *buf, int max_buf,
+static int build_m2u_pkt(uint8_t *buf, int max_buf,
                           const iface_info &src,
                           const uint8_t dst_mac[6],
                           uint32_t replicator_ip_nbo,
@@ -205,12 +214,11 @@ static int build_gre_pkt(uint8_t *buf, int max_buf,
                           uint16_t udp_dst_port,
                           int      payload_size)
 {
-	const int inner_udp_len  = (int)sizeof(struct udphdr) + payload_size;
-	const int inner_ip_len   = (int)sizeof(struct iphdr)  + inner_udp_len;
-	const int gre_len        = 4;
-	const int outer_ip_len   = (int)sizeof(struct iphdr);
-	const int eth_len        = (int)sizeof(struct ethhdr);
-	const int total          = eth_len + outer_ip_len + gre_len + inner_ip_len;
+	const int m2u_len  = M2U_HDR_LEN;                       /* magic(4) + group(4) */
+	const int udp_len  = (int)sizeof(struct udphdr) + m2u_len + payload_size;
+	const int ip_len   = (int)sizeof(struct iphdr)  + udp_len;
+	const int eth_len  = (int)sizeof(struct ethhdr);
+	const int total    = eth_len + ip_len;
 
 	if (total > max_buf) return -1;
 	memset(buf, 0, total);
@@ -224,47 +232,35 @@ static int build_gre_pkt(uint8_t *buf, int max_buf,
 	eth->h_proto = htons(ETH_P_IP);
 	p += sizeof(struct ethhdr);
 
-	/* Outer IPv4 — id=0, checksum stable for the entire run */
-	auto *outer = reinterpret_cast<struct iphdr *>(p);
-	outer->ihl      = 5;
-	outer->version  = 4;
-	outer->tos      = 0;
-	outer->tot_len  = htons((uint16_t)(outer_ip_len + gre_len + inner_ip_len));
-	outer->id       = 0;
-	outer->frag_off = htons(IP_DF);
-	outer->ttl      = 64;
-	outer->protocol = 47;  /* GRE */
-	outer->saddr    = htonl(src.ip);
-	outer->daddr    = replicator_ip_nbo;
-	outer->check    = ip_csum(outer, sizeof(struct iphdr));
+	/* IPv4 — plain unicast to the replicator; id=0, checksum stable for the run */
+	auto *ip = reinterpret_cast<struct iphdr *>(p);
+	ip->ihl      = 5;
+	ip->version  = 4;
+	ip->tos      = 0;
+	ip->tot_len  = htons((uint16_t)ip_len);
+	ip->id       = 0;
+	ip->frag_off = htons(IP_DF);
+	ip->ttl      = 64;
+	ip->protocol = IPPROTO_UDP;
+	ip->saddr    = htonl(src.ip);
+	ip->daddr    = replicator_ip_nbo;
+	ip->check    = ip_csum(ip, sizeof(struct iphdr));
 	p += sizeof(struct iphdr);
 
-	/* GRE (4 bytes: flags=0, proto=IPv4) */
-	p[0] = 0x00; p[1] = 0x00;
-	p[2] = 0x08; p[3] = 0x00;
-	p += 4;
-
-	/* Inner IPv4 */
-	auto *inner = reinterpret_cast<struct iphdr *>(p);
-	inner->ihl      = 5;
-	inner->version  = 4;
-	inner->tos      = 0;
-	inner->tot_len  = htons((uint16_t)inner_ip_len);
-	inner->id       = 0;
-	inner->frag_off = htons(IP_DF);
-	inner->ttl      = 32;
-	inner->protocol = IPPROTO_UDP;
-	inner->saddr    = htonl(src.ip);
-	inner->daddr    = mcast_ip_nbo;
-	inner->check    = ip_csum(inner, sizeof(struct iphdr));
-	p += sizeof(struct iphdr);
-
-	/* Inner UDP */
+	/* UDP */
 	auto *udp   = reinterpret_cast<struct udphdr *>(p);
 	udp->source = htons(60000);
 	udp->dest   = udp_dst_port;
-	udp->len    = htons((uint16_t)inner_udp_len);
-	udp->check  = 0;
+	udp->len    = htons((uint16_t)udp_len);
+	udp->check  = 0;               /* UDP checksum optional over IPv4 */
+	p += sizeof(struct udphdr);
+
+	/* m2u tunnel header: magic + multicast group (both network byte order) */
+	uint32_t magic_be = htonl(M2U_MAGIC);
+	memcpy(p,     &magic_be,     4);
+	memcpy(p + 4, &mcast_ip_nbo, 4);   /* group already in network order */
+	p += m2u_len;
+
 	/* payload bytes [0..15] left as zero (seq=0, ts_ns=0 placeholders) */
 
 	return total;
@@ -275,9 +271,9 @@ static void usage(const char *prog)
 {
 	printf("Usage: %s [options]\n"
 	       "  -I <iface>       real NIC interface        (default: %s)\n"
-	       "  -D <replicator-ip>   outer GRE dst (replicator)    (REQUIRED)\n"
-	       "  -g <group>       inner multicast group     (default: %s)\n"
-	       "  -p <port>        inner UDP dst port        (default: %d)\n"
+	       "  -D <replicator-ip>   replicator IP (unicast tunnel dst) (REQUIRED)\n"
+	       "  -g <group>       multicast group (carried in m2u hdr) (default: %s)\n"
+	       "  -p <port>        UDP dst port              (default: %d)\n"
 	       "  -c <count>       number of packets         (default: %d)\n"
 	       "  -i <interval_us> inter-packet gap µs       (default: %d)\n"
 	       "  -s <size>        payload bytes             (default: %d, min: %d)\n"
@@ -359,7 +355,7 @@ int main(int argc, char *argv[])
 	 * all remaining frames.  Every frame is now ready to transmit; the hot
 	 * path only overwrites the 16 bytes at SEQ_OFF / TS_OFF.
 	 */
-	int pkt_len = build_gre_pkt(
+	int pkt_len = build_m2u_pkt(
 		(uint8_t *)umem_buf, UMEM_FRAME_SIZE,
 		src, dst_mac, replicator_ip_nbo, mcast_ip_nbo,
 		dst_port_nbo, pkt_size);

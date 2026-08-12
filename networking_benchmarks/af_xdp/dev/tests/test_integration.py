@@ -278,10 +278,10 @@ class TestRTTMeasurement:
         with open(json_path) as f:
             data = json.load(f)
         for key in ("messages", "warmup", "rate_mps", "lost", "loss_pct",
-                    "timestamp_rx", "timestamp_tx", "tsc_ns_per_tick"):
+                    "timestamp_rx", "timestamp_tx"):
             assert key in data, f"Missing top-level key {key}: {list(data.keys())}"
         assert data["rate_mps"] == 1000
-        assert data["timestamp_tx"] == "tsc"
+        assert data["timestamp_tx"] == "clock_realtime"
 
     def test_rtt_zero_loss_localhost(self, replicator_process):
         """Localhost kernel echo should not drop packets."""

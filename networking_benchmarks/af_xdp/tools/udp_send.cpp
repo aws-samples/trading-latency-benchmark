@@ -49,19 +49,16 @@ void printUsage(const char* progName) {
               << " <target_ip> <target_port> [interval_ms] [message] [--iface <name>]" << std::endl;
     std::cout << "  target_ip:    IP address to send UDP packets to." << std::endl;
     std::cout << "                Use a multicast group (e.g. 224.0.31.50) for:" << std::endl;
-    std::cout << "                  GRE mode   — kernel routes via 'ip route add 224.0.0.0/4 dev gre_feed'" << std::endl;
-    std::cout << "                  Native mcast — direct multicast on the LAN/TGW domain" << std::endl;
+    std::cout << "                  Native multicast — direct multicast on the LAN/TGW domain" << std::endl;
     std::cout << "  target_port:  UDP destination port." << std::endl;
     std::cout << "  interval_ms:  Interval between packets in milliseconds (default: 1000)." << std::endl;
     std::cout << "  message:      Payload string (default: 'Test packet')." << std::endl;
     std::cout << "  --iface <n>   Outgoing interface for multicast (sets IP_MULTICAST_IF)." << std::endl;
-    std::cout << "                Required for native multicast; optional for GRE mode." << std::endl;
+    std::cout << "                Required for native multicast; optional otherwise." << std::endl;
     std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
     std::cout << "  # Unicast to replicator:" << std::endl;
     std::cout << "  " << progName << " 10.0.1.20 5000" << std::endl;
-    std::cout << "  # GRE mode — omit --iface; kernel routes 224/4 via gre_feed tunnel:" << std::endl;
-    std::cout << "  " << progName << " 224.0.31.50 5000 100 'trade'" << std::endl;
     std::cout << "  # Native multicast — specify physical interface:" << std::endl;
     std::cout << "  " << progName << " 224.0.31.50 5000 100 'trade'  --iface enp39s0" << std::endl;
     std::cout << std::endl;
@@ -130,9 +127,8 @@ int main(int argc, char* argv[]) {
 
             // Bind outgoing multicast to specific interface if requested.
             // Required for native multicast (prevents sending on the wrong interface).
-            // WARNING: do NOT pass --iface <physical_iface> in GRE mode — IP_MULTICAST_IF
-            // overrides the routing table and bypasses the GRE tunnel entirely.
-            // In GRE mode omit --iface (kernel routes via gre_feed) or pass --iface gre_feed.
+            // WARNING: do NOT pass --iface <physical_iface> with a kernel tunnel — IP_MULTICAST_IF
+            // overrides the routing table and bypasses the tunnel entirely.
             if (!iface_name.empty()) {
                 struct ip_mreqn mreqn{};
                 mreqn.imr_ifindex = static_cast<int>(if_nametoindex(iface_name.c_str()));

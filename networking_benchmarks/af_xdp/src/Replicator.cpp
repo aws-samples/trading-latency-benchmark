@@ -79,7 +79,7 @@ bool Replicator::Destination::operator<(const Destination& other) const {
 // Replicator implementation
 Replicator::Replicator(const std::string& interface, const std::string& listenIp, uint16_t listenPort, int numQueues)
     : listen_interface_(interface), listen_ip_(listenIp), listen_port_(listenPort),
-      num_queues_(numQueues), gre_mode_(false),
+      num_queues_(numQueues), mcast_mode_(false),
       control_socket_(-1), output_socket_(-1),
       ctrl_multicast_port_(0), producer_port_(0),
       ctrl_multicast_socket_(-1), ctrl_forward_socket_(-1),
@@ -115,7 +115,7 @@ Replicator::Replicator(Replicator&& other) noexcept
       listen_ip_(std::move(other.listen_ip_)),
       listen_port_(other.listen_port_),
       num_queues_(other.num_queues_),
-      gre_mode_(other.gre_mode_),
+      mcast_mode_(other.mcast_mode_),
       config_map_fd_(other.config_map_fd_),
       group_slots_(std::move(other.group_slots_)),
       group_ref_counts_(std::move(other.group_ref_counts_)),
@@ -166,7 +166,7 @@ Replicator& Replicator::operator=(Replicator&& other) noexcept {
         listen_ip_             = std::move(other.listen_ip_);
         listen_port_           = other.listen_port_;
         num_queues_            = other.num_queues_;
-        gre_mode_              = other.gre_mode_;
+        mcast_mode_              = other.mcast_mode_;
         config_map_fd_         = other.config_map_fd_;
         group_slots_           = std::move(other.group_slots_);
         group_ref_counts_      = std::move(other.group_ref_counts_);
@@ -219,9 +219,9 @@ void Replicator::initialize(bool useZeroCopy) {
     xdp_sockets_.resize(num_queues_);
     
     // Select XDP program:
-    //   gre_mode_  → mcast.o  (outer unicast GRE carries inner multicast)
+    //   mcast_mode_ → mcast.o  (m2u-tagged unicast carries the multicast group)
     //   otherwise  → ucast.o  (direct unicast feed)
-    const char* xdp_filename = gre_mode_ ? "mcast.o" : "ucast.o";
+    const char* xdp_filename = mcast_mode_ ? "mcast.o" : "ucast.o";
     static const std::string search_paths[] = {
         std::string("./src/xdp/") + xdp_filename,    // dev: running from af_xdp/ source tree
         std::string("./xdp/") + xdp_filename,        // installed: running from /opt/af-xdp/
@@ -237,7 +237,7 @@ void Replicator::initialize(bool useZeroCopy) {
             " not found in search paths (./src/xdp/, ./xdp/, /opt/af-xdp/xdp/)");
     }
     std::cout << "Loading XDP program: " << xdp_program_path
-              << (gre_mode_ ? " (GRE tunnel mode)" : "") << std::endl;
+              << (mcast_mode_ ? " (m2u multicast mode)" : "") << std::endl;
     XdpSocket::loadXdpProgram(listen_interface_, xdp_program_path, useZeroCopy);
 
     // Cache listen_ip_ as NBO for use by configureXdpProgram() and updateDestinationCache()
@@ -246,9 +246,9 @@ void Replicator::initialize(bool useZeroCopy) {
     // Configure XDP program with target IP and port
     configureXdpProgram();
 
-    // In GRE mode seed the inner multicast group immediately into config_map slot 0
+    // In mcast mode seed the multicast group immediately into config_map slot 0
     // so the BPF filter starts redirecting frames before any destination joins.
-    if (gre_mode_) {
+    if (mcast_mode_) {
         addGroupDynamic(listen_ip_nbo_);
     }
     
@@ -296,13 +296,10 @@ void Replicator::initialize(bool useZeroCopy) {
     }
     
     // Create output socket for sending to destinations
-    // GRE mode uses a raw socket so the fallback path can send GRE-encapsulated packets.
-    // The kernel builds the outer IP header; we provide GRE header + inner IP datagram.
-    if (gre_mode_) {
-        output_socket_ = socket(AF_INET, SOCK_RAW, IPPROTO_GRE);
-    } else {
-        output_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
-    }
+    // Kernel fallback socket (unresolved ARP / edge cases). Both ucast and the
+    // light m2u mcast tunnel are plain unicast UDP now, so a datagram socket
+    // suffices — the m2u header travels inside the UDP payload.
+    output_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
     if (output_socket_ < 0) {
         throw std::runtime_error("Failed to create output socket: " + std::string(strerror(errno)));
     }
@@ -349,9 +346,9 @@ void Replicator::configureXdpProgram() {
         bpf_map_update_elem(config_map_fd_, &i, &zero, BPF_ANY);
 
     // Unicast mode: write listen_ip_/listen_port_ into slot 0 statically.
-    // GRE mode: slot 0 (and others) are populated dynamically by addGroupDynamic().
+    // mcast mode: slot 0 (and others) are populated dynamically by addGroupDynamic().
     int first_free_slot = 0;
-    if (!gre_mode_) {
+    if (!mcast_mode_) {
         unicast_config cfg{};
         cfg.target_ip   = listen_ip_nbo_;
         cfg.target_port = htons(listen_port_);
@@ -360,7 +357,7 @@ void Replicator::configureXdpProgram() {
         std::cout << "Unicast filter: seeded slot 0 with " << listen_ip_ << ":" << listen_port_ << std::endl;
     }
 
-    // Initialise the free-slot pool (GRE: all 16 slots; unicast: slots 1–15)
+    // Initialise the free-slot pool (mcast: all 16 slots; unicast: slots 1-15)
     free_slots_.clear();
     for (int i = MAX_GROUPS - 1; i >= first_free_slot; --i)
         free_slots_.push_back(static_cast<uint32_t>(i));
@@ -380,7 +377,7 @@ void Replicator::addGroupDynamic(uint32_t group_nbo) {
 
     // Grab a free config_map slot
     if (free_slots_.empty()) {
-        std::cerr << "[GRE] config_map full (max 16 groups); ignoring Join for "
+        std::cerr << "[mcast] config_map full (max 16 groups); ignoring Join for "
                   << group_str << std::endl;
         return;
     }
@@ -392,7 +389,7 @@ void Replicator::addGroupDynamic(uint32_t group_nbo) {
     cfg.target_ip   = group_nbo;
     cfg.target_port = htons(listen_port_);
     if (bpf_map_update_elem(config_map_fd_, &slot, &cfg, BPF_ANY) != 0) {
-        std::cerr << "[GRE] bpf_map_update_elem failed for " << group_str
+        std::cerr << "[mcast] bpf_map_update_elem failed for " << group_str
                   << ": " << strerror(errno) << std::endl;
         free_slots_.push_back(slot);
         return;
@@ -401,7 +398,7 @@ void Replicator::addGroupDynamic(uint32_t group_nbo) {
     group_slots_[group_nbo]       = slot;
     group_ref_counts_[group_nbo]  = 1;
 
-    std::cout << "[GRE] Added group " << group_str
+    std::cout << "[mcast] Added group " << group_str
               << " → config_map[" << slot << "]" << std::endl;
 }
 
@@ -426,7 +423,7 @@ void Replicator::removeGroupDynamic(uint32_t group_nbo) {
     }
 
     group_ref_counts_.erase(ref_it);
-    std::cout << "[GRE] Removed group " << group_str << std::endl;
+    std::cout << "[mcast] Removed group " << group_str << std::endl;
 }
 
 void Replicator::setUpstreamControl(const std::string& ctrlGroup, uint16_t ctrlPort,
@@ -702,10 +699,10 @@ void Replicator::processPacketsForQueue(int queueId) {
     std::cout << "HFT-optimized packet processing thread started for queue " << queueId << std::endl;
     
     // HFT OPTIMIZATION: Pre-allocate batch vectors with cache-aligned memory.
-    // GRE mode: source sends multi-hundred-frame bursts — use 256 to drain in one peek.
+    // mcast mode: source sends multi-hundred-frame bursts — use 256 to drain in one peek.
     // Unicast mode: sparse arrivals; 64 is never the limiting factor.
     // 256 fits well within the 2048-frame RX UMEM partition (256 in-flight + 1792 in fill queue).
-    const int rx_batch = gre_mode_ ? 256 : 64;
+    const int rx_batch = mcast_mode_ ? 256 : 64;
     alignas(64) std::vector<int> offsets(rx_batch);
     alignas(64) std::vector<int> lengths(rx_batch);
     
@@ -818,6 +815,18 @@ void Replicator::handleControlProtocol() {
 }
 
 int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId) {
+    // Capture RX time at entry — before header parsing — so replicator_ns marks
+    // the dequeue instant, not the post-parse instant. Keeps the hop1/hop2 split
+    // (source->replicator vs replicator->dest) from charging parse cost to hop1.
+    uint64_t replicator_ns_be = 0;
+    if (mcast_mode_) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        uint64_t ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
+                    + static_cast<uint64_t>(ts.tv_nsec);
+        replicator_ns_be = __builtin_bswap64(ns);  // to big-endian (x86 is LE)
+    }
+
     const uint8_t* payload_data = nullptr;
     size_t payload_len = 0;
     uint32_t group_nbo = 0;
@@ -826,20 +835,15 @@ int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int
         return 0; // Not a valid UDP packet
     }
 
-    // GRE mode: stamp replicator RX time into inner UDP payload[16..23] (big-endian uint64_t).
-    // payload_data points to the inner IPv4 header; UDP payload starts at ihl*4 + 8 bytes in.
-    // The sender reserved this slot (zeroed in the UMEM template). The receiver uses it to
-    // split reported latency into hop1 (source→replicator) and hop2 (replicator→destination).
-    if (gre_mode_) {
-        const struct iphdr* inner = reinterpret_cast<const struct iphdr*>(payload_data);
-        size_t udp_payload_off = static_cast<size_t>(inner->ihl) * 4 + sizeof(struct udphdr);
-        if (payload_len >= udp_payload_off + 24) {  // HDR_SIZE = 24
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            uint64_t replicator_ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
-                                 + static_cast<uint64_t>(ts.tv_nsec);
-            replicator_ns = __builtin_bswap64(replicator_ns);  // to big-endian (x86 is LE)
-            memcpy(const_cast<uint8_t*>(payload_data) + udp_payload_off + 16, &replicator_ns, 8);
+    // m2u mode: write the entry-captured RX time into the app payload's
+    // replicator_ns slot (payload[16..23]). payload_data points at the 8-byte
+    // m2u header, so the app payload starts at +8. The sender zeroed the slot;
+    // the receiver uses it to split reported latency into hop1 (source->replicator)
+    // and hop2 (replicator->destination).
+    if (mcast_mode_) {
+        static constexpr size_t M2U_HDR = 8;
+        if (payload_len >= M2U_HDR + 24) {  // m2u + HDR_SIZE
+            memcpy(const_cast<uint8_t*>(payload_data) + M2U_HDR + 16, &replicator_ns_be, 8);
         }
     }
 
@@ -867,85 +871,62 @@ int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int
     return sent_count;
 }
 
-bool Replicator::extractUdpPayloadGre(const uint8_t* packetData, size_t packetLen,
+bool Replicator::extractUdpPayloadM2u(const uint8_t* packetData, size_t packetLen,
                                              const uint8_t*& payloadData, size_t& payloadLen,
                                              uint32_t& group_nbo) {
-    // Minimum: Eth(14) + outerIP(20) + GRE(4) + innerIP(20) + UDP(8) = 66 bytes
-    static constexpr size_t MIN_GRE_PKT = 14 + 20 + 4 + 20 + 8;
-    if (packetLen < MIN_GRE_PKT)
+    // Light m2u tunnel decap: Eth(14) + IPv4 + UDP(8) + m2u(8) + payload.
+    // (Historical name kept; the wire format is the flat 8-byte m2u header.)
+    // payloadData is set to the m2u header start so the fan-out path can
+    // re-emit [m2u | app-payload] verbatim via createUdpPacket().
+    static constexpr size_t   M2U_HDR   = 8;            // magic(4) + group(4)
+    static constexpr uint32_t M2U_MAGIC = 0x4D324355;   // "M2CU"
+    static constexpr size_t   MIN_PKT   = 14 + 20 + 8 + M2U_HDR;
+    if (packetLen < MIN_PKT)
         return false;
 
     const struct ethhdr* eth = reinterpret_cast<const struct ethhdr*>(packetData);
     if (ntohs(eth->h_proto) != ETH_P_IP)
         return false;
 
-    const struct iphdr* outer_ip = reinterpret_cast<const struct iphdr*>(
+    const struct iphdr* ip = reinterpret_cast<const struct iphdr*>(
         packetData + sizeof(struct ethhdr));
-    if (outer_ip->protocol != IPPROTO_GRE)
+    if (ip->protocol != IPPROTO_UDP)
+        return false;
+    size_t ip_len = static_cast<size_t>(ip->ihl) * 4;
+    if (ip_len < 20 || ip_len > 60)
         return false;
 
-    size_t outer_ip_len = outer_ip->ihl * 4;
-    if (outer_ip_len < 20 || outer_ip_len > 60)
+    size_t udp_off = sizeof(struct ethhdr) + ip_len;
+    if (packetLen < udp_off + sizeof(struct udphdr) + M2U_HDR)
         return false;
+    const struct udphdr* udp = reinterpret_cast<const struct udphdr*>(packetData + udp_off);
 
-    // GRE fixed header: 2-byte flags + 2-byte protocol
-    size_t gre_offset = sizeof(struct ethhdr) + outer_ip_len;
-    if (packetLen < gre_offset + 4)
+    size_t hdr_end = udp_off + sizeof(struct udphdr);
+    const uint8_t* m2u = packetData + hdr_end;
+    uint32_t magic;
+    memcpy(&magic, m2u, 4);
+    if (ntohl(magic) != M2U_MAGIC)
         return false;
+    memcpy(&group_nbo, m2u + 4, 4);   // network byte order multicast group
 
-    const uint8_t* gre = packetData + gre_offset;
-    uint16_t gre_flags = static_cast<uint16_t>((gre[0] << 8) | gre[1]);
-    uint16_t gre_proto = static_cast<uint16_t>((gre[2] << 8) | gre[3]);
-
-    if (gre_proto != ETH_P_IP)  // inner must be IPv4
+    // UDP-declared payload length (m2u + app), clamped to the received frame.
+    size_t udp_len = ntohs(udp->len);
+    if (udp_len < sizeof(struct udphdr) + M2U_HDR)
         return false;
+    size_t udp_payload = udp_len - sizeof(struct udphdr);
+    if (hdr_end + udp_payload > packetLen)
+        udp_payload = packetLen - hdr_end;
 
-    // Variable GRE header size: base 4 bytes + optional fields
-    size_t gre_len = 4;
-    if (gre_flags & 0x8000) gre_len += 4;  // checksum + reserved
-    if (gre_flags & 0x2000) gre_len += 4;  // key
-    if (gre_flags & 0x1000) gre_len += 4;  // sequence number
-
-    // Inner IPv4
-    size_t inner_ip_offset = gre_offset + gre_len;
-    if (packetLen < inner_ip_offset + sizeof(struct iphdr))
-        return false;
-
-    const struct iphdr* inner_ip = reinterpret_cast<const struct iphdr*>(
-        packetData + inner_ip_offset);
-    if (inner_ip->protocol != IPPROTO_UDP)
-        return false;
-
-    // Mirror mcast_filter.c line 148: only accept multicast inner destinations (224.0.0.0/4).
-    // mcast_filter.c enforces this before redirecting to AF_XDP, so non-multicast frames
-    // should never arrive here; the check is a defence-in-depth guard.
-    if ((ntohl(inner_ip->daddr) & 0xF0000000U) != 0xE0000000U)
-        return false;
-
-    size_t inner_ip_len = inner_ip->ihl * 4;
-    if (inner_ip_len < 20 || inner_ip_len > 60)
-        return false;
-
-    // Return the inner IP datagram verbatim (inner IPv4 + UDP + payload).
-    // The replicator re-encapsulates it in a new outer GRE unicast to each destination,
-    // so the destination receives the original multicast UDP packet intact.
-    size_t inner_datagram_len = ntohs(inner_ip->tot_len);
-    if (inner_datagram_len < inner_ip_len + sizeof(struct udphdr))
-        return false;
-    if (inner_ip_offset + inner_datagram_len > packetLen)
-        return false;
-
-    payloadData = packetData + inner_ip_offset;   // points to inner IPv4 header
-    payloadLen  = inner_datagram_len;
-    group_nbo   = inner_ip->daddr;                // inner multicast group address
+    payloadData = m2u;            // [m2u(8) | app payload]
+    payloadLen  = udp_payload;    // includes the 8-byte m2u header
     return true;
 }
 
 bool Replicator::extractUdpPayload(const uint8_t* packetData, size_t packetLen,
                                          const uint8_t*& payloadData, size_t& payloadLen,
                                          uint32_t& group_nbo) {
-    if (gre_mode_)
-        return extractUdpPayloadGre(packetData, packetLen, payloadData, payloadLen, group_nbo);
+    if (mcast_mode_)
+        return extractUdpPayloadM2u(packetData, packetLen, payloadData, payloadLen, group_nbo);
 
     // Minimum packet size check
     if (packetLen < sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr)) {
@@ -999,28 +980,8 @@ bool Replicator::extractUdpPayload(const uint8_t* packetData, size_t packetLen,
 }
 
 bool Replicator::sendToDestinationFallback(const Destination& destination, const uint8_t* data, size_t length) {
-    if (gre_mode_) {
-        // GRE fallback: prepend minimal 4-byte GRE header; kernel builds outer IP.
-        // output_socket_ was created as SOCK_RAW/IPPROTO_GRE in initialize().
-        uint8_t gre_buf[4 + 65535];
-        if (length > sizeof(gre_buf) - 4) return false;
-        gre_buf[0] = 0x00; gre_buf[1] = 0x00;  // flags = 0
-        gre_buf[2] = 0x08; gre_buf[3] = 0x00;  // protocol = ETH_P_IP
-        memcpy(gre_buf + 4, data, length);
-
-        struct sockaddr_in dest = destination.addr;
-        dest.sin_port = 0;  // ignored by raw sockets
-        ssize_t sent = sendto(output_socket_, gre_buf, 4 + length, 0,
-                              reinterpret_cast<const struct sockaddr*>(&dest), sizeof(dest));
-        if (sent < 0) {
-            std::cerr << "GRE fallback send failed to " << destination.ip_address
-                      << ": " << strerror(errno) << std::endl;
-            return false;
-        }
-        return sent == static_cast<ssize_t>(4 + length);
-    }
-
-    // Non-GRE: regular UDP socket, data is the UDP payload
+    // Plain unicast UDP for both modes. In m2u mcast mode `data` is the UDP
+    // payload [m2u(8) | app-payload]; in ucast mode it is the app payload.
     ssize_t sent = sendto(output_socket_, data, length, 0,
                           reinterpret_cast<const struct sockaddr*>(&destination.addr),
                           sizeof(destination.addr));
@@ -1092,11 +1053,11 @@ bool Replicator::sendSinglePacketDirect(const Destination& destination, const ui
     DEBUG_TX_PRINT("DEBUG TX: tx_idx=" << tx_idx << ", tx_frame_addr=0x"
               << std::hex << tx_frame_addr << std::dec);
 
-    // Build outgoing packet: GRE-wrapped inner IP datagram in GRE mode, plain UDP otherwise
+    // Build outgoing packet: plain unicast UDP. In m2u mode `data` already
+    // begins with the 8-byte m2u header, so the destination receives
+    // Eth|IP|UDP|m2u|payload — the same framing mcast.o matches on RX.
     uint8_t* tx_buffer = xdp_socket->getUmemBuffer() + tx_frame_addr;
-    size_t packet_len = gre_mode_
-        ? createGrePacket(destination, data, length, tx_buffer, FRAME_SIZE)
-        : createUdpPacket(destination, data, length, tx_buffer, FRAME_SIZE);
+    size_t packet_len = createUdpPacket(destination, data, length, tx_buffer, FRAME_SIZE);
     if (packet_len == 0) {
         DEBUG_TX_PRINT("DEBUG TX: packet build failed!");
         return false;
@@ -1185,57 +1146,6 @@ size_t Replicator::createUdpPacket(const Destination& destination, const uint8_t
     return total_len;
 }
 
-size_t Replicator::createGrePacket(const Destination& destination,
-                                          const uint8_t* inner_ip, size_t inner_ip_len,
-                                          uint8_t* buffer, size_t bufferSize) {
-    // Layout: Eth(14) + outer IPv4(20) + GRE(4) + inner IP datagram
-    static constexpr size_t GRE_HDR_LEN    = 4;
-    static constexpr size_t OUTER_IP_LEN   = sizeof(struct iphdr);
-    static constexpr size_t ETH_LEN        = sizeof(struct ethhdr);
-    size_t total_len = ETH_LEN + OUTER_IP_LEN + GRE_HDR_LEN + inner_ip_len;
-
-    if (total_len > bufferSize) {
-        std::cerr << "GRE packet too large for buffer: " << total_len << " > " << bufferSize << std::endl;
-        return 0;
-    }
-
-    // Ethernet header
-    struct ethhdr* eth = reinterpret_cast<struct ethhdr*>(buffer);
-    memcpy(eth->h_dest,   destination.mac,   ETH_ALEN);
-    memcpy(eth->h_source, cached_iface_mac_, ETH_ALEN);
-    eth->h_proto = htons(ETH_P_IP);
-
-    // Outer IPv4 header — unicast replicator → destination
-    struct iphdr* ip = reinterpret_cast<struct iphdr*>(buffer + ETH_LEN);
-    ip->version  = 4;
-    ip->ihl      = 5;
-    ip->tos      = 0;
-    ip->tot_len  = htons(OUTER_IP_LEN + GRE_HDR_LEN + inner_ip_len);
-    ip->id       = 0;
-    ip->frag_off = 0;           // GRE frames may need fragmentation; don't set DF
-    ip->ttl      = 64;
-    ip->protocol = IPPROTO_GRE; // 47
-    ip->check    = 0;
-    inet_aton(cached_iface_ip_.c_str(), reinterpret_cast<struct in_addr*>(&ip->saddr));
-    ip->daddr = destination.addr.sin_addr.s_addr;
-
-    uint32_t sum = 0;
-    const uint16_t* ip_words = reinterpret_cast<const uint16_t*>(ip);
-    for (int i = 0; i < 10; i++) sum += ip_words[i];
-    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
-    ip->check = static_cast<uint16_t>(~sum);
-
-    // GRE header: flags=0, protocol=0x0800 (IPv4 inner)
-    uint8_t* gre = buffer + ETH_LEN + OUTER_IP_LEN;
-    gre[0] = 0x00; gre[1] = 0x00;  // flags word (no checksum / key / seq)
-    gre[2] = 0x08; gre[3] = 0x00;  // protocol = ETH_P_IP
-
-    // Inner IP datagram verbatim (preserves multicast dst IP, UDP ports, payload)
-    memcpy(buffer + ETH_LEN + OUTER_IP_LEN + GRE_HDR_LEN, inner_ip, inner_ip_len);
-
-    return total_len;
-}
-
 std::vector<uint8_t> Replicator::processControlMessage(const uint8_t* message, size_t messageLen, 
                                                              const struct sockaddr_in& clientAddr) {
     if (messageLen < 1) {
@@ -1315,10 +1225,10 @@ std::vector<uint8_t> Replicator::processControlMessage(const uint8_t* message, s
         case CTRL_MCAST_JOIN: {
             // [4][4B group IP NBO]
             // Destination IP is inferred from the UDP source address (clientAddr).
-            // Only valid in GRE mode; in unicast mode use CTRL_ADD_DESTINATION instead.
+            // Only valid in mcast mode; in unicast mode use CTRL_ADD_DESTINATION instead.
             // No port in the wire format: inner UDP dst is preserved verbatim from the
             // source, so destinations always receive on listen_port_.
-            if (!gre_mode_) {
+            if (!mcast_mode_) {
                 std::cerr << "Control: MCAST_JOIN ignored in unicast mode — use ADD_DESTINATION\n";
                 response.push_back(0);
                 break;
@@ -1694,7 +1604,7 @@ void Replicator::updateDestinationCache() {
 
     dest_cache_.group_dests.clear();
 
-    // GRE mode: per-group fan-out from group_destinations_
+    // mcast mode: per-group fan-out from group_destinations_
     for (const auto& [group_nbo, subs] : gd_copy) {
         auto& vec = dest_cache_.group_dests[group_nbo];
         vec.reserve(subs.size());
@@ -1703,7 +1613,7 @@ void Replicator::updateDestinationCache() {
     }
 
     // Unicast mode: all_destinations_ destinations keyed by listen_ip_nbo_
-    if (!gre_mode_ && !all_copy.empty()) {
+    if (!mcast_mode_ && !all_copy.empty()) {
         auto& vec = dest_cache_.group_dests[listen_ip_nbo_];
         vec.reserve(all_copy.size());
         for (const auto& [ip, dest] : all_copy)

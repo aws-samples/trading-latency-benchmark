@@ -106,8 +106,8 @@ public:
     }
 
     // Encode seq (10 ASCII digits), stamp TX time just before submit, transmit.
-    // Returns the TSC and CLOCK_REALTIME ns captured at the stamp point.
-    bool send(uint64_t seq, uint64_t& send_tsc, int64_t& send_realtime_ns)
+    // Returns the CLOCK_REALTIME ns captured at the stamp point.
+    bool send(uint64_t seq, int64_t& send_realtime_ns)
     {
         drain_completions();
 
@@ -127,7 +127,6 @@ public:
         for (int i = 9; i >= 0; --i) { p[i] = (uint8_t)('0' + (s % 10)); s /= 10; }
 
         // Stamp as close to the wire as possible.
-        send_tsc = rdtsc_();
         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
         send_realtime_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 
@@ -171,11 +170,6 @@ private:
     int      seq_frame_off_ = 0;
     uint32_t outstanding_ = 0;
     uint8_t  templ_[2048];
-
-    static inline uint64_t rdtsc_() {
-        uint32_t lo, hi; __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
-        return ((uint64_t)hi << 32) | lo;
-    }
 
     void drain_completions() {
         uint32_t idx = 0;

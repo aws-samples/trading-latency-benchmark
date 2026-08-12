@@ -4,7 +4,12 @@
 plugin: amazon.aws.aws_ec2
 
 # Dynamic inventory from EC2 tags set by FleetStack.
-# Set AWS_DEFAULT_REGION or pass --aws-region to ansible-playbook.
+# Discovers both the primary (us-east-1) and secondary (eu-west-2) regions so a
+# single run covers cross-region topologies. Single-region runs just get an
+# empty result from the other region (harmless).
+regions:
+  - us-east-1
+  - eu-west-2
 
 include_filters:
   - tag:Role:
@@ -18,7 +23,10 @@ hostnames:
 compose:
   ansible_host: public_ip_address
   ansible_user: "'ec2-user'"
-  ansible_ssh_private_key_file: "lookup('env', 'SSH_KEY_FILE')"
+  # Per-region key: eu-west-2 nodes use SSH_KEY_FILE_SECONDARY (e.g. london.pem),
+  # everything else uses SSH_KEY_FILE (e.g. virginia.pem). Selected by AZ prefix
+  # so single-region runs (only SSH_KEY_FILE set) keep working unchanged.
+  ansible_ssh_private_key_file: "('eu-west-2' in placement.availability_zone) | ternary(lookup('env', 'SSH_KEY_FILE_SECONDARY'), lookup('env', 'SSH_KEY_FILE'))"
 
 groups:
   source:       "tags.Role == 'source'"

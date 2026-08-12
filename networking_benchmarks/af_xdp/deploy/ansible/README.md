@@ -64,7 +64,7 @@ After provisioning, binaries are installed to `/opt/af-xdp/` and the `replicator
 
 | File | Purpose | When to use |
 |------|---------|-------------|
-| `configure_mcast.yaml` | Multicast setup (self-contained) | Adapts source/dest nodes (stops replicator to free the AF_XDP queue) + GRE tunnel, replicator mcast mode, registration, ARP seed, datapath probe |
+| `configure_mcast.yaml` | Multicast setup (self-contained) | Adapts source/dest nodes (stops replicator to free the AF_XDP queue), replicator mcast mode, registration, ARP seed, datapath probe |
 | `run_ucast.yaml` | Run unicast NxN RTT benchmark + generate report | After provisioning — serial pairwise measurement, then local HTML/JSON report |
 | `run_mcast.yaml` | Run multicast fan-out benchmark | After configure_mcast — source→replicator→destinations |
 | `inventory.aws_ec2.yml` | Dynamic EC2 inventory by Role tag | With CDK-deployed or manually-tagged instances |
@@ -105,7 +105,7 @@ nodes (stops the replicator to free the AF_XDP queue) as the first step of each
 play, then wires the topology:
 
 ```bash
-# 1. Adapt nodes + GRE tunnel + replicator mcast mode + registration + ARP seed
+# 1. Adapt nodes + replicator mcast mode + registration + ARP seed
 ansible-playbook -i inventory.aws_ec2.yml configure_mcast.yaml -e replicator_private_ip=10.0.1.20
 # 2. Fan-out latency benchmark (source → replicator → destinations)
 ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml -e replicator_private_ip=10.0.1.20
@@ -121,10 +121,10 @@ ansible-playbook -i inventory.aws_ec2.yml provision.yaml -e rebuild=true
 
 | Play | Hosts | What it does |
 |------|-------|--------------|
-| 1 | `source` | Stops+disables replicator (frees AF_XDP queue) + detaches stale XDP + creates GRE tunnel + NM dispatcher persistence |
+| 1 | `source` | Stops+disables replicator (frees AF_XDP queue) + detaches stale XDP (no kernel tunnel; mcast_send builds m2u) |
 | 2 | `replicator` | Writes `/etc/default/replicator` (mcast mode) + restarts service |
 | 3 | `destination` | Stops+disables replicator + detaches stale XDP + registers (CTRL_MCAST_JOIN) + seeds ARP toward the replicator so fan-out frames get a real dst MAC |
-| 4 | `replicator` | Best-effort datapath probe: `udp_send` over GRE, checks the XDP redirect counter moved (non-fatal) |
+| 4 | `replicator` | Best-effort datapath probe: `mcast_send` m2u burst, checks the XDP redirect counter moved (non-fatal) |
 
 ### Variables
 

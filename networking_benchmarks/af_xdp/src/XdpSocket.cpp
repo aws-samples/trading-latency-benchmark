@@ -90,19 +90,30 @@ void* XdpSocket::allocateAlignedBuffer(int size) {
     // Get page size
     long pageSize = sysconf(_SC_PAGESIZE);
 
-    // Round up size to page size
-    size_t alignedSize = (size + pageSize - 1) & ~(pageSize - 1);
+    // Round up to the 2 MiB huge-page boundary so the UMEM can be backed by
+    // explicit huge pages (reserved at boot via the hugepages= cmdline). A
+    // TLB-resident UMEM removes per-packet TLB-miss jitter on the datapath.
+    const size_t HUGE_2M = 2 * 1024 * 1024;
+    size_t alignedSize = (size + HUGE_2M - 1) & ~(HUGE_2M - 1);
 
-    // Use mmap instead of posix_memalign for better zero-copy performance
-    void *buffer = mmap(NULL, alignedSize,
-                        PROT_READ | PROT_WRITE,
-                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-
-    // Try to use huge pages if available
-    if (buffer != MAP_FAILED)
+    void *buffer = MAP_FAILED;
+#ifdef MAP_HUGETLB
+    // Prefer reserved huge pages; fall back cleanly when none are available.
+    buffer = mmap(NULL, alignedSize, PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    if (buffer == MAP_FAILED)
     {
+        DEBUG_PRINT("MAP_HUGETLB unavailable (%s); falling back to anon + MADV_HUGEPAGE\n",
+                    strerror(errno));
+    }
+#endif
+    if (buffer == MAP_FAILED)
+    {
+        buffer = mmap(NULL, alignedSize, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 #ifdef MADV_HUGEPAGE
-        madvise(buffer, alignedSize, MADV_HUGEPAGE);
+        if (buffer != MAP_FAILED)
+            madvise(buffer, alignedSize, MADV_HUGEPAGE);
 #endif
     }
 
@@ -125,9 +136,12 @@ void XdpSocket::freeAlignedBuffer(void* buffer, size_t size) {
         return;
     }
 
-    // Use munmap for mmap-allocated memory
-    munmap(buffer, size);
-    DEBUG_PRINT("Freed aligned buffer at %p, size %zu\n", buffer, size);
+    // Use munmap for mmap-allocated memory. Match the 2 MiB rounding used at
+    // allocation time so the whole mapping (huge or not) is released.
+    const size_t HUGE_2M = 2 * 1024 * 1024;
+    size_t alignedSize = (size + HUGE_2M - 1) & ~(HUGE_2M - 1);
+    munmap(buffer, alignedSize);
+    DEBUG_PRINT("Freed aligned buffer at %p, size %zu\n", buffer, alignedSize);
 }
 
 int XdpSocket::setResourceLimits() {
@@ -453,6 +467,32 @@ int XdpSocket::bind(const std::string& ifName, int queueId, int flags) {
     }
     DEBUG_PRINT("AF_XDP socket bound successfully to %s queue %d\n", ifName.c_str(), queueId);
     DEBUG_PRINT("Socket configuration: RX size: %d, TX size: %d\n", RX_FRAMES, TX_FRAMES);
+
+    // NAPI busy-poll on the XSK fd: the same poll that services RX also drains
+    // the need_wakeup TX ring, which cuts IRQ->wakeup latency and makes the
+    // sendto() TX kick rare. We KEEP the kick (requestDriverPoll) as a safety
+    // net rather than removing it — busy-poll only reduces how often it fires,
+    // it does not guarantee TX drain on every driver. Pairs with the
+    // napi_defer_hard_irqs / gro_flush_timeout knobs set in provisioning.
+    // Best-effort: unsupported options are simply ignored by the kernel.
+#ifndef SO_BUSY_POLL
+#define SO_BUSY_POLL 46
+#endif
+#ifndef SO_PREFER_BUSY_POLL
+#define SO_PREFER_BUSY_POLL 69
+#endif
+#ifndef SO_BUSY_POLL_BUDGET
+#define SO_BUSY_POLL_BUDGET 70
+#endif
+    {
+        int xfd = xsk_socket__fd(wrapper_->xsk);
+        int on = 1, busy_us = 50, budget = 64;
+        setsockopt(xfd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &on, sizeof(on));
+        setsockopt(xfd, SOL_SOCKET, SO_BUSY_POLL, &busy_us, sizeof(busy_us));
+        setsockopt(xfd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
+        DEBUG_PRINT("XSK busy-poll enabled: prefer=1 busy_us=%d budget=%d (fd=%d)\n",
+                    busy_us, budget, xfd);
+    }
 
     // Populate the fill queue
     uint32_t idx;

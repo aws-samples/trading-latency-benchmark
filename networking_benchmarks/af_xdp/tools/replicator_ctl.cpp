@@ -100,7 +100,7 @@ public:
     // Register this destination for a multicast group via the replicator control protocol
     // (CTRL_MCAST_JOIN).  No raw socket or root required.
     // The replicator infers the destination IP from the UDP source address of this message.
-    // No port argument: in GRE mode the inner UDP dst port is preserved verbatim from
+    // No port argument: in mcast mode the UDP dst port is preserved verbatim from
     // the source, so destinations always receive on the source data port.
     bool joinGroup(const std::string& groupAddress) {
         struct in_addr group_addr{};
@@ -251,7 +251,7 @@ void printUsage(const char* progName) {
     std::cout << "Notes:" << std::endl;
     std::cout << "  mcast/mcast-leave require CAP_NET_RAW (run with sudo)." << std::endl;
     std::cout << "  The IGMPv2 report is sent unicast to <replicator_ip>, so it works" << std::endl;
-    std::cout << "  across VPC peering and GRE tunnels without multicast routing." << std::endl;
+    std::cout << "  across VPC peering without native multicast routing." << std::endl;
 }
 
 int main(int argc, char* argv[]) {

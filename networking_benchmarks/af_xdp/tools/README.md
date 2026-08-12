@@ -6,8 +6,8 @@ Measurement instruments and control utilities.
 
 | File | Binary | Description |
 |------|--------|-------------|
-| `rtt.cpp` | `rtt` | High-precision RTT measurement client. Subscribes to replicator, sends UDP packets, measures round-trip via SO_TIMESTAMP (kernel RX) + TSC (TX). Outputs JSON with p50/p90/p95/p99/p999/max. |
-| `mcast_send.cpp` | `mcast_send` | Multicast sender — timestamps packets, sends to GRE tunnel or multicast group. Used as the "exchange" in multicast scenarios. |
+| `rtt.cpp` | `rtt` | High-precision RTT measurement client. Subscribes to replicator, sends UDP packets, measures round-trip via kernel-SW `SO_TIMESTAMPING` (CLOCK_REALTIME) RX + `clock_gettime(CLOCK_REALTIME)` TX (single clock domain). Optional `--xdp-tx` (AF_XDP send) and `--xdp-rx` (XDP-stamped RX). Outputs JSON with p50/p90/p95/p99/p999/max. |
+| `mcast_send.cpp` | `mcast_send` | Multicast sender — timestamps packets, sends to the replicator (m2u) or a multicast group. Used as the "exchange" in multicast scenarios. |
 | `mcast_receive.cpp` | `mcast_receive` | Multicast receiver — attaches `mcast.o`, seeds its `config_map` with the target group+port (`-g`/`-p`) so the XDP filter redirects to the AF_XDP socket, captures packets, computes one-way + per-hop latency from sender/replicator timestamps. Requires PHC clock sync between hosts. |
 | `replicator_ctl.cpp` | `replicator_ctl` | Control protocol client. Sends ADD/REMOVE/LIST commands to replicator's control port (12345). |
 | `udp_send.cpp` | `udp_send` | Simple UDP connectivity probe. Sends packets to a target and reports reachability. Supports multicast groups. |
@@ -17,7 +17,7 @@ Measurement instruments and control utilities.
 ```bash
 sudo ./rtt <replicator_ip> <data_port> <listen_ip> <listen_port> \
            <count> <rate_per_sec> <warmup> <tx_cpu> <rx_cpu> \
-           [--xdp-tx[=queue]] [--iface <name>]
+           [--xdp-tx[=queue]] [--iface <name>] [--xdp-rx]
 ```
 
 Requires `sudo` for SCHED_FIFO and mlockall. Runs without root but degrades gracefully
@@ -39,6 +39,35 @@ measured send leg — expect a few µs lower p50 and tighter tails; RX stays ker
 - Only available in `make full` builds (needs libxdp); `make kernel-mode` rejects the flag.
 - JSON gains `"tx_path": "af_xdp" | "kernel"`. Enable fleet-wide via
   `run_ucast.yaml -e xdp_tx=true [-e xdp_tx_queue=1]`.
+- Same AF_XDP zero-copy TX mechanism as `mcast_send` and the replicator's forward path
+  (`sendSinglePacketDirect`, XSK TX ring), so the send leg is measured consistently across the
+  ucast and mcast tools.
+
+### `--xdp-rx` (XDP-stamped RX — *not* an AF_XDP RX datapath)
+
+By default RX is the kernel software timestamp (`SOF_TIMESTAMPING_RX_SOFTWARE`, CLOCK_REALTIME,
+NAPI `netif_receive_skb`). Pass `--xdp-rx` to instead read an RX time stamped even earlier — at
+the **XDP ingress hook** — by the ucast XDP program: for packets carrying the rtt magic it writes
+`bpf_ktime_get_ns()` (CLOCK_MONOTONIC) into the echo payload and `XDP_PASS`es it up. The client
+reads that value and stamps TX with CLOCK_MONOTONIC to match; `rtt = rx_mono − tx_mono`.
+
+**This is not an AF_XDP RX datapath.** `--xdp-rx` does not bind an XSK or read a ring — the echo
+still traverses the full kernel RX stack to the UDP socket (`recvmsg`); only the *timestamp
+source* moves to the XDP hook. This is unlike `mcast_receive`, which uses a **true AF_XDP RX**
+(XSK) and takes `rx_ns` at ring dequeue (kernel-bypass). A true XSK-RX rtt client would match
+`mcast_receive`'s methodology, but on a replicator-colocated host it needs its own steered RX
+queue (queue 0 is the replicator's XSK), so `--xdp-rx` is the pragmatic "early stamp without a
+second XSK".
+
+- Requires the extended `ucast.o` loaded by `replicator.service` (it stamps the magic packets and
+  zeroes the UDP checksum, since the payload changed).
+- The rtt listen port must differ from the local replicator's listen port, so the echo falls
+  through to the stamp-and-PASS branch instead of being redirected to the replicator's XSK.
+- JSON: `"timestamp_rx": "xdp_ktime_mono"`, `"timestamp_tx": "clock_monotonic"`. Enable
+  fleet-wide via `run_ucast.yaml -e xdp_rx=true`.
+- Measured **no lower** than the kernel-SW path on ENA — the kernel-SW stamp is already near-wire
+  in the NAPI path and the datapath is unchanged, so the XDP hook has little to shave. Kept as an
+  optional, validated mode.
 
 
 Output: JSON at `/tmp/rtt_results.json` with `service_rtt_us` and `response_rtt_us` percentiles.
@@ -56,8 +85,8 @@ and isolate the true network/replicator latency from OS noise:
 | **SO_BUSY_POLL (100µs)** | `setsockopt(SO_BUSY_POLL, 100)` on receive socket | Kernel spins polling NIC queue instead of sleeping for IRQ wakeup. Removes 8-12µs IRQ→schedule→wakeup path. |
 | **SO_PREFER_BUSY_POLL** | Forces busy-poll path even under moderate load | Prevents kernel from falling back to interrupt-driven receive. |
 | **SO_BUSY_POLL_BUDGET (256)** | Packets processed per busy-poll NAPI cycle | Prevents early exit from poll loop when multiple packets queued. |
-| **TSC TX timestamp** | `rdtsc()` calibrated against CLOCK_MONOTONIC | Sub-nanosecond precision, no syscall overhead on send path. |
-| **Kernel RX timestamp** | `SO_TIMESTAMPING` with `SOF_TIMESTAMPING_RX_SOFTWARE` | Timestamp taken at NIC interrupt handler (before socket queue), not at `recvmsg()` return. |
+| **TX timestamp** | `clock_gettime(CLOCK_REALTIME)` right before the send (kernel `sendto`, or AF_XDP TX with `--xdp-tx`) | Single CLOCK_REALTIME domain with the kernel-SW RX; `--xdp-tx` removes the kernel TX stack. No TSC. |
+| **Kernel RX timestamp** | `SO_TIMESTAMPING` with `SOF_TIMESTAMPING_RX_SOFTWARE` | CLOCK_REALTIME, stamped by the stack in the NAPI `netif_receive_skb` path (before the socket queue), not at `recvmsg()` return. |
 | **Lock-free slot array** | Pre-allocated array indexed by sequence ID | No allocation, no mutex, no map lookup in hot path. Cache-line aligned (64B). |
 | **Spin-wait receive** | `recvmsg(MSG_DONTWAIT)` + `_mm_pause()` loop | No `poll()`/`select()` syscall overhead. `_mm_pause` hints CPU for SMT-friendly spinning. |
 | **Safety alarm** | `alarm(runtime + 30s)` with `_exit(2)` handler | Prevents SCHED_FIFO busy-loop from locking up the system if the benchmark hangs. |
@@ -85,19 +114,21 @@ which would reduce p50 to ~12-15µs.
 
 ### Timestamp modes
 
-| Mode | Source | Precision | Clock domain |
-|---|---|---|---|
-| Kernel software (`SOF_TIMESTAMPING_RX_SOFTWARE`) | NAPI RX path (`netif_receive_skb`), as the driver hands the packet to the stack | ~1µs | CLOCK_REALTIME |
-| Userspace (fallback) | `clock_gettime` after `recvmsg` | ~1µs + queue delay | CLOCK_MONOTONIC |
-| Hardware PHC (`SOF_TIMESTAMPING_RX_HARDWARE`) — one-way only | Nitro timestamping engine | ~15ns | PHC epoch (needs phc2sys for UTC) |
+| Mode | Source (where taken) | Clock domain |
+|---|---|---|
+| Default RX — kernel software (`SOF_TIMESTAMPING_RX_SOFTWARE`) | stack, NAPI RX path (`netif_receive_skb` / `net_timestamp_check`), right after the ENA driver builds the skb — before the socket queue | CLOCK_REALTIME |
+| Default RX fallback — userspace | `clock_gettime` after `recvmsg` (only if no cmsg) | CLOCK_REALTIME |
+| Default TX | `clock_gettime` before the send (kernel `sendto`, or AF_XDP frame build with `--xdp-tx`) | CLOCK_REALTIME |
+| `--xdp-rx` (RX + TX) | RX = XDP ingress `bpf_ktime_get_ns()` into the payload; TX = `clock_gettime(CLOCK_MONOTONIC)` to match | CLOCK_MONOTONIC |
+| Hardware PHC (`SOF_TIMESTAMPING_RX_HARDWARE`) | Nitro engine — **multicast one-way only**, not the RTT | PHC epoch (needs phc2sys) |
 
-For **ucast RTT** (same host sends and receives) the tool uses the **kernel software** RX
-timestamp: TX is `clock_gettime(CLOCK_REALTIME)` just before `sendto()` and RX is the kernel
-software timestamp (also `CLOCK_REALTIME`, stamped in the NAPI receive path), so `rtt = rx − tx`
-is a single-domain delta — no clock sync needed. An invariant TSC is also captured at send
-(reported as `timestamp_tx: "tsc"`) but is not the value differenced in the RTT. **HW PHC is
-not used for RTT** — it lives in a separate wall-clock epoch and is only needed for the one-way
-(multicast) path, which requires `phc2sys`/chrony to align hosts.
+The default RTT is a single **CLOCK_REALTIME** delta on one host: TX = `clock_gettime` immediately
+before the send; RX = the kernel software timestamp stamped by the stack in the NAPI receive path
+just after the ENA driver pulls the frame off the RX ring — before the socket queue — so it
+excludes socket-queue + poll/schedule jitter. **No TSC and no PHC are used for the RTT** (ENA has
+no TX hardware timestamp; PHC lives in a separate epoch and is used only for the one-way multicast
+path, `mcast_receive`). `--xdp-rx` moves the RX stamp to the XDP ingress hook (CLOCK_MONOTONIC) —
+see above.
 
 ## replicator_ctl usage
 
@@ -115,7 +146,7 @@ not used for RTT** — it lives in a separate wall-clock epoch and is only neede
 # Receiver (destination): attach mcast.o, listen for group:port fan-out
 sudo ./mcast_receive -I <iface> -g <group> -p <port> -c <count> -t <timeout_s> [-q <queue>]
 
-# Sender (source): GRE-encapsulate to the replicator, inner dst = group
+# Sender (source): m2u-tagged unicast to the replicator, group in the header
 sudo ./mcast_send -I <iface> -D <replicator_ip> -g <group> -p <port> -c <count> -i <interval_us>
 ```
 

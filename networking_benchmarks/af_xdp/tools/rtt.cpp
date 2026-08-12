@@ -4,23 +4,26 @@
  * Measures round-trip latency through the packet replicator with minimal
  * measurement overhead. Timestamps are taken as close to the wire as possible:
  *
- *   TX side: CLOCK_REALTIME (clock_gettime) sampled immediately before sendto().
- *            An invariant-TSC value is also captured at send (reported as
- *            timestamp_tx="tsc" and used for TSC-only analysis) but is NOT the
- *            value differenced in the reported RTT. ENA has no TX HW timestamp.
+ *   Default: a single CLOCK_REALTIME domain on one host, so no clock sync is needed.
+ *     TX: CLOCK_REALTIME (clock_gettime) sampled immediately before the send
+ *         (kernel sendto, or the AF_XDP TX frame build with --xdp-tx).
+ *     RX: kernel software timestamp (SOF_TIMESTAMPING_RX_SOFTWARE) = CLOCK_REALTIME
+ *         (skb->tstamp = ktime_get_real), recorded by the stack in the NAPI receive
+ *         path (netif_receive_skb / net_timestamp_check) right after the driver
+ *         pulls the frame off the RX ring and builds the skb - before the socket
+ *         receive-queue enqueue, so it excludes socket-queue + poll/schedule jitter.
+ *         Falls back to a userspace CLOCK_REALTIME read if no cmsg timestamp.
+ *     RTT = rx_realtime - tx_realtime.
  *
- *   RX side (auto-detected at startup):
- *     1. Kernel software RX timestamp (SOF_TIMESTAMPING_RX_SOFTWARE): CLOCK_REALTIME
- *        (skb->tstamp = ktime_get_real), recorded in the NAPI receive path
- *        (netif_receive_skb / net_timestamp_check) as the driver hands the packet
- *        to the stack - before the socket receive-queue enqueue. Removes socket-queue
- *        + poll/schedule jitter while staying in the CLOCK_REALTIME domain.
- *     2. Userspace fallback (clock_gettime after recvmsg) if no cmsg timestamp.
+ *   --xdp-rx (optional): the RX time is stamped even earlier, at the XDP ingress
+ *     hook, by the ucast XDP program via bpf_ktime_get_ns() = CLOCK_MONOTONIC,
+ *     written into the echo payload; the client reads it and stamps TX with
+ *     CLOCK_MONOTONIC to match. RTT = rx_mono - tx_mono. (On ENA this measured no
+ *     lower than the kernel-SW path, since that stamp is already near-wire.)
  *
- *   RTT = rx_realtime - tx_realtime: a single-domain delta on one host, so no
- *   cross-host clock sync is needed. HW PHC timestamps are deliberately NOT used
- *   here - they live in a separate wall-clock epoch and are only needed for
- *   one-way (multicast) latency across phc2sys/chrony-synced hosts.
+ *   No TSC and no PHC are used for the RTT. ENA has no TX hardware timestamp;
+ *   PHC hardware RX timestamps live in a separate epoch and are used only for the
+ *   one-way multicast path (mcast_receive), not here.
  *
  * Design:
  *   - Lock-free preallocated slot array indexed by sequence ID (no map, no mutex)
@@ -69,46 +72,9 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// TSC calibration
-// ---------------------------------------------------------------------------
-static inline uint64_t rdtsc() {
-    uint32_t lo, hi;
-    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
-    return (static_cast<uint64_t>(hi) << 32) | lo;
-}
-
-struct TscCalibration {
-    double ns_per_tick;  // multiply tsc delta by this to get nanoseconds
-
-    void calibrate() {
-        // Warm up
-        rdtsc();
-        struct timespec ts1, ts2;
-        clock_gettime(CLOCK_MONOTONIC, &ts1);
-        uint64_t tsc1 = rdtsc();
-        // Spin ~50ms
-        struct timespec delay = {0, 50000000};
-        clock_nanosleep(CLOCK_MONOTONIC, 0, &delay, nullptr);
-        uint64_t tsc2 = rdtsc();
-        clock_gettime(CLOCK_MONOTONIC, &ts2);
-
-        int64_t elapsed_ns = (ts2.tv_sec - ts1.tv_sec) * 1000000000LL +
-                             (ts2.tv_nsec - ts1.tv_nsec);
-        uint64_t tsc_delta = tsc2 - tsc1;
-        ns_per_tick = static_cast<double>(elapsed_ns) / static_cast<double>(tsc_delta);
-    }
-
-    int64_t tsc_to_ns(uint64_t tsc_val) const {
-        return static_cast<int64_t>(static_cast<double>(tsc_val) * ns_per_tick);
-    }
-};
-
-static TscCalibration g_tsc;
-
-// ---------------------------------------------------------------------------
 // Timestamp source detection and RX timestamping
 // ---------------------------------------------------------------------------
-enum class RxTimestampMode { HW_PHC, SW_KERNEL, USERSPACE };
+enum class RxTimestampMode { SW_KERNEL, USERSPACE };
 
 static RxTimestampMode detect_timestamp_mode(int sock_fd) {
     // For RTT the send and receive timestamps must share one clock domain. The TX
@@ -135,7 +101,7 @@ static RxTimestampMode detect_timestamp_mode(int sock_fd) {
         return RxTimestampMode::SW_KERNEL;
     }
 
-    std::cout << "Timestamp mode: userspace fallback (clock_gettime CLOCK_MONOTONIC after recvmsg)" << std::endl;
+    std::cout << "Timestamp mode: userspace fallback (clock_gettime CLOCK_REALTIME after recvmsg)" << std::endl;
     return RxTimestampMode::USERSPACE;
 }
 
@@ -145,10 +111,8 @@ static int64_t extract_rx_timestamp_ns(struct msghdr* msg) {
         // New API: SO_TIMESTAMPING -> array of 3 timespecs [SW, deprecated, HW]
         if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SO_TIMESTAMPING) {
             struct timespec* ts = reinterpret_cast<struct timespec*>(CMSG_DATA(cmsg));
-            // Prefer HW (index 2), fall back to SW (index 0)
-            if (ts[2].tv_sec != 0 || ts[2].tv_nsec != 0) {
-                return ts[2].tv_sec * 1000000000LL + ts[2].tv_nsec;
-            }
+            // Software RX timestamp (index 0), CLOCK_REALTIME. We do not enable
+            // RX_HARDWARE, so the HW slot (index 2) is unused here.
             if (ts[0].tv_sec != 0 || ts[0].tv_nsec != 0) {
                 return ts[0].tv_sec * 1000000000LL + ts[0].tv_nsec;
             }
@@ -168,14 +132,12 @@ static int64_t extract_rx_timestamp_ns(struct msghdr* msg) {
 // Lock-free timing slots
 // ---------------------------------------------------------------------------
 struct alignas(64) TimingSlot {
-    uint64_t send_tsc;            // invariant TSC at send - captured only (reported as
-                                  //   timestamp_tx="tsc"); NOT differenced in the reported RTT
-    int64_t  send_monotonic_ns;   // MISNOMER: actually CLOCK_REALTIME at send (see sender);
-                                  //   this is the TX stamp used in the RTT
-    uint64_t intended_send_ns;    // intended send time (coordinated-omission baseline)
-    int64_t  send_mono_ns;        // CLOCK_MONOTONIC at actual send (used by --xdp-rx RTT)
-    int64_t  recv_ns;             // RX timestamp (ns): kernel SW SO_TIMESTAMPING (CLOCK_REALTIME),
-                                  //   userspace CLOCK_MONOTONIC fallback, or XDP ktime (--xdp-rx)
+    int64_t  send_realtime_ns;    // CLOCK_REALTIME at actual send (default-mode TX stamp)
+    int64_t  send_mono_ns;        // CLOCK_MONOTONIC at actual send (--xdp-rx TX stamp)
+    uint64_t intended_send_ns;    // intended send time, CLOCK_MONOTONIC (coordinated-omission baseline)
+    int64_t  recv_ns;             // RX timestamp (ns): default = kernel-SW SO_TIMESTAMPING
+                                  //   (CLOCK_REALTIME) or userspace CLOCK_REALTIME fallback;
+                                  //   --xdp-rx = XDP bpf_ktime (CLOCK_MONOTONIC) from the payload
     uint8_t  received;            // 1 if response arrived
 };
 
@@ -378,11 +340,6 @@ int main(int argc, char* argv[]) {
         memset(g_probe + 4, 0, 8);
     }
 
-    // Calibrate TSC
-    std::cout << "Calibrating TSC..." << std::endl;
-    g_tsc.calibrate();
-    std::cout << "  TSC: " << g_tsc.ns_per_tick << " ns/tick" << std::endl;
-
     // Allocate timing slots (warmup + measured messages)
     uint64_t slot_count = warmup + total_msgs;
     std::vector<TimingSlot> slots(slot_count);
@@ -476,14 +433,14 @@ int main(int argc, char* argv[]) {
                 rx_ns = static_cast<int64_t>(xrx);
             } else if (ts_mode == RxTimestampMode::USERSPACE) {
                 struct timespec now;
-                clock_gettime(CLOCK_MONOTONIC, &now);
+                clock_gettime(CLOCK_REALTIME, &now);
                 rx_ns = now.tv_sec * 1000000000LL + now.tv_nsec;
             } else {
                 rx_ns = extract_rx_timestamp_ns(&msg);
                 if (rx_ns < 0) {
-                    // Fallback to userspace if cmsg missing
+                    // Fallback to userspace (same CLOCK_REALTIME domain) if cmsg missing
                     struct timespec now;
-                    clock_gettime(CLOCK_MONOTONIC, &now);
+                    clock_gettime(CLOCK_REALTIME, &now);
                     rx_ns = now.tv_sec * 1000000000LL + now.tv_nsec;
                 }
             }
@@ -527,9 +484,14 @@ int main(int argc, char* argv[]) {
     char msg_buf[512];
     uint64_t interval_ns = 1000000000ULL / rate_per_sec;
 
-    struct timespec start_ts;
+    struct timespec start_ts, start_rt;
     clock_gettime(CLOCK_MONOTONIC, &start_ts);
+    clock_gettime(CLOCK_REALTIME, &start_rt);
     uint64_t start_ns = start_ts.tv_sec * 1000000000ULL + start_ts.tv_nsec;
+    // Constant MONOTONIC->REALTIME offset, to express the paced (MONOTONIC) intended
+    // send time in the default RX domain (CLOCK_REALTIME) for the response RTT.
+    const int64_t mono_to_real_off = (start_rt.tv_sec * 1000000000LL + start_rt.tv_nsec)
+                                   - static_cast<int64_t>(start_ns);
 
     for (uint64_t i = 1; i <= slot_count && g_running; ++i) {
         uint64_t intended_ns = start_ns + (i - 1) * interval_ns;
@@ -545,24 +507,23 @@ int main(int argc, char* argv[]) {
         if (xdp_rx) { struct timespec m; clock_gettime(CLOCK_MONOTONIC, &m); send_mono_ns = m.tv_sec * 1000000000LL + m.tv_nsec; }
 
         // Send: AF_XDP zero-copy TX (kernel-bypass) or kernel sendto.
-        uint64_t send_tsc; int64_t send_rt_ns;
+        int64_t send_rt_ns = 0;
 #ifndef KERNEL_MODE_ONLY
         if (use_xdp_tx) {
-            xtx.send(i, send_tsc, send_rt_ns);
+            xtx.send(i, send_rt_ns);
         } else
 #endif
         {
             encode_message(msg_buf, i);
-            send_tsc = rdtsc();
             struct timespec send_ts;
             clock_gettime(CLOCK_REALTIME, &send_ts);
             send_rt_ns = send_ts.tv_sec * 1000000000LL + send_ts.tv_nsec;
             sendto(send_fd, msg_buf, MSG_LEN, 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
         }
 
-        // Record both TSC and CLOCK_REALTIME (same domain as the RX SO_TIMESTAMP)
-        slots[i - 1].send_tsc = send_tsc;
-        slots[i - 1].send_monotonic_ns = send_rt_ns;
+        // TX stamp: CLOCK_REALTIME (matches the kernel-SW RX domain). The
+        // CLOCK_MONOTONIC stamp above is used only by --xdp-rx.
+        slots[i - 1].send_realtime_ns = send_rt_ns;
         slots[i - 1].send_mono_ns = send_mono_ns;
         slots[i - 1].intended_send_ns = intended_ns;
 
@@ -582,23 +543,23 @@ int main(int argc, char* argv[]) {
     close(recv_fd);
 
     // --- Compute statistics (skip warmup) ---
-    std::vector<int64_t> service_rtts;   // recv_ns - send_monotonic_ns (same clock domain)
+    std::vector<int64_t> service_rtts;   // recv_ns - send_ref (same clock domain per mode)
     std::vector<int64_t> response_rtts;  // recv_ns - intended_send_ns (coordinated omission)
     uint64_t lost = 0;
 
     for (uint64_t i = warmup; i < slot_count; ++i) {
         if (!slots[i].received) { ++lost; continue; }
 
-        // Default: RX kernel-SW timestamp - TX CLOCK_REALTIME (both REALTIME;
-        // send_monotonic_ns is a misnomer - it holds REALTIME).
-        // --xdp-rx: RX = XDP bpf_ktime (MONOTONIC) - TX CLOCK_MONOTONIC send.
-        int64_t send_ref = xdp_rx ? slots[i].send_mono_ns : slots[i].send_monotonic_ns;
+        // Same clock domain per mode: default = CLOCK_REALTIME, --xdp-rx = CLOCK_MONOTONIC.
+        int64_t send_ref     = xdp_rx ? slots[i].send_mono_ns : slots[i].send_realtime_ns;
+        int64_t intended_ref = xdp_rx ? static_cast<int64_t>(slots[i].intended_send_ns)
+                                      : static_cast<int64_t>(slots[i].intended_send_ns) + mono_to_real_off;
         int64_t rtt = slots[i].recv_ns - send_ref;
         if (rtt > 0 && rtt < 100000000) {  // sanity: 0 < RTT < 100ms (unstamped -> rtt<=0, dropped)
             service_rtts.push_back(rtt);
         }
 
-        int64_t resp_rtt = slots[i].recv_ns - static_cast<int64_t>(slots[i].intended_send_ns);
+        int64_t resp_rtt = slots[i].recv_ns - intended_ref;
         if (resp_rtt > 0 && resp_rtt < 100000000) {
             response_rtts.push_back(resp_rtt);
         }
@@ -626,15 +587,15 @@ int main(int argc, char* argv[]) {
     std::cout << "Rate: " << rate_per_sec << " msg/sec" << std::endl;
     std::cout << "Lost: " << lost << " (" << (100.0 * lost / measured) << "%)" << std::endl;
     if (xdp_rx) {
-        std::cout << "Timestamp mode: XDP RX ktime (bpf_ktime_get_ns MONOTONIC, stamped at XDP ingress)" << std::endl;
-        std::cout << "TX timestamp: CLOCK_MONOTONIC (used for --xdp-rx RTT)" << std::endl;
+        std::cout << "RX timestamp: XDP bpf_ktime_get_ns (CLOCK_MONOTONIC, XDP ingress hook)" << std::endl;
+        std::cout << "TX timestamp: CLOCK_MONOTONIC (matches --xdp-rx RX domain)" << std::endl;
     } else {
-        std::cout << "Timestamp mode: "
-                  << (ts_mode == RxTimestampMode::HW_PHC ? "Nitro PHC (hardware)" :
-                      ts_mode == RxTimestampMode::SW_KERNEL ? "kernel software" : "userspace")
+        std::cout << "RX timestamp: "
+                  << (ts_mode == RxTimestampMode::SW_KERNEL
+                        ? "kernel software SO_TIMESTAMPING (CLOCK_REALTIME, NAPI netif_receive_skb)"
+                        : "userspace clock_gettime (CLOCK_REALTIME)")
                   << std::endl;
-        std::cout << "TX timestamp: CLOCK_REALTIME (used for RTT); invariant TSC also captured, "
-                  << g_tsc.ns_per_tick << " ns/tick" << std::endl;
+        std::cout << "TX timestamp: CLOCK_REALTIME (clock_gettime before send)" << std::endl;
     }
 
     if (!service_rtts.empty()) {
@@ -671,11 +632,9 @@ int main(int argc, char* argv[]) {
         fprintf(jf, "  \"loss_pct\": %.4f,\n", 100.0 * lost / measured);
         fprintf(jf, "  \"timestamp_rx\": \"%s\",\n",
                 xdp_rx ? "xdp_ktime_mono" :
-                ts_mode == RxTimestampMode::HW_PHC ? "nitro_phc_hw" :
                 ts_mode == RxTimestampMode::SW_KERNEL ? "kernel_sw" : "userspace");
-        fprintf(jf, "  \"timestamp_tx\": \"%s\",\n", xdp_rx ? "clock_monotonic" : "tsc");
-        fprintf(jf, "  \"tx_path\": \"%s\",\n", use_xdp_tx ? "af_xdp" : "kernel");
-        fprintf(jf, "  \"tsc_ns_per_tick\": %.6f%s\n", g_tsc.ns_per_tick,
+        fprintf(jf, "  \"timestamp_tx\": \"%s\",\n", xdp_rx ? "clock_monotonic" : "clock_realtime");
+        fprintf(jf, "  \"tx_path\": \"%s\"%s\n", use_xdp_tx ? "af_xdp" : "kernel",
                 (service_rtts.empty() && response_rtts.empty()) ? "" : ",");
         if (!service_rtts.empty()) {
             fprintf(jf, "  \"service_rtt_us\": {\n");

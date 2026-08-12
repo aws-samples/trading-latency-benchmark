@@ -13,7 +13,7 @@ deploy/
 └── ansible/               Runtime/benchmark playbooks + shared inventory
     ├── run_ucast.yaml     Unicast NxN RTT benchmark + report
     ├── run_mcast.yaml     Multicast fan-out benchmark
-    ├── configure_mcast.yaml  Multicast runtime setup (GRE, replicator, registration)
+    ├── configure_mcast.yaml  Multicast runtime setup (m2u, replicator, registration)
     └── inventory.aws_ec2.yml  Dynamic EC2 inventory by Role tag
 
 Dev/iteration tooling lives outside deploy/, under af_xdp/dev/:
@@ -93,7 +93,7 @@ All nodes boot the same — role determines topology wiring at runtime (via ansi
 - **Replicator on boot:** Every instance starts `replicator.service` in unicast mode by default (ready for RTT immediately)
 - **Mode switching:** `/etc/default/replicator` controls mode (kernel/unicast/mcast), port, and mcast group
 - **No ansible for unicast:** Baked AMI instances are test-ready on boot
-- **Ansible for multicast only:** GRE tunnels + destination registration require runtime IPs
+- **Ansible for multicast only:** destination registration requires runtime IPs
 
 ## Documentation
 

@@ -11,7 +11,7 @@
  *   - ~10-50x higher latency (kernel network stack overhead)
  *   - No zero-copy, no busy-poll at NIC level
  *   - Single-threaded (no multi-queue)
- *   - No GRE decapsulation
+ *   - No tunnel decapsulation
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0

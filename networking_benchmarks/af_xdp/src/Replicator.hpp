@@ -76,14 +76,14 @@ private:
     std::string cached_iface_ip_;
     uint8_t     cached_iface_mac_[6]{};
     int num_queues_;
-    bool gre_mode_;         // GRE tunnel mode: outer unicast GRE carries inner multicast UDP
+    bool mcast_mode_;         // mcast mode: m2u-tagged unicast UDP carries the multicast group
 
-    // ── Dynamic group tracking (GRE mode) / static seed (unicast mode) ───────
+    // ── Dynamic group tracking (mcast mode) / static seed (unicast mode) ─────
     // config_map_fd_: BPF map fd retained after initialize() for runtime updates.
     int config_map_fd_{-1};
 
     // Per-group BPF state.  All maps keyed by group IP in network byte order,
-    // protected by group_mutex_.  Used by GRE mode only.
+    // protected by group_mutex_.  Used by mcast mode only.
     std::unordered_map<uint32_t, uint32_t> group_slots_;        // group NBO → config_map slot index
     std::unordered_map<uint32_t, int>      group_ref_counts_;   // group NBO → destination join count
     std::vector<uint32_t>                  free_slots_;         // available config_map slot indices
@@ -91,7 +91,7 @@ private:
 
     // Per-group destination destinations.  Protected by destinations_mutex_.
     // Maps group NBO → (destination IP string → Destination with port + ARP-resolved MAC).
-    // Populated by CTRL_MCAST_JOIN (GRE mode).
+    // Populated by CTRL_MCAST_JOIN (mcast mode).
     std::unordered_map<uint32_t, std::unordered_map<std::string, Destination>> group_destinations_;
 
     // listen_ip_ parsed to NBO once at initialize(); used as cache key in unicast mode.
@@ -175,14 +175,14 @@ public:
     void initialize(bool useZeroCopy = true);
 
     /**
-     * Enable GRE tunnel mode.
+     * Enable multicast (m2u) mode.
      * Must be called before initialize().
-     * In GRE mode: mcast_filter.o is loaded; the outer unicast GRE frame arrives on
-     * eth0 (preserving XDP_ZEROCOPY on ENA) and Replicator strips the GRE
+     * In mcast mode: mcast.o is loaded; the m2u-tagged unicast UDP frame arrives on
+     * eth0 (preserving XDP_ZEROCOPY on ENA) and Replicator strips the 8-byte m2u
      * headers in userspace.  listen_ip_ still holds the inner multicast group
      * address used for config_map; no IGMP join is performed.
      */
-    void setGREMode(bool enable) { gre_mode_ = enable; }
+    void setMcastMode(bool enable) { mcast_mode_ = enable; }
 
     /**
      * Configure upstream control forwarding.
@@ -257,13 +257,13 @@ public:
 private:
     /**
      * Configure the XDP program: stores config_map_fd_, zeroes all slots,
-     * populates free_slots_.  In GRE mode writes listen_ip_/listen_port_ to
+     * populates free_slots_.  In mcast mode writes listen_ip_/listen_port_ to
      * slot 0 immediately (static inner group).
      */
     void configureXdpProgram();
 
     /**
-     * Dynamically add a group to the BPF config_map (GRE mode).
+     * Dynamically add a group to the BPF config_map (mcast mode).
      * Thread-safe; called from processControlMessage on CTRL_MCAST_JOIN.
      * @param group_nbo  Multicast group address in network byte order.
      */
@@ -309,22 +309,22 @@ private:
     int replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId);
 
     /**
-     * Extract UDP payload from a packet (dispatches to GRE or plain path).
+     * Extract UDP payload from a packet (dispatches to m2u or plain path).
      * Also returns the multicast group NBO address via group_nbo (used for per-group fan-out).
-     * Non-GRE: group_nbo = outer IP daddr (the multicast group the source sent to).
-     * GRE:     group_nbo = inner IP daddr (the multicast group encapsulated in the GRE frame).
+     * Unicast: group_nbo = outer IP daddr (the multicast group the source sent to).
+     * mcast:   group_nbo = the group read from the 8-byte m2u tunnel header.
      */
     bool extractUdpPayload(const uint8_t* packetData, size_t packetLen,
                           const uint8_t*& payloadData, size_t& payloadLen,
                           uint32_t& group_nbo);
 
     /**
-     * GRE-specific payload extraction.
-     * Strips: Eth + outer IPv4 + GRE (variable 4-16 bytes) + inner IPv4 + UDP.
+     * m2u payload extraction.
+     * Strips: Eth + IPv4 + UDP + 8-byte m2u header; returns payload at the m2u header.
      * Returns inner IP datagram (IPv4+UDP+payload) verbatim in payloadData/payloadLen.
      * group_nbo receives the inner IP destination (multicast group).
      */
-    bool extractUdpPayloadGre(const uint8_t* packetData, size_t packetLen,
+    bool extractUdpPayloadM2u(const uint8_t* packetData, size_t packetLen,
                               const uint8_t*& payloadData, size_t& payloadLen,
                               uint32_t& group_nbo);
 
@@ -361,24 +361,11 @@ private:
     bool sendSinglePacketDirect(const Destination& destination, const uint8_t* data, size_t length, int queueId);
 
     /**
-     * Create UDP packet with headers for zero-copy transmission (non-GRE mode)
+     * Create UDP packet with headers for zero-copy transmission (plain unicast; carries m2u payload in mcast mode)
      */
     size_t createUdpPacket(const Destination& destination, const uint8_t* payload, size_t payloadLen,
                           uint8_t* buffer, size_t bufferSize);
 
-    /**
-     * Create GRE-encapsulated packet for zero-copy transmission (GRE mode).
-     * Layout: Eth + outer IPv4(proto=GRE) + GRE(4B) + inner_ip datagram verbatim.
-     *
-     * @param destination  Target destination (outer unicast destination)
-     * @param inner_ip     Inner IP datagram to encapsulate (IPv4+UDP+payload)
-     * @param inner_ip_len Length of inner IP datagram
-     * @param buffer       Output buffer
-     * @param bufferSize   Size of output buffer
-     * @return Total packet length, or 0 on error
-     */
-    size_t createGrePacket(const Destination& destination, const uint8_t* inner_ip, size_t inner_ip_len,
-                           uint8_t* buffer, size_t bufferSize);
 
     /**
      * Process control message
@@ -455,7 +442,7 @@ private:
     
     /**
      * Get cached destinations for a group (lock-free after first call per 100ms).
-     * GRE mode: keyed by inner multicast group NBO.
+     * mcast mode: keyed by multicast group NBO.
      * Unicast mode: keyed by listen_ip_nbo_ (replicator's unicast address).
      * Returns a const ref to the thread-local vector — no copy on hot path.
      */
@@ -463,7 +450,7 @@ private:
 
     /**
      * Rebuild thread-local destination cache.
-     * GRE mode: from group_destinations_.
+     * mcast mode: from group_destinations_.
      * Unicast mode: from all_destinations_ keyed by listen_ip_nbo_.
      */
     void updateDestinationCache();

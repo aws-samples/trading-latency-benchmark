@@ -45,7 +45,7 @@ extern int run_kernel_mode(const std::string& listen_ip, uint16_t listen_port);
 
 void printUsage(const char* progName) {
     std::cout << "Usage: " << progName
-              << " [--kernel-mode] <interface> <listen_ip> <listen_port> [zero_copy] [--gre]"
+              << " [--kernel-mode] <interface> <listen_ip> <listen_port> [zero_copy] [--mcast]"
               << " [--ctrl <group>:<port>] [--producer <ip>:<port>]" << std::endl;
     std::cout << std::endl;
     std::cout << "  --kernel-mode Use standard UDP sockets instead of AF_XDP." << std::endl;
@@ -54,11 +54,11 @@ void printUsage(const char* progName) {
     std::cout << std::endl;
     std::cout << "  interface:    Network interface to bind to (e.g., eth0)" << std::endl;
     std::cout << "  listen_ip:    Unicast IP to listen on (unicast mode), or inner multicast" << std::endl;
-    std::cout << "                group address (GRE mode, required)." << std::endl;
+    std::cout << "                group address (mcast mode, required)." << std::endl;
     std::cout << "  listen_port:  UDP data port." << std::endl;
     std::cout << "  zero_copy:    'true' to enable zero-copy mode (default: true)" << std::endl;
-    std::cout << "  --gre:        GRE tunnel mode — outer unicast GRE carries inner multicast." << std::endl;
-    std::cout << "                Loads mcast_filter.o; listen_ip is the inner multicast group." << std::endl;
+    std::cout << "  --mcast:      Multicast mode — m2u-tagged unicast UDP carries the group." << std::endl;
+    std::cout << "                Loads mcast.o; listen_ip is the multicast group." << std::endl;
     std::cout << "                Destinations register via CTRL_MCAST_JOIN (ctl mcast)." << std::endl;
     std::cout << "  --ctrl <g:p>  Multicast group:port where destinations send control messages." << std::endl;
     std::cout << "                Feeder joins this group and listens for control datagrams." << std::endl;
@@ -71,12 +71,12 @@ void printUsage(const char* progName) {
     std::cout << "  # Unicast mode:" << std::endl;
     std::cout << "  sudo " << progName << " eth0 10.0.1.20 5000" << std::endl;
     std::cout << std::endl;
-    std::cout << "  # GRE + upstream control forwarding:" << std::endl;
+    std::cout << "  # Multicast (m2u) + upstream control forwarding:" << std::endl;
     std::cout << "  sudo " << progName
-              << " eth0 224.0.31.50 5000 true --gre --ctrl 224.0.31.51:5001 --producer 10.0.1.10:6000" << std::endl;
+              << " eth0 224.0.31.50 5000 true --mcast --ctrl 224.0.31.51:5001 --producer 10.0.1.10:6000" << std::endl;
     std::cout << std::endl;
-    std::cout << "  # GRE only (no control forwarding):" << std::endl;
-    std::cout << "  sudo " << progName << " eth0 224.0.31.50 5000 true --gre" << std::endl;
+    std::cout << "  # Multicast only (no control forwarding):" << std::endl;
+    std::cout << "  sudo " << progName << " eth0 224.0.31.50 5000 true --mcast" << std::endl;
     std::cout << std::endl;
     std::cout << "Control Protocol (port 12345):" << std::endl;
     std::cout << "  Add destination:    [1][4-byte IP][2-byte port]" << std::endl;
@@ -137,7 +137,7 @@ int main(int argc, char* argv[]) {
     uint16_t listen_port = static_cast<uint16_t>(std::stoi(argv[3]));
 
     bool use_zero_copy = true;
-    bool use_gre = false;
+    bool use_mcast = false;
     std::string ctrl_group;
     uint16_t    ctrl_port = 0;
     std::string producer_ip;
@@ -150,8 +150,8 @@ int main(int argc, char* argv[]) {
 
     for (int i = 4; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--gre") {
-            use_gre = true;
+        if (arg == "--mcast") {
+            use_mcast = true;
         } else if (arg == "--ctrl" && i + 1 < argc) {
             // Format: <group>:<port>
             std::string val = argv[++i];
@@ -191,7 +191,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Interface:    " << interface << std::endl;
     std::cout << "Listen IP:    " << listen_ip << ":" << listen_port << std::endl;
     std::cout << "Zero Copy:    " << (use_zero_copy ? "Enabled" : "Disabled") << std::endl;
-    std::cout << "Mode:         " << (use_gre ? "GRE tunnel" : "Unicast") << std::endl;
+    std::cout << "Mode:         " << (use_mcast ? "Multicast (m2u)" : "Unicast") << std::endl;
     if (!ctrl_group.empty()) {
         std::cout << "Ctrl group:   " << ctrl_group << ":" << ctrl_port << std::endl;
         std::cout << "Producer:     " << producer_ip << ":" << producer_port << std::endl;
@@ -207,8 +207,8 @@ int main(int argc, char* argv[]) {
         // Create and initialize the replicator
         g_replicator = std::make_unique<Replicator>(interface, listen_ip, listen_port, num_queues);
 
-        if (use_gre) {
-            g_replicator->setGREMode(true);
+        if (use_mcast) {
+            g_replicator->setMcastMode(true);
         }
 
         if (!ctrl_group.empty()) {

@@ -1,5 +1,0 @@
-[
-  {"role": "source", "az":"a", "pgName":"cpg-a", "pgType": "cluster"},
-  {"role": "replicator", "az":"a", "pgName":"cpg-a", "pgType": "cluster"},
-  {"role": "destination", "az":"b"}
-]

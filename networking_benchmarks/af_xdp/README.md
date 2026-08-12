@@ -46,7 +46,7 @@ pip install pytest && pytest -v
 | Mode | Command | Root? | Use case |
 |------|---------|:-----:|----------|
 | AF_XDP (full) | `sudo replicator eth0 <ip> <port>` | Yes | Production — zero-copy, ~32µs p50 |
-| AF_XDP + GRE | `sudo replicator eth0 <mcast> <port> --gre` | Yes | Multicast fan-out via GRE tunnel |
+| AF_XDP + m2u | `sudo replicator eth0 <mcast> <port> --mcast` | Yes | Multicast fan-out via m2u tunnel |
 | Kernel | `replicator --kernel-mode <ip> <port>` | No | Testing, containers, ~200µs p50 |
 
 ## Measured Results (c7i.xlarge CPG, us-east-1)

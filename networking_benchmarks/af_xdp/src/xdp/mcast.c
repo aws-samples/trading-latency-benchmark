@@ -1,21 +1,22 @@
-// mcast.c — XDP program for GRE-encapsulated multicast UDP interception
+// mcast.c — XDP program for m2u-tagged multicast UDP interception
 /*
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  *
  * POC use case: mock exchange instance sends real UDP multicast (224.x.x.x)
- * encapsulated in a minimal GRE (IP proto 47) unicast tunnel to the feeder's
- * private IP.  This program intercepts the outer GRE frame on eth0 before the
- * kernel's ip_gre module decapsulates it, preserving XDP_ZEROCOPY on the ENA
- * physical NIC.
+ * carried inside a plain unicast UDP packet to the feeder's private IP, tagged
+ * with a light 8-byte "m2u" tunnel header { magic, group }.  This program
+ * intercepts that frame on eth0 and redirects it to AF_XDP, preserving
+ * XDP_ZEROCOPY on the ENA physical NIC.
  *
- * Packet layout matched:
- *   Ethernet / outer IPv4 (proto=47) / GRE / inner IPv4 (proto=17) / UDP / payload
+ * Packet layout matched (flat 8-byte m2u tunnel header):
+ *   Ethernet / IPv4 (proto=17) / UDP / m2u{ magic(4), group(4) } / payload
  *
- * Optional GRE fields (checksum, key, sequence) are handled via the flags word.
+ * The flat header keeps the fast path to Eth/IP/UDP + an 8-byte tag (no outer
+ * IP parse — the fast path is Eth/IP/UDP + an 8-byte tag check.
  * Same config_map / xsks_map layout as ucast_filter.c —
- * no userspace config changes needed: target_ip is the inner multicast group,
- * target_port is the inner UDP destination port.
+ * target_ip is the multicast group (read from the m2u header), target_port is
+ * the UDP destination port.
  */
 
 #include <linux/bpf.h>
@@ -26,9 +27,13 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-#ifndef IPPROTO_GRE
-#define IPPROTO_GRE 47
+#ifndef IPPROTO_UDP
+#define IPPROTO_UDP 17
 #endif
+
+// Light mcast->ucast tunnel tag ("M2CU"): 8-byte header {magic, group} that
+// Kept in sync with mcast_send.cpp / Replicator.cpp / mcast_receive.cpp.
+#define M2U_MAGIC 0x4D324355
 
 // Required for logging in XDP programs
 #define DEBUG 0
@@ -101,63 +106,38 @@ int mcast(struct xdp_md *ctx)
     if (eth->h_proto != bpf_htons(ETH_P_IP))
         return XDP_PASS;
 
-    // ── Outer IPv4 ────────────────────────────────────────────────────────────
-    struct iphdr *outer_iph = (void *)(eth + 1);
-    if ((void *)(outer_iph + 1) > data_end)
+    // ── IPv4 ──────────────────────────────────────────────────────────────────
+    struct iphdr *iph = (void *)(eth + 1);
+    if ((void *)(iph + 1) > data_end)
         return XDP_PASS;
 
-    // Fast-path: only process GRE (proto 47); everything else untouched
-    if (outer_iph->protocol != IPPROTO_GRE)
+    // Fast-path: only UDP; everything else untouched
+    if (iph->protocol != IPPROTO_UDP)
         return XDP_PASS;
 
-    __u32 outer_ip_len = outer_iph->ihl * 4;
-    if (outer_ip_len < 20 || outer_ip_len > 60)
+    __u32 ip_len = iph->ihl * 4;
+    if (ip_len < 20 || ip_len > 60)
         return XDP_PASS;
 
-    // ── GRE fixed header (4 bytes: flags word + protocol word) ───────────────
-    __u8 *gre = (void *)outer_iph + outer_ip_len;
-    if (gre + 4 > ((__u8 *)data_end))
-        return XDP_PASS;
-
-    __u16 gre_flags = (__u16)(gre[0] << 8) | gre[1];
-    __u16 gre_proto = (__u16)(gre[2] << 8) | gre[3];
-
-    // GRE must carry IPv4
-    if (gre_proto != ETH_P_IP)
-        return XDP_PASS;
-
-    // Variable GRE header size based on optional fields.
-    // Bit 15 (C): checksum+reserved (+4), bit 13 (K): key (+4), bit 12 (S): seq (+4)
-    __u32 gre_len = 4;
-    if (gre_flags & 0x8000) gre_len += 4;
-    if (gre_flags & 0x2000) gre_len += 4;
-    if (gre_flags & 0x1000) gre_len += 4;
-    // Maximum possible GRE header is 16 bytes; cap for the verifier
-    if (gre_len > 16)
-        return XDP_PASS;
-
-    // ── Inner IPv4 ────────────────────────────────────────────────────────────
-    struct iphdr *inner_iph = (void *)gre + gre_len;
-    if ((void *)(inner_iph + 1) > data_end)
-        return XDP_PASS;
-
-    if (inner_iph->protocol != IPPROTO_UDP)
-        return XDP_PASS;
-
-    // Inner destination must be in the multicast range 224.0.0.0/4
-    if ((bpf_ntohl(inner_iph->daddr) & 0xF0000000) != 0xE0000000)
-        return XDP_PASS;
-
-    // ── Inner UDP ─────────────────────────────────────────────────────────────
-    __u32 inner_ip_len = inner_iph->ihl * 4;
-    if (inner_ip_len < 20 || inner_ip_len > 60)
-        return XDP_PASS;
-
-    struct udphdr *udp = (void *)inner_iph + inner_ip_len;
+    // ── UDP ────────────────────────────────────────────────────────────────
+    struct udphdr *udp = (void *)iph + ip_len;
     if ((void *)(udp + 1) > data_end)
         return XDP_PASS;
 
-    // ── Config map scan: up to MAX_GROUPS entries ─────────────────────────────
+    // ── m2u tunnel header: magic(4) + multicast group(4), network byte order ──
+    __u8 *m2u = (__u8 *)(udp + 1);
+    if (m2u + 8 > ((__u8 *)data_end))
+        return XDP_PASS;
+
+    __u32 magic = ((__u32)m2u[0] << 24) | ((__u32)m2u[1] << 16) |
+                  ((__u32)m2u[2] << 8)  |  (__u32)m2u[3];
+    if (magic != M2U_MAGIC)
+        return XDP_PASS;
+
+    __u32 group;
+    __builtin_memcpy(&group, m2u + 4, 4);   // network byte order group
+
+    // ── Config map scan: match {group, udp dst port} up to MAX_GROUPS ─────────
     // Entries are populated sequentially; target_ip == 0 means unused slot.
     __u8 matched = 0;
     #pragma unroll
@@ -167,7 +147,7 @@ int mcast(struct xdp_md *ctx)
             struct unicast_config *cfg = bpf_map_lookup_elem(&config_map, &_k);
             if (!cfg || cfg->target_ip == 0)
                 continue;
-            if (inner_iph->daddr == cfg->target_ip && udp->dest == cfg->target_port)
+            if (group == cfg->target_ip && udp->dest == cfg->target_port)
                 matched = 1;
         }
     }
@@ -175,8 +155,9 @@ int mcast(struct xdp_md *ctx)
     if (!matched)
         return XDP_PASS;
 
-    // ── Match — redirect whole GRE frame to AF_XDP (zero-copy on ENA) ─────────
-    // PacketReplicator::extractUdpPayloadGre() strips headers in userspace.
+    // ── Match — redirect whole frame to AF_XDP (zero-copy on ENA) ────────────
+    // The userspace reader (replicator / mcast_receive) strips Eth/IP/UDP + the
+    // 8-byte m2u header to reach the payload.
     __u32 queue_idx = ctx->rx_queue_index;
     return bpf_redirect_map(&xsks_map, queue_idx, XDP_DROP);
 }
