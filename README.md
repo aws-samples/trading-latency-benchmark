@@ -70,7 +70,7 @@ For fastest deployment and optimal performance, build a pre-tuned AMI first:
 
 ```bash
 cd deployment
-./build-tuned-ami.sh --key-file $SSH_KEY_FILE
+./scripts/build_tuned_ami.sh --key-file $SSH_KEY_FILE
 ```
 
 This creates an AMI with all OS-level optimizations pre-applied (CPU isolation, network tuning, hugepages, etc.). The process takes ~20-30 minutes but eliminates the need to run OS tuning on every deployment.
@@ -145,7 +145,7 @@ Or use the automated build script (recommended):
 
 ```bash
 cd deployment
-./build-tuned-ami.sh --instance-type c7i.4xlarge --key-file $SSH_KEY_FILE
+./scripts/build_tuned_ami.sh --instance-type c7i.4xlarge --key-file $SSH_KEY_FILE
 ```
 
 
@@ -193,7 +193,7 @@ After running the tests, collect and analyze the latency results:
 
 ```bash
 cd ..
-./show_latency_reports.sh --inventory $(PWD)/ansible/inventory/inventory.aws_ec2.yml --key $SSH_KEY_FILE
+./scripts/show_latency_reports.sh --inventory $(PWD)/ansible/inventory/inventory.aws_ec2.yml --key $SSH_KEY_FILE
 ```
 
 This script will:

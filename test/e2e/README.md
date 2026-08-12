@@ -25,7 +25,7 @@ export SSH_KEY_FILE=~/.ssh/virginia.pem
 
 ## What It Does
 
-1. Builds an OS-tuned AMI via `deployment/build-tuned-ami.sh`
+1. Builds an OS-tuned AMI via `deployment/scripts/build_tuned_ami.sh`
 2. Deploys a single EC2 instance (client + server on localhost) using CDK
 3. Provisions the instance with Java client and Rust server via Ansible
 4. Applies OS tuning (CPU isolation, network, memory)

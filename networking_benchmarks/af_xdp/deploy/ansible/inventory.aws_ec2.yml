@@ -1,0 +1,26 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+
+plugin: amazon.aws.aws_ec2
+
+# Dynamic inventory from EC2 tags set by FleetStack.
+# Set AWS_DEFAULT_REGION or pass --aws-region to ansible-playbook.
+
+include_filters:
+  - tag:Role:
+      - source
+      - replicator
+      - destination
+
+hostnames:
+  - ip-address
+
+compose:
+  ansible_host: public_ip_address
+  ansible_user: "'ec2-user'"
+  ansible_ssh_private_key_file: "lookup('env', 'SSH_KEY_FILE')"
+
+groups:
+  source:       "tags.Role == 'source'"
+  replicator:   "tags.Role == 'replicator'"
+  destination:  "tags.Role == 'destination'"

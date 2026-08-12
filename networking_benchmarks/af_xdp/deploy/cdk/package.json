@@ -1,0 +1,21 @@
+{
+  "name": "af-xdp-benchmark-cdk",
+  "version": "0.1.0",
+  "scripts": {
+    "build": "tsc",
+    "cdk": "cdk",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy",
+    "destroy": "cdk destroy"
+  },
+  "devDependencies": {
+    "@types/node": "20.7.1",
+    "ts-node": "^10.9.1",
+    "typescript": "~5.2.2"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.189.1",
+    "constructs": "^10.3.0",
+    "source-map-support": "^0.5.21"
+  }
+}

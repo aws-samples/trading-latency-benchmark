@@ -432,6 +432,14 @@ Cargo.lock
 *.o
 *.obj
 
+# AF_XDP Build artifacts
+replicator
+rtt_kernel
+mcast_send
+mcast_receive
+replicator_ctl
+udp_ping
+
 # Precompiled Headers
 *.gch
 *.pch

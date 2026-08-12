@@ -1,0 +1,64 @@
+---
+# Run pytest integration test suite on all nodes.
+#
+# Verifies binaries, control protocol, data echo, and RTT measurement.
+# Requires: provision.yaml completed (or baked AMI with binaries).
+#
+# Usage:
+# Usage (run from af_xdp/dev/ansible/):
+#   ansible-playbook -i inventory.aws_ec2.yml run_tests.yaml
+#   ansible-playbook -i inventory.aws_ec2.yml run_tests.yaml --limit replicator
+
+- name: Run integration test suite
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  tasks:
+
+    - name: Ensure pytest is installed
+      ansible.builtin.pip:
+        name: pytest
+        state: present
+
+    # The pytest suite spawns its own kernel-mode replicator on control port
+    # 12345 — the same port the production replicator.service binds. Stop the
+    # service for the duration of the tests, then always bring it back.
+    - name: Run integration tests (service stopped during pytest)
+      block:
+
+        - name: Stop replicator.service for tests
+          ansible.builtin.systemd:
+            name: replicator.service
+            state: stopped
+          failed_when: false
+
+        - name: Run pytest
+          ansible.builtin.shell: |
+            cd /home/ec2-user/af_xdp 2>/dev/null || \
+            cd /opt/af-xdp/../trading-latency-benchmark/networking_benchmarks/af_xdp 2>/dev/null || \
+            cd /home/ec2-user/trading-latency-benchmark/networking_benchmarks/af_xdp
+            pytest dev/tests/ -v --tb=short 2>&1
+          register: test_result
+          ignore_errors: yes
+
+        - name: Display test results
+          ansible.builtin.debug:
+            msg: "{{ test_result.stdout_lines[-20:] }}"
+
+        - name: Report status
+          ansible.builtin.debug:
+            msg: "{{ inventory_hostname }}: {{ 'PASSED ✅' if test_result.rc == 0 else 'FAILED ❌ (rc=' + test_result.rc | string + ')' }}"
+
+      always:
+        - name: Restart replicator.service after tests
+          ansible.builtin.systemd:
+            name: replicator.service
+            state: restarted
+            daemon_reload: yes
+          failed_when: false
+
+    - name: Fail if any tests failed
+      ansible.builtin.fail:
+        msg: "Tests failed on {{ inventory_hostname }}"
+      when: test_result.rc != 0

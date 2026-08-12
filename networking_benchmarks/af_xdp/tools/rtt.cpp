@@ -1,0 +1,705 @@
+/*
+ * rtt - High-precision RTT measurement client for the AF_XDP benchmark.
+ *
+ * Measures round-trip latency through the packet replicator with minimal
+ * measurement overhead. Timestamps are taken as close to the wire as possible:
+ *
+ *   TX side: CLOCK_REALTIME (clock_gettime) sampled immediately before sendto().
+ *            An invariant-TSC value is also captured at send (reported as
+ *            timestamp_tx="tsc" and used for TSC-only analysis) but is NOT the
+ *            value differenced in the reported RTT. ENA has no TX HW timestamp.
+ *
+ *   RX side (auto-detected at startup):
+ *     1. Kernel software RX timestamp (SOF_TIMESTAMPING_RX_SOFTWARE): CLOCK_REALTIME
+ *        (skb->tstamp = ktime_get_real), recorded in the NAPI receive path
+ *        (netif_receive_skb / net_timestamp_check) as the driver hands the packet
+ *        to the stack - before the socket receive-queue enqueue. Removes socket-queue
+ *        + poll/schedule jitter while staying in the CLOCK_REALTIME domain.
+ *     2. Userspace fallback (clock_gettime after recvmsg) if no cmsg timestamp.
+ *
+ *   RTT = rx_realtime - tx_realtime: a single-domain delta on one host, so no
+ *   cross-host clock sync is needed. HW PHC timestamps are deliberately NOT used
+ *   here - they live in a separate wall-clock epoch and are only needed for
+ *   one-way (multicast) latency across phc2sys/chrony-synced hosts.
+ *
+ * Design:
+ *   - Lock-free preallocated slot array indexed by sequence ID (no map, no mutex)
+ *   - Busy-poll receive with SO_BUSY_POLL (no poll()/select() wakeup jitter)
+ *   - CPU pinning for send and receive threads
+ *   - In-process control subscription (no system() to external binary)
+ *   - Warmup phase excluded from statistics
+ *   - Coordinated omission tracking (intended vs actual send time)
+ *   - Pacing via clock_nanosleep(TIMER_ABSTIME)
+ *
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: MIT-0
+ */
+
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <numeric>
+#include <cstring>
+#include <cstdint>
+#include <cstdio>
+#include <atomic>
+#include <thread>
+#include <chrono>
+
+#include <unistd.h>
+#include <signal.h>
+#include <sched.h>
+#include <time.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <linux/net_tstamp.h>
+#include <linux/sockios.h>
+#include <linux/ethtool.h>
+#include <net/if.h>
+#include <immintrin.h>  // _mm_pause for busy-poll spin
+
+#include "ControlPort.hpp"
+#ifndef KERNEL_MODE_ONLY
+#include "XdpTxSend.hpp"   // AF_XDP zero-copy TX backend (full builds only)
+#endif
+
+// ---------------------------------------------------------------------------
+// TSC calibration
+// ---------------------------------------------------------------------------
+static inline uint64_t rdtsc() {
+    uint32_t lo, hi;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
+struct TscCalibration {
+    double ns_per_tick;  // multiply tsc delta by this to get nanoseconds
+
+    void calibrate() {
+        // Warm up
+        rdtsc();
+        struct timespec ts1, ts2;
+        clock_gettime(CLOCK_MONOTONIC, &ts1);
+        uint64_t tsc1 = rdtsc();
+        // Spin ~50ms
+        struct timespec delay = {0, 50000000};
+        clock_nanosleep(CLOCK_MONOTONIC, 0, &delay, nullptr);
+        uint64_t tsc2 = rdtsc();
+        clock_gettime(CLOCK_MONOTONIC, &ts2);
+
+        int64_t elapsed_ns = (ts2.tv_sec - ts1.tv_sec) * 1000000000LL +
+                             (ts2.tv_nsec - ts1.tv_nsec);
+        uint64_t tsc_delta = tsc2 - tsc1;
+        ns_per_tick = static_cast<double>(elapsed_ns) / static_cast<double>(tsc_delta);
+    }
+
+    int64_t tsc_to_ns(uint64_t tsc_val) const {
+        return static_cast<int64_t>(static_cast<double>(tsc_val) * ns_per_tick);
+    }
+};
+
+static TscCalibration g_tsc;
+
+// ---------------------------------------------------------------------------
+// Timestamp source detection and RX timestamping
+// ---------------------------------------------------------------------------
+enum class RxTimestampMode { HW_PHC, SW_KERNEL, USERSPACE };
+
+static RxTimestampMode detect_timestamp_mode(int sock_fd) {
+    // For RTT the send and receive timestamps must share one clock domain. The TX
+    // side stamps CLOCK_REALTIME (clock_gettime before sendto), so we pick a RX
+    // timestamp in the same domain:
+    //   1. Kernel software RX timestamp (SOF_TIMESTAMPING_RX_SOFTWARE) - CLOCK_REALTIME
+    //      (skb->tstamp = ktime_get_real), recorded in the NAPI receive path
+    //      (netif_receive_skb / net_timestamp_check) as the driver hands the packet
+    //      to the stack, before the socket receive-queue enqueue. Removes socket-queue
+    //      + poll/schedule jitter while staying in the CLOCK_REALTIME domain.
+    //   2. Userspace fallback (clock_gettime after recvmsg returns).
+    //
+    // HW PHC timestamps are deliberately NOT enabled here: they use a separate
+    // wall-clock epoch and are only needed for one-way (multicast) latency.
+
+    int sw_flags = SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_SOFTWARE;
+    if (setsockopt(sock_fd, SOL_SOCKET, SO_TIMESTAMPING, &sw_flags, sizeof(sw_flags)) == 0) {
+        // Also enable the older SO_TIMESTAMP as a belt-and-suspenders (some kernels
+        // only populate SCM_TIMESTAMP, not SCM_TIMESTAMPING, for UDP)
+        int one = 1;
+        setsockopt(sock_fd, SOL_SOCKET, SO_TIMESTAMP, &one, sizeof(one));
+        std::cout << "Timestamp mode: kernel software RX (CLOCK_REALTIME, recorded in the NAPI netif_receive_skb path)"
+                  << std::endl;
+        return RxTimestampMode::SW_KERNEL;
+    }
+
+    std::cout << "Timestamp mode: userspace fallback (clock_gettime CLOCK_MONOTONIC after recvmsg)" << std::endl;
+    return RxTimestampMode::USERSPACE;
+}
+
+// Extract RX timestamp from cmsg ancillary data (handles both new and old API)
+static int64_t extract_rx_timestamp_ns(struct msghdr* msg) {
+    for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+        // New API: SO_TIMESTAMPING -> array of 3 timespecs [SW, deprecated, HW]
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SO_TIMESTAMPING) {
+            struct timespec* ts = reinterpret_cast<struct timespec*>(CMSG_DATA(cmsg));
+            // Prefer HW (index 2), fall back to SW (index 0)
+            if (ts[2].tv_sec != 0 || ts[2].tv_nsec != 0) {
+                return ts[2].tv_sec * 1000000000LL + ts[2].tv_nsec;
+            }
+            if (ts[0].tv_sec != 0 || ts[0].tv_nsec != 0) {
+                return ts[0].tv_sec * 1000000000LL + ts[0].tv_nsec;
+            }
+        }
+        // Old API: SO_TIMESTAMP -> struct timeval (microsecond precision, CLOCK_REALTIME-ish)
+        // We convert to ns. Note: this is wall-clock, but for short RTTs the mono/wall
+        // delta is negligible (no NTP step during a 10-second run).
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_TIMESTAMP) {
+            struct timeval* tv = reinterpret_cast<struct timeval*>(CMSG_DATA(cmsg));
+            return tv->tv_sec * 1000000000LL + tv->tv_usec * 1000LL;
+        }
+    }
+    return -1;  // No timestamp found
+}
+
+// ---------------------------------------------------------------------------
+// Lock-free timing slots
+// ---------------------------------------------------------------------------
+struct alignas(64) TimingSlot {
+    uint64_t send_tsc;            // invariant TSC at send - captured only (reported as
+                                  //   timestamp_tx="tsc"); NOT differenced in the reported RTT
+    int64_t  send_monotonic_ns;   // MISNOMER: actually CLOCK_REALTIME at send (see sender);
+                                  //   this is the TX stamp used in the RTT
+    uint64_t intended_send_ns;    // intended send time (coordinated-omission baseline)
+    int64_t  send_mono_ns;        // CLOCK_MONOTONIC at actual send (used by --xdp-rx RTT)
+    int64_t  recv_ns;             // RX timestamp (ns): kernel SW SO_TIMESTAMPING (CLOCK_REALTIME),
+                                  //   userspace CLOCK_MONOTONIC fallback, or XDP ktime (--xdp-rx)
+    uint8_t  received;            // 1 if response arrived
+};
+
+// ---------------------------------------------------------------------------
+// Message encoding (wire-compatible with the existing market_data_provider_client)
+// ---------------------------------------------------------------------------
+static constexpr size_t TRADE_ID_OFFSET = 38;
+static constexpr size_t TRADE_ID_DIGITS = 10;
+
+static const char* MSG_TEMPLATE =
+    R"({"e":"trade","E":1234567890123,"s":"BTC-USDT","t":0000000000,"p":"45000","q":"1.5","b":1000000001,"a":1000000002,"T":1234567890000,"S":"1","X":"MARKET"})";
+static size_t MSG_LEN = 0;  // set at init
+
+// rtt --xdp-rx wire header (KEEP IN SYNC with src/xdp/ucast.c): the first bytes of
+// the UDP payload carry [0..3] magic, [4..11] xdp_rx_ns (stamped by the XDP program
+// at echo ingress, host order). TRADE_ID_OFFSET (38) is past this header, so the
+// seq digits are unaffected.
+static constexpr uint32_t RTT_MAGIC = 0x58545452u;   // "RTTX" little-endian
+static constexpr size_t   RTT_HDR_LEN = 12;
+static char g_probe[256];                            // probe template (magic patched for --xdp-rx)
+
+static void encode_message(char* buf, uint64_t seq_id) {
+    memcpy(buf, g_probe, MSG_LEN);
+    char* pos = buf + TRADE_ID_OFFSET;
+    for (int i = TRADE_ID_DIGITS - 1; i >= 0; --i) {
+        pos[i] = '0' + (seq_id % 10);
+        seq_id /= 10;
+    }
+}
+
+static uint64_t decode_seq_id(const char* buf, size_t len) {
+    if (len < TRADE_ID_OFFSET + TRADE_ID_DIGITS) return 0;
+    uint64_t id = 0;
+    const char* pos = buf + TRADE_ID_OFFSET;
+    for (size_t i = 0; i < TRADE_ID_DIGITS; ++i) {
+        if (pos[i] < '0' || pos[i] > '9') return 0;
+        id = id * 10 + (pos[i] - '0');
+    }
+    return id;
+}
+
+// ---------------------------------------------------------------------------
+// Control protocol (in-process, no external binary)
+// ---------------------------------------------------------------------------
+static bool subscribe_to_replicator(const char* replicator_ip, [[maybe_unused]] uint16_t replicator_port,
+                                    const char* local_ip, uint16_t local_port) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return false;
+
+    // Set receive timeout for response
+    struct timeval tv = {2, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in server = {};
+    server.sin_family = AF_INET;
+    server.sin_port = htons(afxdp_control_port());  // control port
+    inet_pton(AF_INET, replicator_ip, &server.sin_addr);
+
+    // Wire format: [1=ADD][4B IP network order][2B port network order]
+    uint8_t msg[7];
+    msg[0] = 1;  // CTRL_ADD_DESTINATION
+    inet_pton(AF_INET, local_ip, &msg[1]);
+    uint16_t port_net = htons(local_port);
+    memcpy(&msg[5], &port_net, 2);
+
+    ssize_t sent = sendto(fd, msg, 7, 0, (struct sockaddr*)&server, sizeof(server));
+    if (sent != 7) { close(fd); return false; }
+
+    // Wait for ACK
+    uint8_t ack = 0;
+    ssize_t r = recv(fd, &ack, 1, 0);
+    close(fd);
+
+    if (r == 1 && ack == 1) {
+        std::cout << "Subscribed to replicator at " << replicator_ip << ":9000" << std::endl;
+        return true;
+    }
+
+    // Retry once
+    std::cerr << "Subscription failed (ack=" << (int)ack << "), retrying..." << std::endl;
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    sent = sendto(fd, msg, 7, 0, (struct sockaddr*)&server, sizeof(server));
+    if (sent == 7) { r = recv(fd, &ack, 1, 0); }
+    close(fd);
+    return (r == 1 && ack == 1);
+}
+
+// ---------------------------------------------------------------------------
+// CPU pinning
+// ---------------------------------------------------------------------------
+static void pin_to_cpu(int cpu) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(cpu, &set);
+    if (sched_setaffinity(0, sizeof(set), &set) == 0) {
+        std::cout << "  pinned to CPU " << cpu << std::endl;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Real-time scheduling + memory locking
+// ---------------------------------------------------------------------------
+static void enable_realtime() {
+    // Set SCHED_FIFO priority 80 (not 99 -- leave room for kernel threads)
+    struct sched_param param = {};
+    param.sched_priority = 80;
+    if (sched_setscheduler(0, SCHED_FIFO, &param) == 0) {
+        std::cout << "  SCHED_FIFO priority 80 enabled" << std::endl;
+    } else {
+        std::cerr << "  Warning: SCHED_FIFO failed (need root/CAP_SYS_NICE), continuing with SCHED_OTHER" << std::endl;
+    }
+
+    // Lock all current and future pages to prevent page faults during measurement
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0) {
+        std::cout << "  mlockall enabled (no page faults during measurement)" << std::endl;
+    } else {
+        std::cerr << "  Warning: mlockall failed (need root/CAP_IPC_LOCK)" << std::endl;
+    }
+}
+
+// Safety alarm: auto-kill if stuck in RT spin loop (prevents system lockup)
+static void alarm_handler(int) {
+    // Force exit -- RT thread may be spinning and blocking normal shutdown
+    _exit(2);
+}
+
+static void set_safety_alarm(uint64_t total_msgs, uint64_t rate_per_sec) {
+    // Expected runtime + generous 30s headroom
+    unsigned int timeout_sec = static_cast<unsigned int>(total_msgs / rate_per_sec) + 30;
+    signal(SIGALRM, alarm_handler);
+    alarm(timeout_sec);
+    std::cout << "  safety alarm: " << timeout_sec << "s" << std::endl;
+}
+
+// ---------------------------------------------------------------------------
+// Global state
+// ---------------------------------------------------------------------------
+static volatile bool g_running = true;
+static void sig_handler(int) { g_running = false; }
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+int main(int argc, char* argv[]) {
+    // Separate optional flags (--xdp-tx[=queue], --iface <name>) from positionals.
+    bool use_xdp_tx = false;
+    bool xdp_rx = false;   // --xdp-rx: read the XDP-stamped ingress time from the payload
+    [[maybe_unused]] int xdp_queue = 1;   // avoid queue 0 (owned by the local ucast replicator's AF_XDP socket)
+    std::string iface;
+    std::vector<const char*> pos;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--xdp-tx")                    { use_xdp_tx = true; }
+        else if (a.rfind("--xdp-tx=", 0) == 0)  { use_xdp_tx = true; xdp_queue = atoi(a.c_str() + 9); }
+        else if (a == "--iface" && i + 1 < argc){ iface = argv[++i]; }
+        else if (a == "--xdp-rx")               { xdp_rx = true; }
+        else                                     { pos.push_back(argv[i]); }
+    }
+
+    if (pos.size() < 7 || pos.size() > 10) {
+        std::cerr << "Usage: " << pos[0]
+                  << " <replicator_ip> <replicator_port> <local_ip> <local_port>"
+                  << " <total_messages> <rate_per_sec>"
+                  << " [warmup=10000] [send_cpu=1] [recv_cpu=2]"
+                  << " [--xdp-tx[=queue]] [--iface <name>] [--xdp-rx]" << std::endl;
+        return 1;
+    }
+
+    const char* replicator_ip = pos[1];
+    uint16_t    replicator_port = static_cast<uint16_t>(atoi(pos[2]));
+    const char* local_ip = pos[3];
+    uint16_t    local_port = static_cast<uint16_t>(atoi(pos[4]));
+    uint64_t    total_msgs = strtoull(pos[5], nullptr, 10);
+    uint64_t    rate_per_sec = strtoull(pos[6], nullptr, 10);
+    uint64_t    warmup = (pos.size() > 7) ? strtoull(pos[7], nullptr, 10) : 10000;
+    int         send_cpu = (pos.size() > 8) ? atoi(pos[8]) : 1;
+    int         recv_cpu = (pos.size() > 9) ? atoi(pos[9]) : 2;
+
+#ifdef KERNEL_MODE_ONLY
+    if (use_xdp_tx) { std::cerr << "--xdp-tx not available in this (kernel-mode) build" << std::endl; return 1; }
+#endif
+    if (use_xdp_tx && iface.empty()) { std::cerr << "--xdp-tx requires --iface <name>" << std::endl; return 1; }
+
+    if (total_msgs == 0 || rate_per_sec == 0) {
+        std::cerr << "total_messages and rate must be positive" << std::endl;
+        return 1;
+    }
+
+    signal(SIGINT, sig_handler);
+    signal(SIGTERM, sig_handler);
+
+    // Initialize message template length + probe buffer. For --xdp-rx, patch the
+    // magic into payload[0..3] and zero the stamp slot [4..11]; the XDP program on
+    // the echo's ingress writes the RX time there. TRADE_ID_OFFSET (38) is past it.
+    MSG_LEN = strlen(MSG_TEMPLATE);
+    memcpy(g_probe, MSG_TEMPLATE, MSG_LEN);
+    if (xdp_rx) {
+        uint32_t m = RTT_MAGIC; memcpy(g_probe, &m, sizeof(m));
+        memset(g_probe + 4, 0, 8);
+    }
+
+    // Calibrate TSC
+    std::cout << "Calibrating TSC..." << std::endl;
+    g_tsc.calibrate();
+    std::cout << "  TSC: " << g_tsc.ns_per_tick << " ns/tick" << std::endl;
+
+    // Allocate timing slots (warmup + measured messages)
+    uint64_t slot_count = warmup + total_msgs;
+    std::vector<TimingSlot> slots(slot_count);
+    memset(slots.data(), 0, slot_count * sizeof(TimingSlot));
+
+    // Create and bind receive socket
+    int recv_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (recv_fd < 0) { perror("socket"); return 1; }
+
+    // Enable busy poll (kernel spins polling NIC queue instead of sleeping for IRQ)
+    // With SCHED_FIFO, we can afford aggressive spinning -- eliminates IRQ wakeup latency
+    int busy_poll_us = 100;
+    setsockopt(recv_fd, SOL_SOCKET, SO_BUSY_POLL, &busy_poll_us, sizeof(busy_poll_us));
+    int prefer_busy_poll = 1;
+    setsockopt(recv_fd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &prefer_busy_poll, sizeof(prefer_busy_poll));
+    int busy_budget = 256;  // packets to process per busy-poll cycle
+    setsockopt(recv_fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &busy_budget, sizeof(busy_budget));
+
+    // Increase receive buffer
+    int rcvbuf = 4 * 1024 * 1024;
+    setsockopt(recv_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
+    struct sockaddr_in bind_addr = {};
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_port = htons(local_port);
+    inet_pton(AF_INET, local_ip, &bind_addr.sin_addr);
+    if (bind(recv_fd, (struct sockaddr*)&bind_addr, sizeof(bind_addr)) < 0) {
+        perror("bind"); close(recv_fd); return 1;
+    }
+
+    // Detect and configure RX timestamp mode. --xdp-rx reads the XDP-stamped time
+    // from the payload instead, so skip kernel/HW RX timestamping.
+    RxTimestampMode ts_mode = RxTimestampMode::USERSPACE;
+    if (xdp_rx) {
+        std::cout << "Timestamp mode: XDP RX ktime (bpf_ktime_get_ns MONOTONIC, stamped at XDP ingress)" << std::endl;
+    } else {
+        ts_mode = detect_timestamp_mode(recv_fd);
+    }
+
+    // Subscribe to the replicator
+    if (!subscribe_to_replicator(replicator_ip, replicator_port, local_ip, local_port)) {
+        std::cerr << "Failed to subscribe to replicator" << std::endl;
+        close(recv_fd); return 1;
+    }
+
+    // Create send socket
+    int send_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (send_fd < 0) { perror("send socket"); close(recv_fd); return 1; }
+
+    struct sockaddr_in dest_addr = {};
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(replicator_port);
+    inet_pton(AF_INET, replicator_ip, &dest_addr.sin_addr);
+
+    // --- Receiver thread ---
+    std::atomic<uint64_t> total_received{0};
+    std::atomic<bool> recv_started{false};
+
+    // Set safety alarm BEFORE enabling RT (alarm fires even if RT thread is spinning)
+    set_safety_alarm(total_msgs + warmup, rate_per_sec);
+
+    std::thread receiver([&]() {
+        pin_to_cpu(recv_cpu);
+        enable_realtime();  // RT scheduling on receiver thread (latency-critical)
+        recv_started.store(true);
+
+        char buf[2048];
+        char ctrl[256];
+        struct iovec iov = { buf, sizeof(buf) };
+        struct msghdr msg = {};
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = ctrl;
+        msg.msg_controllen = sizeof(ctrl);
+
+        while (g_running) {
+            msg.msg_controllen = sizeof(ctrl);  // reset each iteration
+            ssize_t n = recvmsg(recv_fd, &msg, MSG_DONTWAIT);
+            if (n <= 0) {
+                _mm_pause();
+                continue;
+            }
+
+            // Get RX timestamp
+            int64_t rx_ns;
+            if (xdp_rx) {
+                // XDP stamped bpf_ktime_get_ns() into payload[4..11] (host order);
+                // 0 means it was not stamped (old ucast.o / off path) -> dropped by sanity.
+                uint64_t xrx = 0;
+                if (n >= (ssize_t)RTT_HDR_LEN) memcpy(&xrx, buf + 4, sizeof(xrx));
+                rx_ns = static_cast<int64_t>(xrx);
+            } else if (ts_mode == RxTimestampMode::USERSPACE) {
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                rx_ns = now.tv_sec * 1000000000LL + now.tv_nsec;
+            } else {
+                rx_ns = extract_rx_timestamp_ns(&msg);
+                if (rx_ns < 0) {
+                    // Fallback to userspace if cmsg missing
+                    struct timespec now;
+                    clock_gettime(CLOCK_MONOTONIC, &now);
+                    rx_ns = now.tv_sec * 1000000000LL + now.tv_nsec;
+                }
+            }
+
+            uint64_t seq = decode_seq_id(buf, n);
+            if (seq > 0 && seq <= slot_count) {
+                slots[seq - 1].recv_ns = rx_ns;
+                slots[seq - 1].received = 1;
+                total_received.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    });
+
+    // Wait for receiver to start
+    while (!recv_started.load()) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // --- Sender ---
+    std::cout << "Running: " << total_msgs << " messages + " << warmup << " warmup @ "
+              << rate_per_sec << " msg/sec" << std::endl;
+    std::cout << "  send_cpu=" << send_cpu << " recv_cpu=" << recv_cpu << std::endl;
+
+    pin_to_cpu(send_cpu);
+    enable_realtime();  // RT scheduling on sender thread
+
+#ifndef KERNEL_MODE_ONLY
+    XdpTxSend xtx;
+    if (use_xdp_tx) {
+        std::string xerr;
+        if (!xtx.init(iface, xdp_queue, replicator_ip, replicator_port,
+                      g_probe, MSG_LEN, TRADE_ID_OFFSET, xerr)) {
+            std::cerr << "AF_XDP TX init failed (" << xerr
+                      << "); falling back to kernel sendto" << std::endl;
+            use_xdp_tx = false;
+        } else {
+            std::cout << "AF_XDP TX enabled on " << iface << " queue " << xdp_queue << std::endl;
+        }
+    }
+#endif
+
+    char msg_buf[512];
+    uint64_t interval_ns = 1000000000ULL / rate_per_sec;
+
+    struct timespec start_ts;
+    clock_gettime(CLOCK_MONOTONIC, &start_ts);
+    uint64_t start_ns = start_ts.tv_sec * 1000000000ULL + start_ts.tv_nsec;
+
+    for (uint64_t i = 1; i <= slot_count && g_running; ++i) {
+        uint64_t intended_ns = start_ns + (i - 1) * interval_ns;
+
+        // Pace via absolute deadline
+        struct timespec deadline;
+        deadline.tv_sec = intended_ns / 1000000000ULL;
+        deadline.tv_nsec = intended_ns % 1000000000ULL;
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr);
+
+        // Actual-send CLOCK_MONOTONIC (used by --xdp-rx, whose RX stamp is bpf_ktime MONOTONIC)
+        int64_t send_mono_ns = 0;
+        if (xdp_rx) { struct timespec m; clock_gettime(CLOCK_MONOTONIC, &m); send_mono_ns = m.tv_sec * 1000000000LL + m.tv_nsec; }
+
+        // Send: AF_XDP zero-copy TX (kernel-bypass) or kernel sendto.
+        uint64_t send_tsc; int64_t send_rt_ns;
+#ifndef KERNEL_MODE_ONLY
+        if (use_xdp_tx) {
+            xtx.send(i, send_tsc, send_rt_ns);
+        } else
+#endif
+        {
+            encode_message(msg_buf, i);
+            send_tsc = rdtsc();
+            struct timespec send_ts;
+            clock_gettime(CLOCK_REALTIME, &send_ts);
+            send_rt_ns = send_ts.tv_sec * 1000000000LL + send_ts.tv_nsec;
+            sendto(send_fd, msg_buf, MSG_LEN, 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+        }
+
+        // Record both TSC and CLOCK_REALTIME (same domain as the RX SO_TIMESTAMP)
+        slots[i - 1].send_tsc = send_tsc;
+        slots[i - 1].send_monotonic_ns = send_rt_ns;
+        slots[i - 1].send_mono_ns = send_mono_ns;
+        slots[i - 1].intended_send_ns = intended_ns;
+
+        // Progress every 10K
+        if (i % 10000 == 0) {
+            std::cout << "  sent " << i << "/" << slot_count
+                      << " (received=" << total_received.load() << ")" << std::endl;
+        }
+    }
+
+    // Wait for stragglers (up to 3 seconds)
+    std::cout << "Sending complete. Waiting for responses..." << std::endl;
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    g_running = false;
+    receiver.join();
+    close(send_fd);
+    close(recv_fd);
+
+    // --- Compute statistics (skip warmup) ---
+    std::vector<int64_t> service_rtts;   // recv_ns - send_monotonic_ns (same clock domain)
+    std::vector<int64_t> response_rtts;  // recv_ns - intended_send_ns (coordinated omission)
+    uint64_t lost = 0;
+
+    for (uint64_t i = warmup; i < slot_count; ++i) {
+        if (!slots[i].received) { ++lost; continue; }
+
+        // Default: RX kernel-SW timestamp - TX CLOCK_REALTIME (both REALTIME;
+        // send_monotonic_ns is a misnomer - it holds REALTIME).
+        // --xdp-rx: RX = XDP bpf_ktime (MONOTONIC) - TX CLOCK_MONOTONIC send.
+        int64_t send_ref = xdp_rx ? slots[i].send_mono_ns : slots[i].send_monotonic_ns;
+        int64_t rtt = slots[i].recv_ns - send_ref;
+        if (rtt > 0 && rtt < 100000000) {  // sanity: 0 < RTT < 100ms (unstamped -> rtt<=0, dropped)
+            service_rtts.push_back(rtt);
+        }
+
+        int64_t resp_rtt = slots[i].recv_ns - static_cast<int64_t>(slots[i].intended_send_ns);
+        if (resp_rtt > 0 && resp_rtt < 100000000) {
+            response_rtts.push_back(resp_rtt);
+        }
+    }
+
+    // Sort for percentiles
+    std::sort(service_rtts.begin(), service_rtts.end());
+    std::sort(response_rtts.begin(), response_rtts.end());
+
+    auto percentile = [](const std::vector<int64_t>& v, double p) -> int64_t {
+        if (v.empty()) return 0;
+        size_t idx = std::min(v.size() - 1, static_cast<size_t>(v.size() * p / 100.0));
+        return v[idx];
+    };
+
+    auto mean = [](const std::vector<int64_t>& v) -> double {
+        if (v.empty()) return 0;
+        return static_cast<double>(std::accumulate(v.begin(), v.end(), 0LL)) / v.size();
+    };
+
+    // --- Print results ---
+    uint64_t measured = total_msgs;
+    std::cout << "\n=== RTT Latency Results  ===" << std::endl;
+    std::cout << "Messages: " << measured << " measured (+ " << warmup << " warmup)" << std::endl;
+    std::cout << "Rate: " << rate_per_sec << " msg/sec" << std::endl;
+    std::cout << "Lost: " << lost << " (" << (100.0 * lost / measured) << "%)" << std::endl;
+    if (xdp_rx) {
+        std::cout << "Timestamp mode: XDP RX ktime (bpf_ktime_get_ns MONOTONIC, stamped at XDP ingress)" << std::endl;
+        std::cout << "TX timestamp: CLOCK_MONOTONIC (used for --xdp-rx RTT)" << std::endl;
+    } else {
+        std::cout << "Timestamp mode: "
+                  << (ts_mode == RxTimestampMode::HW_PHC ? "Nitro PHC (hardware)" :
+                      ts_mode == RxTimestampMode::SW_KERNEL ? "kernel software" : "userspace")
+                  << std::endl;
+        std::cout << "TX timestamp: CLOCK_REALTIME (used for RTT); invariant TSC also captured, "
+                  << g_tsc.ns_per_tick << " ns/tick" << std::endl;
+    }
+
+    if (!service_rtts.empty()) {
+        std::cout << "\nService-time RTT (recv - actual_send):" << std::endl;
+        std::cout << "  Min:    " << service_rtts.front() / 1000 << " us" << std::endl;
+        std::cout << "  Mean:   " << static_cast<int64_t>(mean(service_rtts) / 1000) << " us" << std::endl;
+        std::cout << "  p50:    " << percentile(service_rtts, 50) / 1000 << " us" << std::endl;
+        std::cout << "  p90:    " << percentile(service_rtts, 90) / 1000 << " us" << std::endl;
+        std::cout << "  p95:    " << percentile(service_rtts, 95) / 1000 << " us" << std::endl;
+        std::cout << "  p99:    " << percentile(service_rtts, 99) / 1000 << " us" << std::endl;
+        std::cout << "  p99.9:  " << percentile(service_rtts, 99.9) / 1000 << " us" << std::endl;
+        std::cout << "  Max:    " << service_rtts.back() / 1000 << " us" << std::endl;
+    }
+
+    if (!response_rtts.empty()) {
+        std::cout << "\nResponse-time RTT (recv - intended_send, incl. coordinated omission):" << std::endl;
+        std::cout << "  p50:    " << percentile(response_rtts, 50) / 1000 << " us" << std::endl;
+        std::cout << "  p99:    " << percentile(response_rtts, 99) / 1000 << " us" << std::endl;
+        std::cout << "  p99.9:  " << percentile(response_rtts, 99.9) / 1000 << " us" << std::endl;
+    }
+
+    std::cout << "====================================================" << std::endl;
+
+    // --- Write JSON summary ---
+    std::string json_file = "/tmp/rtt_results.json";
+    FILE* jf = fopen(json_file.c_str(), "w");
+    if (jf) {
+        fprintf(jf, "{\n");
+        fprintf(jf, "  \"client\": \"rtt\",\n");
+        fprintf(jf, "  \"messages\": %lu,\n", measured);
+        fprintf(jf, "  \"warmup\": %lu,\n", warmup);
+        fprintf(jf, "  \"rate_mps\": %lu,\n", rate_per_sec);
+        fprintf(jf, "  \"lost\": %lu,\n", lost);
+        fprintf(jf, "  \"loss_pct\": %.4f,\n", 100.0 * lost / measured);
+        fprintf(jf, "  \"timestamp_rx\": \"%s\",\n",
+                xdp_rx ? "xdp_ktime_mono" :
+                ts_mode == RxTimestampMode::HW_PHC ? "nitro_phc_hw" :
+                ts_mode == RxTimestampMode::SW_KERNEL ? "kernel_sw" : "userspace");
+        fprintf(jf, "  \"timestamp_tx\": \"%s\",\n", xdp_rx ? "clock_monotonic" : "tsc");
+        fprintf(jf, "  \"tx_path\": \"%s\",\n", use_xdp_tx ? "af_xdp" : "kernel");
+        fprintf(jf, "  \"tsc_ns_per_tick\": %.6f%s\n", g_tsc.ns_per_tick,
+                (service_rtts.empty() && response_rtts.empty()) ? "" : ",");
+        if (!service_rtts.empty()) {
+            fprintf(jf, "  \"service_rtt_us\": {\n");
+            fprintf(jf, "    \"min\": %ld,\n", service_rtts.front() / 1000);
+            fprintf(jf, "    \"mean\": %ld,\n", static_cast<int64_t>(mean(service_rtts) / 1000));
+            fprintf(jf, "    \"p50\": %ld,\n", percentile(service_rtts, 50) / 1000);
+            fprintf(jf, "    \"p90\": %ld,\n", percentile(service_rtts, 90) / 1000);
+            fprintf(jf, "    \"p95\": %ld,\n", percentile(service_rtts, 95) / 1000);
+            fprintf(jf, "    \"p99\": %ld,\n", percentile(service_rtts, 99) / 1000);
+            fprintf(jf, "    \"p999\": %ld,\n", percentile(service_rtts, 99.9) / 1000);
+            fprintf(jf, "    \"max\": %ld\n", service_rtts.back() / 1000);
+            fprintf(jf, "  }%s\n", response_rtts.empty() ? "" : ",");
+        }
+        if (!response_rtts.empty()) {
+            fprintf(jf, "  \"response_rtt_us\": {\n");
+            fprintf(jf, "    \"p50\": %ld,\n", percentile(response_rtts, 50) / 1000);
+            fprintf(jf, "    \"p99\": %ld,\n", percentile(response_rtts, 99) / 1000);
+            fprintf(jf, "    \"p999\": %ld\n", percentile(response_rtts, 99.9) / 1000);
+            fprintf(jf, "  }\n");
+        }
+        fprintf(jf, "}\n");
+        fclose(jf);
+        std::cout << "\nJSON results written to " << json_file << std::endl;
+    }
+
+    return (lost > measured / 10) ? 1 : 0;  // exit 1 if >10% loss
+}

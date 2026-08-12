@@ -1,0 +1,224 @@
+---
+# Runtime provisioning playbook for AF_XDP benchmark fleet.
+#
+# Assumes instances are launched from a baked AMI (built by CDK ami-builder)
+# which already contains: build deps, xdp-tools, benchmark binaries, PTP/chrony
+# config, sysctl tuning, and systemd units.
+#
+# This playbook is self-contained: it adapts the ucast-baked nodes for their
+# mcast roles AND wires the topology. The baked AMI runs replicator.service on
+# every node (ucast mode) which holds AF_XDP queue 0, so mcast_send/mcast_receive
+# would fail "Device or resource busy" — this playbook stops+disables it on the
+# source and destination (pure sender/receiver) as the first step of each play:
+#   source      — stop replicator (free AF_XDP queue) + GRE tunnel to replicator
+#   replicator  — replicator systemd service in mcast mode
+#   destination — stop replicator + multicast group registration + ARP seed
+#   verify      — best-effort datapath probe (udp_send over GRE)
+#
+# Required variable (pass via --extra-vars or inventory host_vars):
+#   replicator_private_ip — private IP of the replicator (GRE tunnel + control channel)
+#
+# Tunable vars (override via --extra-vars):
+#   mcast_group       (default: 224.0.31.50)
+#   base_mcast_group  (default: 224.0.31.50)
+#   data_port         (default: 5000)
+#
+# Usage:
+#   ansible-playbook -i inventory.aws_ec2.yml configure_mcast.yaml \
+#       --extra-vars "replicator_private_ip=10.61.0.5"
+
+# ── Play 1: Source — GRE tunnel to replicator ───────────────────────────────────
+- name: Configure GRE tunnel on source
+  hosts: source
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+    - name: Validate replicator_private_ip is provided
+      ansible.builtin.assert:
+        that:
+          - replicator_private_ip is defined
+          - replicator_private_ip | length > 0
+        fail_msg: "replicator_private_ip must be provided via --extra-vars"
+
+    - name: Free the AF_XDP queue — stop + disable replicator (source is a pure mcast sender)
+      ansible.builtin.systemd:
+        name: replicator.service
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Detach any stale XDP program from the primary NIC
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ip link set dev "$IFACE" xdp off 2>/dev/null || true
+        ip link set dev "$IFACE" xdpgeneric off 2>/dev/null || true
+      changed_when: false
+
+    - name: Check if GRE tunnel already exists
+      ansible.builtin.shell: ip tunnel show gre_feed
+      register: gre_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create GRE tunnel to replicator
+      ansible.builtin.shell: |
+        IFACE=$(ip route show default | awk '/default/ {print $5}' | head -1)
+        LOCAL_IP=$(ip -4 addr show "$IFACE" | awk '/inet / {print $2}' | cut -d/ -f1)
+        ip tunnel add gre_feed mode gre remote {{ replicator_private_ip }} local "$LOCAL_IP" ttl 64
+        ip link set gre_feed up
+        ip route add 224.0.0.0/4 dev gre_feed
+      when: gre_check.rc != 0
+
+    - name: Persist GRE tunnel via NetworkManager dispatcher
+      ansible.builtin.copy:
+        dest: /etc/NetworkManager/dispatcher.d/99-gre-feed
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          IFACE="$1"; EVENT="$2"
+          [ "$EVENT" != "up" ] && exit 0
+          ip route show default | grep -q "$IFACE" || exit 0
+          LOCAL_IP=$(ip -4 addr show "$IFACE" | awk '/inet / {print $2}' | cut -d/ -f1)
+          ip tunnel show gre_feed >/dev/null 2>&1 && exit 0
+          ip tunnel add gre_feed mode gre remote {{ replicator_private_ip }} local "$LOCAL_IP" ttl 64
+          ip link set gre_feed up
+          ip route add 224.0.0.0/4 dev gre_feed
+
+
+# ── Play 2: Replicator — configure and start ──────────────────────────────────
+- name: Start replicator on replicator
+  hosts: replicator
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+    - name: Write replicator config (mcast mode)
+      ansible.builtin.copy:
+        dest: /etc/default/replicator
+        content: |
+          REPLICATOR_MODE=mcast
+          REPLICATOR_PORT={{ data_port | default(5000) }}
+          REPLICATOR_MCAST_GROUP={{ mcast_group | default('224.0.31.50') }}
+
+    - name: Restart replicator service
+      ansible.builtin.systemd:
+        name: replicator.service
+        state: restarted
+        daemon_reload: yes
+
+    - name: Wait for AF_XDP initialisation
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Verify replicator is running
+      ansible.builtin.command: systemctl is-active replicator.service
+      register: pr_active
+      changed_when: false
+      failed_when: pr_active.stdout != 'active'
+
+
+# ── Play 3: Destinations — multicast group registration ────────────────────────
+- name: Register destinations with replicator
+  hosts: destination
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Skip when replicator_private_ip is not defined
+      ansible.builtin.meta: end_play
+      when: replicator_private_ip is not defined
+
+    - name: Free the AF_XDP queue — stop + disable replicator (destination uses mcast_receive)
+      ansible.builtin.systemd:
+        name: replicator.service
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Detach any stale XDP program from the primary NIC
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ip link set dev "$IFACE" xdp off 2>/dev/null || true
+        ip link set dev "$IFACE" xdpgeneric off 2>/dev/null || true
+      changed_when: false
+
+    - name: Compute per-destination multicast group
+      ansible.builtin.set_fact:
+        mcast_group: >-
+          {{ (base_mcast_group | default('224.0.31.50')).split('.')[:-1] | join('.') }}.{{
+             (base_mcast_group | default('224.0.31.50')).split('.')[-1] | int +
+             groups['destination'].index(inventory_hostname) | int }}
+
+    - name: Join multicast group via replicator control channel
+      ansible.builtin.shell: >
+        /opt/af-xdp/replicator_ctl {{ replicator_private_ip }} mcast {{ mcast_group }}
+      register: join_result
+      failed_when: join_result.rc != 0
+
+    - name: Seed ARP toward the replicator (so the replicator learns this
+            destination's MAC for the AF_XDP fan-out; otherwise fan-out frames
+            get a broadcast dst MAC and are dropped by ENA)
+      ansible.builtin.shell: ping -c 3 -W 1 {{ replicator_private_ip }} || true
+      changed_when: false
+
+    - name: Display registration result
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} registered — group {{ mcast_group }}: {{ join_result.stdout }}"
+
+
+# ── Play 4: Verify multicast datapath (source → GRE → replicator XDP) ──────────
+# Inject a short probe burst from the source to the multicast group via udp_send
+# and confirm the replicator's XDP program redirected it — validates the GRE
+# tunnel, the 224/4 route, and the mcast.o filter end-to-end. Skipped when there
+# is no source group (e.g. a replicator-only fleet).
+- name: Verify multicast datapath
+  hosts: replicator
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+    - name: Snapshot XDP redirect count (before probe)
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ethtool -S "$IFACE" | awk '/rx_xdp_redirect/{s+=$2} END{print s+0}'
+      register: xdp_before
+      changed_when: false
+      run_once: true
+      when: groups['source'] | default([]) | length > 0
+
+    - name: Inject multicast probe from source (udp_send over GRE, ~3s)
+      ansible.builtin.shell: >
+        timeout 3 /opt/af-xdp/udp_send
+        {{ mcast_group | default('224.0.31.50') }} {{ data_port | default(5000) }}
+        20 'mcast-verify' --iface gre_feed || true
+      delegate_to: "{{ groups['source'][0] }}"
+      changed_when: false
+      run_once: true
+      when: groups['source'] | default([]) | length > 0
+
+    - name: Snapshot XDP redirect count (after probe)
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ethtool -S "$IFACE" | awk '/rx_xdp_redirect/{s+=$2} END{print s+0}'
+      register: xdp_after
+      changed_when: false
+      run_once: true
+      when: groups['source'] | default([]) | length > 0
+
+    - name: Report multicast datapath probe result (best-effort)
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Datapath probe OK — XDP redirected '
+             ~ ((xdp_after.stdout | int) - (xdp_before.stdout | int)) ~ ' packet(s).'
+             if (xdp_after.stdout | int) > (xdp_before.stdout | int)
+             else 'Note: udp_send probe saw no XDP redirects. This is expected — the '
+                  ~ 'kernel GRE encapsulation of a socket-sent multicast packet does not '
+                  ~ 'match the mcast.o parser (which expects mcast_send framing). This is a '
+                  ~ 'best-effort hint only; the authoritative datapath check is run_mcast.yaml.' }}
+      run_once: true
+      when: groups['source'] | default([]) | length > 0

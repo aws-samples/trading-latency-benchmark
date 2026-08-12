@@ -1,0 +1,124 @@
+---
+# Dev iteration playbook: rsync code to EC2s, rebuild, reset NIC, restart replicator.
+#
+# Use after local code changes to deploy + test on running fleet instances.
+# Handles the full lifecycle: rsync → build → XDP cleanup → service restart.
+#
+# Usage (run from af_xdp/dev/ansible/):
+#   ansible-playbook -i inventory.aws_ec2.yml sync.yaml
+#   ansible-playbook -i inventory.aws_ec2.yml sync.yaml --limit replicator
+
+- name: Dev — rsync, build, restart
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    # dev/ansible/ → af_xdp root is two levels up.
+    src_root: "{{ playbook_dir }}/../.."
+    remote_path: /home/ec2-user/af_xdp
+    af_xdp_path: "{{ remote_path }}"
+
+  tasks:
+
+    - name: Sync source from local repo
+      become: false
+      ansible.builtin.synchronize:
+        src: "{{ src_root }}/"
+        dest: "{{ remote_path }}/"
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=node_modules"
+          - "--exclude=cdk.out"
+          # Never ship host build artifacts: a stale .o/.d (e.g. one compiled
+          # with -DKERNEL_MODE_ONLY) would be seen as up-to-date by make and
+          # relinked into the binary, silently producing a kernel-mode-only
+          # build that rejects ucast/AF_XDP mode.
+          - "--exclude=*.o"
+          - "--exclude=*.d"
+          - "--exclude=/replicator"
+          - "--exclude=/rtt"
+          - "--exclude=/mcast_send"
+          - "--exclude=/mcast_receive"
+          - "--exclude=/replicator_ctl"
+          - "--exclude=/udp_send"
+          - "--checksum"
+
+    # Clean AFTER sync (a pre-sync clean is useless once rsync brings artifacts
+    # back). Fail loudly on build errors — do not pipe to tail, which masks the
+    # non-zero make exit code.
+    - name: Build binaries (clean rebuild)
+      ansible.builtin.shell: |
+        set -o pipefail
+        cd {{ af_xdp_path }}
+        make clean
+        make full 2>&1 | tail -40
+      args:
+        executable: /bin/bash
+      register: build_result
+
+    - name: Verify replicator binary supports AF_XDP (not kernel-mode-only)
+      ansible.builtin.shell: |
+        cd {{ af_xdp_path }}
+        if strings replicator | grep -q "kernel-mode-only configuration"; then
+          echo "ERROR: built replicator is KERNEL_MODE_ONLY; ucast/mcast will fail" >&2
+          exit 1
+        fi
+      changed_when: false
+
+    - name: Install binaries to /opt/af-xdp
+      ansible.builtin.shell: |
+        cd {{ af_xdp_path }}
+        cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/
+        cp -f src/xdp/*.o /opt/af-xdp/xdp/
+
+    - name: Detach stale XDP programs
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ip link set $IFACE xdp off 2>/dev/null || true
+        ip link set $IFACE xdpgeneric off 2>/dev/null || true
+        ip link set $IFACE xdpdrv off 2>/dev/null || true
+        xdp-loader unload $IFACE --all 2>/dev/null || true
+
+    - name: Reset interface
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ip link set $IFACE down
+        sleep 1
+        ip link set $IFACE up
+        sleep 2
+
+    - name: Set RSS indirection to queue 0
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ethtool -X "${IFACE:-eth0}" equal 1
+
+    - name: Restart replicator service
+      ansible.builtin.systemd:
+        name: replicator.service
+        state: restarted
+        daemon_reload: yes
+
+    - name: Wait for startup
+      ansible.builtin.pause:
+        seconds: 6
+
+    - name: Verify replicator is active
+      ansible.builtin.command: systemctl is-active replicator.service
+      register: svc_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Show status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ svc_status.stdout | default('unknown') }}"
+
+    - name: Show journal on failure
+      ansible.builtin.shell: journalctl -u replicator -n 5 --no-pager
+      register: journal
+      when: svc_status.stdout != 'active'
+
+    - name: Report failure
+      ansible.builtin.debug:
+        msg: "{{ journal.stdout_lines }}"
+      when: svc_status.stdout != 'active'

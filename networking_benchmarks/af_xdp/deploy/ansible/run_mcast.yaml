@@ -1,0 +1,124 @@
+---
+# Run multicast fan-out latency benchmark.
+#
+# Topology: source sends GRE-encapsulated mcast → replicator fans out → destinations measure.
+# Requires configure_mcast.yaml to have been run first (adapts source/dest nodes,
+# sets up the GRE tunnel + destination registration).
+#
+# Usage:
+#   ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml \
+#     -e replicator_private_ip=10.61.0.5
+#   ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml \
+#     -e replicator_private_ip=10.61.0.5 -e count=10000 -e interval_us=100
+#
+# Results saved to: ./results/<timestamp>/
+#   <hostname>_mcast.log        — receiver stdout (latency stats)
+#   <hostname>_metadata.json    — node info
+
+- name: Multicast fan-out latency benchmark
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    count: "1000"
+    interval_us: "1000"
+    data_port: "5000"
+    mcast_group: "224.0.31.50"
+    timeout_sec: "60"
+    results_dir: "{{ playbook_dir }}/results/{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+
+  tasks:
+
+    - name: Validate replicator_private_ip
+      ansible.builtin.assert:
+        that: replicator_private_ip is defined
+        fail_msg: "replicator_private_ip required (-e replicator_private_ip=x.x.x.x)"
+      run_once: true
+
+    - name: Create results directory
+      ansible.builtin.file:
+        path: "{{ results_dir }}"
+        state: directory
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    # ── Start receivers on destinations (AF_XDP, background) ───────────────
+    - name: Start mcast_receive on destinations
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        nohup /opt/af-xdp/mcast_receive \
+          -I "$IFACE" \
+          -g {{ mcast_group }} \
+          -p {{ data_port }} \
+          -c {{ count }} \
+          -t {{ timeout_sec }} \
+          > /tmp/mcast_receive.log 2>&1 &
+        echo $!
+      register: receiver_pid
+      when: "'destination' in group_names"
+
+    # ── Wait for XDP attach on destinations ────────────────────────────────
+    - name: Wait for receivers to attach XDP
+      ansible.builtin.pause:
+        seconds: 3
+      run_once: true
+
+    # ── Send from source (GRE-encapsulated to replicator) ──────────────────
+    - name: Run mcast_send from source
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        /opt/af-xdp/mcast_send \
+          -I "$IFACE" \
+          -D {{ replicator_private_ip }} \
+          -g {{ mcast_group }} \
+          -p {{ data_port }} \
+          -c {{ count }} \
+          -i {{ interval_us }}
+      when: "'source' in group_names"
+
+    # ── Wait for receivers to finish ───────────────────────────────────────
+    - name: Wait for receivers to complete
+      ansible.builtin.shell: |
+        # Wait for background mcast_receive to exit (or timeout)
+        for i in $(seq 1 {{ timeout_sec }}); do
+          pgrep -f mcast_receive > /dev/null || break
+          sleep 1
+        done
+      when: "'destination' in group_names"
+
+    # ── Collect results ────────────────────────────────────────────────────
+    - name: Fetch receiver output
+      ansible.builtin.fetch:
+        src: /tmp/mcast_receive.log
+        dest: "{{ results_dir }}/{{ inventory_hostname }}_mcast.log"
+        flat: yes
+      when: "'destination' in group_names"
+
+    # ── Metadata ───────────────────────────────────────────────────────────
+    - name: Collect node metadata
+      ansible.builtin.copy:
+        content: |
+          {{ {
+            "hostname": inventory_hostname,
+            "private_ip": private_ip_address | default(ansible_host),
+            "role": group_names | intersect(['source','replicator','destination']) | first | default('unknown'),
+            "instance_type": tags.InstanceType | default('unknown'),
+            "az": placement.availability_zone | default('unknown'),
+            "region": tags.Region | default(region | default('unknown')),
+            "pg_type": tags.PlacementStrategy | default(None),
+            "pg_name": tags.PlacementGroup | default(None)
+          } | to_nice_json }}
+        dest: "/tmp/node_metadata.json"
+
+    - name: Fetch metadata
+      ansible.builtin.fetch:
+        src: /tmp/node_metadata.json
+        dest: "{{ results_dir }}/{{ inventory_hostname }}_metadata.json"
+        flat: yes
+
+    - name: Display results location
+      ansible.builtin.debug:
+        msg: "Results saved to {{ results_dir }}/"
+      run_once: true

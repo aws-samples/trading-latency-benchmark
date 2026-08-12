@@ -1,0 +1,7 @@
+# Test/results
+deploy/ansible/results/
+__pycache__/
+.pytest_cache/
+
+# Local planning (not for the repo)
+dev/roadmap.md

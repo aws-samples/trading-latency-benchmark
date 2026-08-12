@@ -1,0 +1,212 @@
+---
+# Run unicast NxN RTT benchmark across all replicator nodes.
+#
+# Each node measures RTT to every other node (serial — one host at a time).
+# One JSON result file per pair, all in a single timestamped directory.
+#
+# Usage:
+#   ansible-playbook -i inventory.aws_ec2.yml run_ucast.yaml
+#   ansible-playbook -i inventory.aws_ec2.yml run_ucast.yaml -e count=10000 -e rate=10000
+#
+# Results saved to: ./results/<date>/<time>/
+#   <src_ip>-<dst_ip>.json    — per-pair RTT data
+#   <ip>_metadata.json        — node info (IP, AZ, PG, region)
+
+# ── Play 1: Setup (parallel — create dir, verify peers) ──────────────────────
+- name: Setup
+  hosts: replicator
+  gather_facts: yes
+  become: yes
+  tasks:
+
+    - name: Compute results path (date/time nested)
+      ansible.builtin.set_fact:
+        results_dir: "{{ playbook_dir }}/results/{{ ansible_date_time.date }}/{{ ansible_date_time.hour }}-{{ ansible_date_time.minute }}-{{ ansible_date_time.second }}"
+      run_once: true
+
+    - name: Create results directory
+      ansible.builtin.file:
+        path: "{{ results_dir }}"
+        state: directory
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Ensure replicator is running
+      ansible.builtin.systemd:
+        name: replicator.service
+        state: started
+
+    - name: Verify all peers respond to control protocol
+      ansible.builtin.shell: |
+        for ip in {{ groups['replicator'] | map('extract', hostvars, 'private_ip_address') | join(' ') }}; do
+          /opt/af-xdp/replicator_ctl "$ip" list > /dev/null 2>&1 || exit 1
+        done
+      register: health_check
+      retries: 3
+      delay: 5
+      until: health_check.rc == 0
+      run_once: true
+
+# ── Play 1.5: Prewarm (serial — resolve ARP + warm replicator dest-cache) ─────
+# On a cold fleet the responder must ARP-resolve the client's MAC before it can
+# reply on the AF_XDP fast path; until then (~0.5s) replies use a broadcast MAC
+# (dropped by ENA/VPC) or the kernel fallback, so the first fraction of a run is
+# lost. A short throwaway pass per directed pair resolves ARP and promotes the
+# replicator's dest-cache to the fast-path MAC, so the measured run starts warm.
+# Results are discarded. Uses the same listen_port as the measured run so the
+# exact destination entry is pre-resolved.
+- name: Prewarm data path
+  hosts: replicator
+  serial: 1
+  become: yes
+  gather_facts: no
+
+  vars:
+    prewarm_count: "5000"
+    prewarm_rate: "5000"      # 5000 msgs @ 5000/s ≈ 1s — spans the ARP-resolution window
+    data_port: "5000"
+    listen_port: "19020"
+    send_cpu: "3"
+    recv_cpu: "2"
+
+  tasks:
+
+    - name: Prewarm RTT to each peer (discard results)
+      ansible.builtin.shell: |
+        /opt/af-xdp/rtt \
+          {{ hostvars[item].private_ip_address }} {{ data_port }} \
+          {{ private_ip_address }} {{ listen_port }} \
+          {{ prewarm_count }} {{ prewarm_rate }} 0 {{ send_cpu }} {{ recv_cpu }} \
+          > /dev/null 2>&1 || true
+        rm -f /tmp/rtt_results.json
+      loop: "{{ groups['replicator'] | difference([inventory_hostname]) }}"
+      loop_control:
+        label: "prewarm {{ private_ip_address }} → {{ hostvars[item].private_ip_address }}"
+      changed_when: false
+
+# ── Play 2: Measure (serial — one host at a time, no contention) ──────────────
+- name: Measure RTT
+  hosts: replicator
+  serial: 1
+  become: yes
+  gather_facts: no
+
+  vars:
+    count: "10000"
+    rate: "10000"
+    warmup: "1000"
+    data_port: "5000"
+    listen_port: "19020"
+    # Pin onto isolated cores (see bake-ami.sh): core 1 = replicator poll,
+    # core 2 = rtt receiver, core 3 = rtt sender, core 0 = OS/IRQ.
+    send_cpu: "3"
+    recv_cpu: "2"
+    # Optional AF_XDP zero-copy TX for the send leg (kernel-bypass). The sender
+    # binds a dedicated queue (default 1) so it does not clash with the local
+    # replicator's AF_XDP socket on queue 0. RX stays kernel-socket.
+    xdp_tx: false
+    xdp_tx_queue: "1"
+    # Optional --xdp-rx: read the XDP-stamped ingress time (bpf_ktime, MONOTONIC)
+    # from the echo payload instead of the kernel-SW RX timestamp. Requires the
+    # extended ucast.o loaded by replicator.service (stamps the rtt magic packets).
+    xdp_rx: false
+
+  tasks:
+
+    - name: Run RTT to each peer
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        /opt/af-xdp/rtt \
+          {{ hostvars[item].private_ip_address }} {{ data_port }} \
+          {{ private_ip_address }} {{ listen_port }} \
+          {{ count }} {{ rate }} {{ warmup }} {{ send_cpu }} {{ recv_cpu }} \
+          {% if xdp_tx | bool %}--xdp-tx={{ xdp_tx_queue }} --iface "$IFACE"{% endif %} {% if xdp_rx | bool %}--xdp-rx{% endif %} ; \
+        mv /tmp/rtt_results.json /tmp/{{ private_ip_address }}-{{ hostvars[item].private_ip_address }}.json 2>/dev/null || true
+      loop: "{{ groups['replicator'] | difference([inventory_hostname]) }}"
+      loop_control:
+        label: "{{ private_ip_address }} → {{ hostvars[item].private_ip_address }}{{ ' [xdp-tx]' if xdp_tx | bool else '' }}{{ ' [xdp-rx]' if xdp_rx | bool else '' }}"
+      ignore_errors: yes
+
+    - name: Fetch per-pair results
+      ansible.builtin.fetch:
+        src: "/tmp/{{ private_ip_address }}-{{ hostvars[item].private_ip_address }}.json"
+        dest: "{{ hostvars[groups['replicator'][0]].results_dir }}/{{ private_ip_address }}-{{ hostvars[item].private_ip_address }}.json"
+        flat: yes
+        fail_on_missing: no
+      loop: "{{ groups['replicator'] | difference([inventory_hostname]) }}"
+      loop_control:
+        label: "{{ private_ip_address }} → {{ hostvars[item].private_ip_address }}"
+
+# ── Play 3: Metadata ──────────────────────────────────────────────────────────
+- name: Collect metadata
+  hosts: replicator
+  become: yes
+  gather_facts: no
+
+  tasks:
+
+    - name: Write node metadata
+      ansible.builtin.copy:
+        content: |
+          {{ {
+            "hostname": inventory_hostname,
+            "private_ip": private_ip_address | default(ansible_host),
+            "instance_type": tags.InstanceType | default('unknown'),
+            "az": placement.availability_zone | default('unknown'),
+            "region": placement.region | default('unknown'),
+            "account": owner_id | default('unknown'),
+            "vpc_id": vpc_id | default('unknown'),
+            "pg_type": tags.PlacementStrategy | default(None),
+            "pg_name": tags.PlacementGroup | default(None)
+          } | to_nice_json }}
+        dest: "/tmp/node_metadata.json"
+
+    - name: Fetch metadata
+      ansible.builtin.fetch:
+        src: /tmp/node_metadata.json
+        dest: "{{ hostvars[groups['replicator'][0]].results_dir }}/{{ private_ip_address }}_metadata.json"
+        flat: yes
+
+    - name: Display results location
+      ansible.builtin.debug:
+        msg: "Results saved to {{ hostvars[groups['replicator'][0]].results_dir }}/"
+      run_once: true
+
+# ── Play 4: Generate report (local) ──────────────────────────────────────────
+- name: Generate report
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  tasks:
+
+    - name: Find most recent results dir
+      ansible.builtin.shell: |
+        find {{ playbook_dir }}/results -mindepth 2 -maxdepth 2 -type d | sort | tail -1
+      register: latest_dir
+      changed_when: false
+
+    - name: Run report generator (heatmap + fleet.json for the web viewer)
+      ansible.builtin.shell: |
+        python3 {{ playbook_dir }}/../../report/gen/report.py {{ latest_dir.stdout | trim }}
+        python3 {{ playbook_dir }}/../../report/gen/fleet_json.py {{ latest_dir.stdout | trim }}
+      register: report_output
+      ignore_errors: yes
+
+    - name: Display report
+      ansible.builtin.debug:
+        msg: "{{ report_output.stdout_lines | default(['No output']) }}"
+
+    - name: Show errors (if any)
+      ansible.builtin.debug:
+        msg: "{{ report_output.stderr_lines }}"
+      when: report_output.rc != 0
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: >-
+          Reports: {{ latest_dir.stdout | trim }}/
+          [matrix_report.html, fleet.json, matrix_summary.json]  —
+          view fleet.json in report/web (2D/3D)
+      when: report_output.rc == 0

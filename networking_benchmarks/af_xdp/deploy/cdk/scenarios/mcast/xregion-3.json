@@ -1,0 +1,5 @@
+[
+  {"role": "source", "pgName":"us-a-cpg-src", "pgType": "cluster"},
+  {"role": "replicator", "pgName":"us-a-cpg-src", "pgType": "cluster"},
+  {"role": "destination", "region": "eu-west-2"}
+]

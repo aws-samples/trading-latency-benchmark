@@ -1,0 +1,4 @@
+[
+  {"region": "eu-west-2", "count": 2, "az": "a", "pgType": "cluster", "pgName": "eu-a-cpg-1"},
+  {"region": "us-east-1", "count": 2, "az": "a", "pgType": "cluster", "pgName": "us-a-cpg-1"}
+]
