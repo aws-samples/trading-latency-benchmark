@@ -95,6 +95,29 @@ void Replicator::removeGroupDynamic(uint32_t group_nbo) {
 
 void Replicator::updateKernelFwdTarget(uint32_t group_nbo, const Destination& dest, bool enable) {
     if (fwd_mode_ != 2 || fwd_map_fd_ < 0) return;
+
+    // Kernel forward mode (REPLICATOR_FWD_MODE=kernel) forwards 1:1 via XDP_TX.
+    // Fan-out to multiple destinations is not possible in this mode; refuse to
+    // enable it when more than one destination has joined the group. Use copy or
+    // inplace mode for multi-destination workloads.
+    if (enable) {
+        size_t ndest = 0;
+        {
+            std::lock_guard<std::mutex> lock(destinations_mutex_);
+            auto git = group_destinations_.find(group_nbo);
+            if (git != group_destinations_.end()) ndest = git->second.size();
+        }
+        if (ndest > 1) {
+            std::cerr << "[mcast] REFUSING kernel fwd target: " << ndest
+                      << " destinations joined this group, but REPLICATOR_FWD_MODE=kernel"
+                         " (XDP_TX) can only forward to ONE destination — the others would"
+                         " silently receive nothing.\n"
+                         "        Use REPLICATOR_FWD_MODE=copy or inplace for fan-out to"
+                         " multiple destinations." << std::endl;
+            return;
+        }
+    }
+
     uint32_t slot;
     {
         std::lock_guard<std::mutex> lock(group_mutex_);

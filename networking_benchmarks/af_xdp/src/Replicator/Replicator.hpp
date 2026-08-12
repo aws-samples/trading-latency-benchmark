@@ -125,7 +125,7 @@ private:
     // Protected by destinations_mutex_.
     std::unordered_map<std::string, Destination> all_destinations_;
     
-    // HFT OPTIMIZATIONS: Thread-local destination cache (per group / unicast)
+    // Thread-local destination cache: valid for 100 ms, rebuilt on expiry.
     struct alignas(64) ThreadLocalDestCache {
         // Maps multicast group NBO → destinations interested in that group.
         std::unordered_map<uint32_t, std::vector<Destination>> group_dests;
@@ -135,14 +135,20 @@ private:
     };
     static thread_local ThreadLocalDestCache dest_cache_;
     
-    // HFT OPTIMIZATIONS: CPU affinity for threads
+    // CPU cores assigned to packet-processing threads.
     std::vector<int> cpu_cores_;
     bool enable_cpu_affinity_{true};
     
     // Statistics (per-queue and total) - Cache aligned for performance
     static constexpr int MAX_QUEUES = 8;  // Support up to 8 queues
-    alignas(64) std::array<std::atomic<uint64_t>, MAX_QUEUES> packets_received_per_queue_;
-    alignas(64) std::array<std::atomic<uint64_t>, MAX_QUEUES> packets_sent_per_queue_;
+    // Each per-queue counter occupies its own cache line so queue threads do not
+    // invalidate each other's counters. Necessary for correct scaling when RSS delivers
+    // frames across multiple queues on different cores.
+    struct alignas(64) PaddedCounter {
+        std::atomic<uint64_t> v{0};
+    };
+    alignas(64) std::array<PaddedCounter, MAX_QUEUES> packets_received_per_queue_;
+    alignas(64) std::array<PaddedCounter, MAX_QUEUES> packets_sent_per_queue_;
     alignas(64) std::atomic<uint64_t> packets_received_;
     alignas(64) std::atomic<uint64_t> packets_sent_;
     alignas(64) std::atomic<uint64_t> bytes_received_;

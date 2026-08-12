@@ -32,6 +32,7 @@
 #include <cerrno>
 
 #include <arpa/inet.h>
+#include "common/wire.h"   // S1: single source of the on-wire layout
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
@@ -62,13 +63,13 @@ static constexpr int         DEF_COUNT       = 10000;
 static constexpr int         DEF_INTERVAL_US = 1000;
 static constexpr int         DEF_SIZE        = 64;
 static constexpr int         DEF_TX_QUEUE    = 1;   /* queue 0 is RSS-pinned (carries SSH/ctrl); bind TX off it */
-static constexpr int         HDR_SIZE        = 32;   /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
+static constexpr int         HDR_SIZE        = WIRE_APP_HDR_LEN;   /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
 
 /* Light mcast->ucast tunnel tag ("M2CU"): an 8-byte header {magic, group}
  * prepended to the UDP payload. Kept in
  * sync with src/xdp/mcast.c, src/Replicator.cpp and tools/mcast_receive.cpp. */
-static constexpr uint32_t    M2U_MAGIC       = 0x4D324355;
-static constexpr int         M2U_HDR_LEN     = 8;   /* magic(4) + group(4) */
+static constexpr uint32_t    M2U_MAGIC       = WIRE_M2U_MAGIC;
+static constexpr int         M2U_HDR_LEN     = WIRE_M2U_HDR_LEN;   /* magic(4) + group(4) */
 
 /*
  * Fixed offsets within the ethernet frame for the fields updated per packet.
@@ -81,11 +82,11 @@ static constexpr int         M2U_HDR_LEN     = 8;   /* magic(4) + group(4) */
  *                                zeroed in template — receiver skips hop
  *                                breakdown if still 0)
  */
-static constexpr int PAYLOAD_OFF    = 14 + 20 + 8 + M2U_HDR_LEN;
+static constexpr int PAYLOAD_OFF    = WIRE_PAYLOAD_OFF;
 static constexpr int SEQ_OFF        = PAYLOAD_OFF;
-static constexpr int TS_OFF         = PAYLOAD_OFF + 8;
-static constexpr int REPLICATOR_TS_OFF  = PAYLOAD_OFF + 16;  /* written by replicator, not sender */
-static constexpr int REPLICATOR_TX_TS_OFF = PAYLOAD_OFF + 24;  /* written by replicator at TX submit, not sender */
+static constexpr int TS_OFF         = PAYLOAD_OFF + WIRE_APP_TS_NS_OFF;
+static constexpr int REPLICATOR_TS_OFF  = PAYLOAD_OFF + WIRE_APP_REPL_NS_OFF;  /* written by replicator, not sender */
+static constexpr int REPLICATOR_TX_TS_OFF = PAYLOAD_OFF + WIRE_APP_REPL_TX_NS_OFF;  /* written by replicator at TX submit, not sender */
 
 struct __attribute__((packed)) pkt_hdr {
 	uint64_t seq;

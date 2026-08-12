@@ -1,0 +1,49 @@
+# CI for the AF_XDP control-plane (Go backend/agent/CLI + Svelte web).
+# Reproducible build/test on every change — no AWS credentials needed. The
+# actual AMI bake runs out-of-band (cdk deploy ami-builder / afxdpctl up --bake);
+# make that a workflow_dispatch job with OIDC creds if you want it in CI too.
+name: afxdp-control-plane
+
+on:
+  push:
+    paths:
+      - 'networking_benchmarks/af_xdp/control-plane/**'
+      - '.github/workflows/afxdp-control-plane.yml'
+  pull_request:
+    paths:
+      - 'networking_benchmarks/af_xdp/control-plane/**'
+
+defaults:
+  run:
+    working-directory: networking_benchmarks/af_xdp/control-plane
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: build / vet / test / cli
+        env:
+          GOFLAGS: -mod=mod
+        run: |
+          go build ./...
+          go vet ./...
+          go test -race ./...
+          go build -o /tmp/afxdpctl ./cmd/afxdpctl
+          /tmp/afxdpctl help
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: networking_benchmarks/af_xdp/control-plane/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm run build

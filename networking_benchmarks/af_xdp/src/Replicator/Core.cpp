@@ -33,8 +33,8 @@ Replicator::Replicator(const std::string& interface, const std::string& listenIp
     
     // Initialize per-queue statistics
     for (int i = 0; i < MAX_QUEUES; i++) {
-        packets_received_per_queue_[i].store(0);
-        packets_sent_per_queue_[i].store(0);
+        packets_received_per_queue_[i].v.store(0);
+        packets_sent_per_queue_[i].v.store(0);
     }
     
     // Initialize CPU core assignments
@@ -91,8 +91,8 @@ Replicator::Replicator(Replicator&& other) noexcept
 
     // Copy per-queue statistics arrays
     for (int i = 0; i < MAX_QUEUES; i++) {
-        packets_received_per_queue_[i].store(other.packets_received_per_queue_[i].load());
-        packets_sent_per_queue_[i].store(other.packets_sent_per_queue_[i].load());
+        packets_received_per_queue_[i].v.store(other.packets_received_per_queue_[i].v.load());
+        packets_sent_per_queue_[i].v.store(other.packets_sent_per_queue_[i].v.load());
     }
 
     other.config_map_fd_ = -1;
@@ -140,8 +140,8 @@ Replicator& Replicator::operator=(Replicator&& other) noexcept {
         bytes_sent_            = other.bytes_sent_.load();
 
         for (int i = 0; i < MAX_QUEUES; i++) {
-            packets_received_per_queue_[i].store(other.packets_received_per_queue_[i].load());
-            packets_sent_per_queue_[i].store(other.packets_sent_per_queue_[i].load());
+            packets_received_per_queue_[i].v.store(other.packets_received_per_queue_[i].v.load());
+            packets_sent_per_queue_[i].v.store(other.packets_sent_per_queue_[i].v.load());
         }
 
         other.config_map_fd_         = -1;
@@ -165,7 +165,7 @@ void Replicator::start() {
                 [this, queue_id]() { this->processPacketsForQueue(queue_id); }
             );
             
-            // HFT OPTIMIZATION: Apply CPU affinity to each packet processing thread
+            // Bind each packet-processing thread to its dedicated isolated core.
             if (queue_id < static_cast<int>(cpu_cores_.size())) {
                 setCpuAffinity(*packet_processor_threads_[queue_id], cpu_cores_[queue_id]);
             }
@@ -274,10 +274,8 @@ void Replicator::printStatistics() const {
     std::cout << "=================================" << std::endl;
 }
 
-// HFT OPTIMIZATION IMPLEMENTATIONS
-
 bool Replicator::setCpuAffinity(std::thread& thread, int cpu_core) {
-    // HFT OPTIMIZATION: Bind thread to specific CPU core for deterministic performance
+    // Pin a thread to a specific CPU core and print the result for verification.
     if (!enable_cpu_affinity_) {
         return true;  // CPU affinity disabled
     }
@@ -335,6 +333,40 @@ static std::vector<int> readIsolatedCpus() {
     return parseCpuList(line);
 }
 
+// Read the kernel's ONLINE CPU set. Excludes SMT siblings that nosmt took
+// offline (so we never pin a poll thread to a non-existent core).
+static std::vector<int> readOnlineCpus() {
+    std::ifstream f("/sys/devices/system/cpu/online");
+    if (!f.is_open()) return {};
+    std::string line;
+    std::getline(f, line);
+    return parseCpuList(line);
+}
+
+// CPUs actually servicing the ENA NIC hard IRQs (from /proc/interrupts +
+// /proc/irq/N/smp_affinity_list). Poll threads must avoid these — but we must
+// use the REAL placement, not an assumption (the IRQ usually sits on CPU 0 with
+// the OS, not on the first isolated core).
+static std::vector<int> readEnaIrqCpus() {
+    std::vector<int> cpus;
+    std::ifstream f("/proc/interrupts");
+    if (!f.is_open()) return cpus;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.find("ena") == std::string::npos && line.find("enp") == std::string::npos) continue;
+        std::istringstream iss(line);
+        std::string irqTok;
+        iss >> irqTok;
+        if (irqTok.empty() || irqTok.back() != ':') continue;
+        irqTok.pop_back();
+        std::ifstream af("/proc/irq/" + irqTok + "/smp_affinity_list");
+        std::string al;
+        if (std::getline(af, al))
+            for (int c : parseCpuList(al)) cpus.push_back(c);
+    }
+    return cpus;
+}
+
 void Replicator::initializeCpuCores() {
     // Pin each per-queue packet-processor thread to a dedicated CPU. Core
     // selection is dynamic so the same binary is correct from a c7i.4xlarge up to
@@ -357,12 +389,19 @@ void Replicator::initializeCpuCores() {
         std::cout << "CPU pool from REPLICATOR_CPUS=\"" << env << "\"" << std::endl;
     }
     if (pool.empty()) {
+        // isolated ∩ online, MINUS the cores actually servicing the ENA IRQ.
+        // Previously this blindly skipped isolated[0] assuming the ENA IRQ was
+        // pinned to the first isolated core — but the IRQ sits on CPU 0 with the
+        // OS, so that wasted an isolated core and pushed the poll thread onto the
+        // rtt recv core (collision). Skip the REAL IRQ cores + any offline core.
         std::vector<int> isol = readIsolatedCpus();
-        if (isol.size() >= 2) {
-            pool.assign(isol.begin() + 1, isol.end());  // skip IRQ core (isolated[0])
-            std::cout << "CPU pool from isolated set (skipping IRQ core " << isol[0]
-                      << "): " << isol.size() - 1 << " cores" << std::endl;
-        }
+        std::vector<int> online = readOnlineCpus();
+        std::vector<int> irq = readEnaIrqCpus();
+        auto has = [](const std::vector<int>& v, int x) { for (int e : v) if (e == x) return true; return false; };
+        for (int c : isol)
+            if ((online.empty() || has(online, c)) && !has(irq, c)) pool.push_back(c);
+        if (!pool.empty())
+            std::cout << "CPU pool = isolated ∩ online − ENA-IRQ cores: " << pool.size() << " cores" << std::endl;
     }
     if (pool.empty()) {
         for (int i = 1; i <= num_queues_; ++i) pool.push_back(i);  // legacy fallback

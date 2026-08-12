@@ -72,6 +72,34 @@
         cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/
         cp -f src/xdp/*.o /opt/af-xdp/xdp/
 
+    # Build + (re)start the control-plane Go agent from the synced source, so a
+    # dev iteration yields a working agent without re-baking the AMI. Uses the
+    # Go toolchain baked at /usr/local/go; skips cleanly if absent.
+    - name: Build control-plane agent (Go)
+      ansible.builtin.shell: |
+        set -e
+        CP={{ af_xdp_path }}/control-plane
+        [ -d "$CP/agent" ] || { echo "no control-plane/agent — skip"; exit 0; }
+        [ -x /usr/local/go/bin/go ] || { echo "no Go toolchain — skip agent build"; exit 0; }
+        cd "$CP"
+        GOFLAGS=-mod=mod GOCACHE=/tmp/gocache GOPATH=/tmp/go PATH=/usr/local/go/bin:$PATH \
+          go build -o /opt/af-xdp/afxdp-agent ./agent
+        echo "agent built"
+      args:
+        executable: /bin/bash
+      register: agent_build
+
+    - name: Restart control-plane agent (if built)
+      ansible.builtin.shell: |
+        if [ -x /opt/af-xdp/afxdp-agent ]; then
+          systemctl enable afxdp-agent 2>/dev/null || true
+          systemctl restart afxdp-agent 2>/dev/null || true
+          echo "afxdp-agent: $(systemctl is-active afxdp-agent 2>/dev/null || echo inactive)"
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
     - name: Detach stale XDP programs
       ansible.builtin.shell: |
         IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)

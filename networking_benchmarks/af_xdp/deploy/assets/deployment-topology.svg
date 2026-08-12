@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AF_XDP Benchmark — Deployment Topology
+  Shows: AMI Builder → SSM AMI → Fleet Stack; Control Plane EC2 + EIP + SSM + Fleet Agents
+  SPDX-License-Identifier: MIT-0
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" font-family="Inter, -apple-system, sans-serif" font-size="12">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#555"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#16a34a"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="620" fill="#fafbfc" rx="8"/>
+
+  <!-- Title -->
+  <text x="450" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="#1f2937">AF_XDP Benchmark — Deployment Topology</text>
+
+  <!-- ═══ AMI Builder Section ═══ -->
+  <rect x="30" y="50" width="260" height="180" rx="6" fill="#fff7ed" stroke="#f97316" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="160" y="70" text-anchor="middle" font-size="11" fill="#9a3412" font-weight="bold">AMI BUILDER STACK</text>
+
+  <!-- Builder EC2 -->
+  <rect x="50" y="85" width="120" height="50" rx="4" fill="#fff" stroke="#d97706" stroke-width="1"/>
+  <text x="110" y="107" text-anchor="middle" font-size="10" fill="#92400e">EC2 (c7i.xlarge)</text>
+  <text x="110" y="121" text-anchor="middle" font-size="9" fill="#78716c">bake-ami.sh</text>
+
+  <!-- Lambda -->
+  <rect x="50" y="150" width="120" height="40" rx="4" fill="#fef3c7" stroke="#d97706" stroke-width="1"/>
+  <text x="110" y="170" text-anchor="middle" font-size="10" fill="#92400e">λ CreateAMI</text>
+  <text x="110" y="182" text-anchor="middle" font-size="9" fill="#78716c">+ terminate builder</text>
+
+  <!-- SSM Parameter -->
+  <rect x="190" y="115" width="88" height="50" rx="4" fill="#ecfccb" stroke="#65a30d" stroke-width="1"/>
+  <text x="234" y="135" text-anchor="middle" font-size="9" fill="#3f6212">SSM Parameter</text>
+  <text x="234" y="149" text-anchor="middle" font-size="8" fill="#4d7c0f" font-family="monospace">/af-xdp/ami/</text>
+  <text x="234" y="160" text-anchor="middle" font-size="8" fill="#4d7c0f" font-family="monospace">{region}</text>
+
+  <!-- Arrow: Lambda → SSM -->
+  <line x1="170" y1="170" x2="188" y2="148" stroke="#555" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- Arrow: EC2 → Lambda (WaitCondition) -->
+  <line x1="110" y1="135" x2="110" y2="148" stroke="#555" stroke-width="1" marker-end="url(#arrow)"/>
+  <text x="130" y="144" font-size="8" fill="#78716c">CFN signal</text>
+
+  <!-- ═══ Control Plane Section ═══ -->
+  <rect x="320" y="50" width="250" height="180" rx="6" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="445" y="70" text-anchor="middle" font-size="11" fill="#1e40af" font-weight="bold">CONTROL PLANE STACK</text>
+
+  <!-- CP EC2 -->
+  <rect x="340" y="85" width="130" height="60" rx="4" fill="#fff" stroke="#3b82f6" stroke-width="1"/>
+  <text x="405" y="103" text-anchor="middle" font-size="10" fill="#1e40af">EC2 (t3.small)</text>
+  <text x="405" y="117" text-anchor="middle" font-size="9" fill="#64748b">nats-server :4222</text>
+  <text x="405" y="130" text-anchor="middle" font-size="9" fill="#64748b">backend :8080</text>
+
+  <!-- EIP -->
+  <rect x="490" y="90" width="65" height="30" rx="4" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/>
+  <text x="522" y="109" text-anchor="middle" font-size="9" fill="#1e40af">Elastic IP</text>
+
+  <!-- SSM nats-url -->
+  <rect x="340" y="160" width="130" height="40" rx="4" fill="#ecfccb" stroke="#65a30d" stroke-width="1"/>
+  <text x="405" y="177" text-anchor="middle" font-size="9" fill="#3f6212">SSM Parameters</text>
+  <text x="405" y="190" text-anchor="middle" font-size="8" fill="#4d7c0f" font-family="monospace">/af-xdp/nats-{url,token}</text>
+
+  <!-- Arrow: CP → SSM -->
+  <line x1="405" y1="145" x2="405" y2="158" stroke="#555" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- ═══ Fleet Stack(s) ═══ -->
+  <rect x="30" y="270" width="840" height="320" rx="6" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="450" y="290" text-anchor="middle" font-size="11" fill="#166534" font-weight="bold">FLEET STACK (per scenario — single or cross-region)</text>
+
+  <!-- VPC box (primary) -->
+  <rect x="50" y="305" width="370" height="260" rx="4" fill="#fff" stroke="#16a34a" stroke-width="1"/>
+  <text x="235" y="322" text-anchor="middle" font-size="10" fill="#166534">VPC (us-east-1) — 10.61.0.0/16</text>
+
+  <!-- Placement Group -->
+  <rect x="65" y="335" width="160" height="105" rx="4" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1" stroke-dasharray="3,2"/>
+  <text x="145" y="352" text-anchor="middle" font-size="9" fill="#6d28d9">Cluster PG "cpg-a"</text>
+
+  <!-- Nodes in PG -->
+  <rect x="80" y="362" width="130" height="30" rx="3" fill="#fff" stroke="#7c3aed" stroke-width="0.8"/>
+  <text x="145" y="381" text-anchor="middle" font-size="9" fill="#374151">Node0 c7i.4xlarge</text>
+  <rect x="80" y="400" width="130" height="30" rx="3" fill="#fff" stroke="#7c3aed" stroke-width="0.8"/>
+  <text x="145" y="419" text-anchor="middle" font-size="9" fill="#374151">Node1 c7i.4xlarge</text>
+
+  <!-- Standalone node -->
+  <rect x="245" y="362" width="160" height="30" rx="3" fill="#fff" stroke="#16a34a" stroke-width="0.8"/>
+  <text x="325" y="381" text-anchor="middle" font-size="9" fill="#374151">Node2 (no PG, az-b)</text>
+
+  <!-- Agent icon in each node -->
+  <text x="200" y="379" font-size="8" fill="#2563eb">🔗agent</text>
+  <text x="200" y="417" font-size="8" fill="#2563eb">🔗agent</text>
+  <text x="395" y="379" font-size="8" fill="#2563eb">🔗agent</text>
+
+  <!-- Security Group -->
+  <rect x="65" y="450" width="340" height="40" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="0.8"/>
+  <text x="235" y="467" text-anchor="middle" font-size="9" fill="#854d0e">Security Group: SSH + intra-fleet + UDP 5000 + TCP 12345</text>
+  <text x="235" y="480" text-anchor="middle" font-size="8" fill="#92400e">+ cross-region peer CIDR if secondary exists</text>
+
+  <!-- SSM AMI arrow into Fleet -->
+  <line x1="234" y1="165" x2="234" y2="268" stroke="#65a30d" stroke-width="1.2" marker-end="url(#arrow-green)" stroke-dasharray="4,2"/>
+  <text x="240" y="244" font-size="8" fill="#4d7c0f">AMI from SSM</text>
+
+  <!-- Agent → NATS arrows -->
+  <line x1="340" y1="362" x2="405" y2="232" stroke="#2563eb" stroke-width="1" marker-end="url(#arrow-blue)" stroke-dasharray="3,2"/>
+  <text x="380" y="252" font-size="8" fill="#1e40af">NATS outbound</text>
+  <text x="380" y="262" font-size="8" fill="#1e40af">(SSM discovery)</text>
+
+  <!-- VPC box (secondary — optional) -->
+  <rect x="460" y="305" width="390" height="210" rx="4" fill="#fff" stroke="#16a34a" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="655" y="322" text-anchor="middle" font-size="10" fill="#166534">VPC (eu-west-2, optional) — 10.62.0.0/16</text>
+
+  <!-- Cross-region node -->
+  <rect x="480" y="362" width="160" height="30" rx="3" fill="#fff" stroke="#7c3aed" stroke-width="0.8"/>
+  <text x="560" y="381" text-anchor="middle" font-size="9" fill="#374151">Node3 c7i.2xlarge</text>
+  <rect x="480" y="400" width="160" height="30" rx="3" fill="#fff" stroke="#7c3aed" stroke-width="0.8"/>
+  <text x="560" y="419" text-anchor="middle" font-size="9" fill="#374151">Node4 c7i.2xlarge</text>
+
+  <!-- VPC Peering -->
+  <line x1="420" y1="420" x2="478" y2="420" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <text x="449" y="435" text-anchor="middle" font-size="8" fill="#166534">VPC Peering</text>
+
+  <!-- Operator box -->
+  <rect x="610" y="50" width="260" height="100" rx="6" fill="#fdf4ff" stroke="#a855f7" stroke-width="1.5"/>
+  <text x="740" y="70" text-anchor="middle" font-size="11" fill="#7e22ce" font-weight="bold">OPERATOR</text>
+  <text x="740" y="90" text-anchor="middle" font-size="9" fill="#6b21a8" font-family="monospace">afxdpctl up/sync/down/run/report</text>
+  <text x="740" y="105" text-anchor="middle" font-size="9" fill="#6b21a8">CDK deploy | ansible-playbook</text>
+  <text x="740" y="120" text-anchor="middle" font-size="9" fill="#6b21a8">Browser → http://EIP:8080</text>
+  <text x="740" y="138" text-anchor="middle" font-size="9" fill="#6b21a8" font-family="monospace">$CP_URL → control-plane API</text>
+
+  <!-- Operator → CP -->
+  <line x1="610" y1="105" x2="572" y2="105" stroke="#a855f7" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- Legend -->
+  <rect x="600" y="530" width="260" height="75" rx="4" fill="#f9fafb" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="610" y="547" font-size="9" fill="#374151" font-weight="bold">Legend</text>
+  <line x1="610" y1="560" x2="630" y2="560" stroke="#65a30d" stroke-width="1.2" stroke-dasharray="4,2"/>
+  <text x="635" y="564" font-size="8" fill="#374151">SSM parameter lookup</text>
+  <line x1="610" y1="577" x2="630" y2="577" stroke="#2563eb" stroke-width="1" stroke-dasharray="3,2"/>
+  <text x="635" y="581" font-size="8" fill="#374151">Agent → NATS (outbound)</text>
+  <line x1="610" y1="594" x2="630" y2="594" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="635" y="598" font-size="8" fill="#374151">VPC peering / data path</text>
+</svg>

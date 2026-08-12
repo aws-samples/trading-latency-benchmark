@@ -31,9 +31,11 @@
 #define IPPROTO_UDP 17
 #endif
 
-// Light mcast->ucast tunnel tag ("M2CU"): 8-byte header {magic, group} that
-// Kept in sync with mcast_send.cpp / Replicator.cpp / mcast_receive.cpp.
-#define M2U_MAGIC 0x4D324355
+// Light mcast->ucast tunnel tag ("M2CU"): 8-byte header {magic, group}.
+// The wire format lives in ONE place — src/common/wire.h — shared with
+// mcast_send.cpp / DataPath.cpp / mcast_receive.cpp so the offsets cannot drift.
+#include "../common/wire.h"
+#define M2U_MAGIC WIRE_M2U_MAGIC
 
 // Required for logging in XDP programs
 #define DEBUG 0
@@ -143,6 +145,11 @@ int mcast(struct xdp_md *ctx)
     if (ip_len < 20 || ip_len > 60)
         return XDP_PASS;
 
+    // The XDP_TX path recomputes the checksum over exactly WIRE_IP_IHL_WORDS bytes.
+    // Pass frames with IP options to the kernel; they are uncommon in this workload.
+    if (iph->ihl != WIRE_IP_IHL_NO_OPTIONS)
+        return XDP_PASS;
+
     // ── UDP ────────────────────────────────────────────────────────────────
     struct udphdr *udp = (void *)iph + ip_len;
     if ((void *)(udp + 1) > data_end)
@@ -181,8 +188,13 @@ int mcast(struct xdp_md *ctx)
 
     // ── Kernel-side forward (REPLICATOR_FWD_MODE=kernel) ──────────────────────
     // If a forward target is enabled for the matched slot, rewrite the frame's
-    // headers for the destination, stamp replicator_ns (CLOCK_REALTIME), and
-    // XDP_TX it back out the NIC — no AF_XDP/userspace round-trip.
+    // headers for the destination and XDP_TX it back out the NIC — no AF_XDP or
+    // userspace round-trip.
+    //
+    // Kernel forward (REPLICATOR_FWD_MODE=kernel): rewrite headers and XDP_TX.
+    // Userspace only enables this when exactly one destination is registered;
+    // fan-out to multiple destinations requires bpf_clone_redirect(), which is
+    // not used here. copy or inplace mode handles multi-destination workloads.
     {
         __u32 fk = (__u32)matched_idx;
         struct fwd_target *ft = bpf_map_lookup_elem(&fwd_map, &fk);
@@ -219,6 +231,9 @@ int mcast(struct xdp_md *ctx)
     // ── Default: redirect whole frame to AF_XDP (zero-copy on ENA) ───────────
     // The userspace reader (replicator / mcast_receive) strips Eth/IP/UDP + the
     // 8-byte m2u header to reach the payload.
+    //
+    // No XSK registered for this queue yet (e.g. the brief window between
+    // XDP program load and XSK map update): fall through to the kernel stack.
     __u32 queue_idx = ctx->rx_queue_index;
-    return bpf_redirect_map(&xsks_map, queue_idx, XDP_DROP);
+    return bpf_redirect_map(&xsks_map, queue_idx, XDP_PASS);
 }

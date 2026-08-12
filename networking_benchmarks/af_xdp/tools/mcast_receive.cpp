@@ -21,6 +21,7 @@
 #include <string>
 
 #include <arpa/inet.h>
+#include "common/wire.h"   // S1: single source of the on-wire layout
 #include <net/if.h>
 #include <linux/if_ether.h>
 #include <netinet/ip.h>
@@ -48,8 +49,8 @@ static constexpr uint32_t FILL_SIZE   = 2048;   /* XSK_RING_PROD__DEFAULT_NUM_DE
 static constexpr uint32_t RX_SIZE     = 2048;
 static constexpr uint32_t BATCH       = 64;
 static constexpr uint16_t ETH_P_IPV4  = 0x0800;
-static constexpr int      HDR_SIZE    = 32;     /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
-static constexpr uint32_t M2U_MAGIC   = 0x4D324355;  /* "M2CU" — light mcast->ucast tag */
+static constexpr int      HDR_SIZE    = WIRE_APP_HDR_LEN;     /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
+static constexpr uint32_t M2U_MAGIC   = WIRE_M2U_MAGIC;  /* "M2CU" — light mcast->ucast tag */
 static constexpr int      M2U_HDR_LEN = 8;           /* magic(4) + group(4) */
 
 struct __attribute__((packed)) pkt_hdr {

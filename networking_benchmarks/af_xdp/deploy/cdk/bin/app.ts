@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { FleetStack, FleetEntry, partitionFleet, connectRegions } from '../lib/fleet';
 import { AmiBuilderStack } from '../lib/ami-builder';
+import { ControlPlaneStack } from '../lib/control-plane';
 
 const app = new cdk.App();
 
@@ -114,6 +115,29 @@ switch (deploymentType) {
       instanceType,
       gitRepo,
       gitRef,
+    });
+    break;
+  }
+
+  case 'control-plane': {
+    // Central control plane: one EC2 running nats-server + the Go backend
+    // (serves web + API). Fleet agents connect outbound to its EIP:4222.
+    //   cdk deploy --context deploymentType=control-plane \
+    //     --context keyPairName=<key> --context gitRepo=<repo> --context gitRef=<branch> \
+    //     [--context clientCidr=1.2.3.4/32] \
+    //     [--context hostedZoneId=Z... --context zoneName=example.com --context recordName=bench.example.com]
+    new ControlPlaneStack(app, `${stackName}-ControlPlane`, {
+      env: { account: process.env.CDK_DEFAULT_ACCOUNT, region },
+      keyPairName,
+      instanceType: app.node.tryGetContext('instanceType') || undefined,
+      gitRepo: app.node.tryGetContext('gitRepo') || undefined,
+      gitRef: app.node.tryGetContext('gitRef') || undefined,
+      clientCidr: app.node.tryGetContext('clientCidr') || undefined,
+      hostedZoneId: app.node.tryGetContext('hostedZoneId') || undefined,
+      zoneName: app.node.tryGetContext('zoneName') || undefined,
+      recordName: app.node.tryGetContext('recordName') || undefined,
+      natsToken: app.node.tryGetContext('natsToken') || undefined,
+      natsTls: String(app.node.tryGetContext('natsTls')) === 'true',
     });
     break;
   }

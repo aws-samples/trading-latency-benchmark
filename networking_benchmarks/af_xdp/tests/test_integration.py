@@ -206,6 +206,24 @@ class TestControlProtocol:
         assert _ctrl_roundtrip(ctrl_socket, _add_msg(LISTEN_IP, 29003)) == b"\x01"
         assert _ctrl_roundtrip(ctrl_socket, _remove_msg(LISTEN_IP, 29003)) == b"\x01"
 
+    def test_rapid_add_remove_consistency(self, replicator_process, ctrl_socket):
+        """Churn many add/remove ops, then LIST must stay well-formed + consistent
+        (guards against control-table corruption / count drift under load)."""
+        base, n = 29100, 12
+        for i in range(n):
+            assert _ctrl_roundtrip(ctrl_socket, _add_msg(LISTEN_IP, base + i)) == b"\x01"
+        removed = 0
+        for i in range(0, n, 2):  # remove the even ports
+            if _ctrl_roundtrip(ctrl_socket, _remove_msg(LISTEN_IP, base + i)) == b"\x01":
+                removed += 1
+        ctrl_socket.sendto(bytes([CTRL_LIST]), (LISTEN_IP, CONTROL_PORT))
+        resp, _ = ctrl_socket.recvfrom(4096)
+        count = resp[0]
+        # wire format intact after churn: [1B count][count × (4B IP + 2B port)]
+        assert len(resp) == 1 + 6 * count, f"malformed LIST after churn: count={count} len={len(resp)}"
+        # the odd ports we added must still be present (other tests may add more)
+        assert count >= (n - removed), f"lost destinations under churn: {count} < {n - removed}"
+
 
 # ── Test: Control protocol (negative / robustness) ────────────────────────────
 class TestControlProtocolNegative:

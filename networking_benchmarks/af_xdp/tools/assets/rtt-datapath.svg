@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 520" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12">
+  <rect width="820" height="520" fill="#fafafa"/>
+  <text x="410" y="28" text-anchor="middle" font-size="15" font-weight="bold" fill="#0d47a1">rtt — Unicast Round-Trip Measurement Datapath</text>
+
+  <!-- Timeline arrow -->
+  <defs>
+    <marker id="a1" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><path d="M0,0 L7,2.5 L0,5Z" fill="#333"/></marker>
+  </defs>
+  <line x1="40" y1="500" x2="780" y2="500" stroke="#999" stroke-width="1" marker-end="url(#a1)"/>
+  <text x="790" y="504" font-size="10" fill="#999">time →</text>
+
+  <!-- Step R1 -->
+  <rect x="40" y="48" width="180" height="56" rx="5" fill="#e3f2fd" stroke="#1565c0"/>
+  <text x="50" y="66" font-weight="bold" fill="#0d47a1">[R1] Self-Registration</text>
+  <text x="50" y="82" fill="#333">CTRL_ADD_DESTINATION</text>
+  <text x="50" y="96" font-size="10" fill="#666">→ replicator ctrl port 12345</text>
+
+  <!-- Step R2 -->
+  <rect x="40" y="116" width="180" height="48" rx="5" fill="#e3f2fd" stroke="#1565c0"/>
+  <text x="50" y="134" font-weight="bold" fill="#0d47a1">[R2] Pacing</text>
+  <text x="50" y="152" fill="#333">clock_nanosleep(ABSTIME)</text>
+
+  <!-- Step R3 — TX options -->
+  <rect x="40" y="176" width="340" height="100" rx="5" fill="#bbdefb" stroke="#1976d2" stroke-width="1.5"/>
+  <text x="50" y="194" font-weight="bold" fill="#0d47a1">[R3] Stamp TX + Transmit</text>
+  <text x="50" y="214" fill="#333">Option A (default): kernel sendto()</text>
+  <text x="50" y="230" fill="#333">  stamp = clock_gettime(CLOCK_REALTIME)</text>
+  <text x="50" y="250" fill="#333">Option B (--xdp-tx): AF_XDP zero-copy frame</text>
+  <text x="50" y="266" fill="#333">  stamp REALTIME+MONOTONIC, sfence, submit, kick</text>
+
+  <!-- Wire -->
+  <rect x="400" y="192" width="60" height="72" rx="3" fill="#fff9c4" stroke="#f9a825"/>
+  <text x="430" y="232" text-anchor="middle" font-size="11" fill="#6d4c00" transform="rotate(-90 430 232)">WIRE</text>
+
+  <!-- Replicator -->
+  <rect x="480" y="176" width="280" height="100" rx="5" fill="#fff3e0" stroke="#e65100" stroke-width="1.5"/>
+  <text x="490" y="196" font-weight="bold" fill="#e65100">REPLICATOR</text>
+  <text x="490" y="216" fill="#333">ucast.o XDP ingress → AF_XDP redirect</text>
+  <text x="490" y="236" fill="#333">Echo frame back to client src IP:port</text>
+  <text x="490" y="256" fill="#333">If --xdp-rx: stamps bpf_ktime_get_ns</text>
+  <text x="490" y="270" font-size="10" fill="#666">into payload[4..11] (CLOCK_MONOTONIC)</text>
+
+  <!-- Wire back -->
+  <rect x="400" y="296" width="60" height="72" rx="3" fill="#fff9c4" stroke="#f9a825"/>
+  <text x="430" y="336" text-anchor="middle" font-size="11" fill="#6d4c00" transform="rotate(-90 430 336)">WIRE</text>
+
+  <!-- Step R4 — RX options -->
+  <rect x="40" y="296" width="340" height="108" rx="5" fill="#bbdefb" stroke="#1976d2" stroke-width="1.5"/>
+  <text x="50" y="316" font-weight="bold" fill="#0d47a1">[R4] Receive Echo + Stamp RX</text>
+  <text x="50" y="336" fill="#333">Default: SO_TIMESTAMPING kernel-SW</text>
+  <text x="50" y="352" fill="#333">  (NAPI netif_receive_skb, CLOCK_REALTIME)</text>
+  <text x="50" y="372" fill="#333">--xdp-rx: read bpf_ktime from payload[4..11]</text>
+  <text x="50" y="388" fill="#333">  (CLOCK_MONOTONIC, stamped at XDP hook)</text>
+  <text x="50" y="400" font-size="10" fill="#666">Fallback: userspace clock_gettime if no cmsg</text>
+
+  <!-- Step R5/R6 -->
+  <rect x="40" y="420" width="340" height="60" rx="5" fill="#e8eaf6" stroke="#283593"/>
+  <text x="50" y="440" font-weight="bold" fill="#1a237e">[R5] RTT = RX − TX</text>
+  <text x="50" y="458" fill="#333">Same clock domain → no sync needed</text>
+  <text x="50" y="474" fill="#333">[R6] min/mean/p50/p90/p95/p99/p99.9/max → JSON</text>
+
+  <!-- Arrows connecting steps -->
+  <path d="M380 226 L396 226" stroke="#1976d2" stroke-width="1.5" fill="none" marker-end="url(#a1)"/>
+  <path d="M476 248 L464 300" stroke="#e65100" stroke-width="1.5" fill="none"/>
+  <path d="M396 336 L380 336" stroke="#1976d2" stroke-width="1.5" fill="none"/>
+
+  <!-- Config note -->
+  <rect x="500" y="300" width="260" height="84" rx="5" fill="#f5f5f5" stroke="#757575"/>
+  <text x="510" y="318" font-weight="600" fill="#424242">Performance Config</text>
+  <text x="510" y="336" fill="#333">• TX thread: SCHED_FIFO(80) + mlockall</text>
+  <text x="510" y="352" fill="#333">• RX: SO_BUSY_POLL 100µs + budget 256</text>
+  <text x="510" y="368" fill="#333">• Lock-free slot array (seq-indexed)</text>
+  <text x="510" y="380" font-size="10" fill="#666">• Safety alarm: auto-kill if stuck in RT spin</text>
+
+  <!-- ZC vs copy note -->
+  <rect x="500" y="396" width="260" height="68" rx="5" fill="#fce4ec" stroke="#c62828"/>
+  <text x="510" y="414" font-weight="600" fill="#b71c1c">Zero-Copy vs Fallback</text>
+  <text x="510" y="432" fill="#333">--xdp-tx tries XDP_ZEROCOPY first</text>
+  <text x="510" y="448" fill="#333">Falls back to XDP_COPY/SKB mode</text>
+  <text x="510" y="460" font-size="10" fill="#666">Startup line prints which path is active</text>
+</svg>

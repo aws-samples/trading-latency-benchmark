@@ -18,93 +18,10 @@ Two datapaths share this engine:
 
 ## Data path (one packet, end to end)
 
-The diagram is the source of truth for the numbered steps; every step is
+The diagram below is the source of truth for the numbered steps; every step is
 explained in detail in [Step-by-step](#step-by-step-the-datapath-explained) below.
-Left column = the pipeline stage; right column = the concrete tech / kernel
-feature / data structure used at that stage.
 
-```
-                       ┌───────────────────────────────────────────────────────────────┐
-  SOURCE HOST          │  STAGE                           TECH / FEATURE / DATA STRUCT │
-  ───────────          └───────────────────────────────────────────────────────────────┘
-  mcast_send / rtt ──▶ [0] build frame + AF_XDP TX        ucast: Eth/IP/UDP/payload
-                            (off-box, see tools/)         mcast: Eth/IP/UDP/ m2u{magic,group} /payload
-                                                          TX-only AF_XDP (rtt --xdp-tx) or kernel sendto
-        
-        │ wire (ENA, single-AZ cluster PG / cross-AZ / cross-region)
-        ▼
-╔════════════════════════════════ REPLICATOR HOST ════════════════════════════════╗
-║                                                                                  ║
-║  [1] NIC ingress                       ENA (Nitro), MTU 3498, RSS→queue 0        ║
-║      frame DMA'd into RX descr ring    (ethtool -X equal 1), coalescing off,     ║
-║                                        ENA hard IRQ pinned to isolated CPU       ║
-║        │                                                                         ║
-║        ▼                                                                         ║
-║  [2] XDP hook  (DRV + ZEROCOPY)        eBPF prog: ucast.o | mcast.o at the       ║
-║      parse Eth→IPv4→UDP (+m2u tag)     earliest driver hook (before skb alloc)   ║
-║      lookup {ip|group, port}           config_map (BPF_MAP_TYPE_ARRAY, 16 slots) ║
-║        │                                                                         ║
-║        ├─ no match ───────────────▶ XDP_PASS → kernel UDP stack (SSH, etc.)      ║
-║        │                                                                         ║
-║        ├─ match, fwd_map[slot].enabled (mcast kernel mode only):                 ║
-║        │      rewrite L2/L3/L4 in place, recompute IP csum ─▶ XDP_TX  ═════════╗ ║
-║        │      (fwd_map, BPF_MAP_TYPE_ARRAY; NIC re-TX; userspace bypassed)     ║ ║
-║        │                                                                       ║ ║
-║        └─ match (default) ─▶ bpf_redirect_map(xsks_map, rx_queue_index)        ║ ║
-║        ▼                                                                       ║ ║
-║  [3] AF_XDP RX redirect (zero-copy)    xsks_map (BPF_MAP_TYPE_XSKMAP) →        ║ ║
-║      frame already sits in UMEM        this queue's XSK. Descriptor {addr,len} ║ ║
-║      RX region; only a descr is queued pushed on the RX ring. NO copy.         ║ ║
-║        │                                UMEM: 4096×4096B frames; RX=2048..4095 ║ ║
-║        ▼                                                                       ║ ║
-║  [4] userspace RX drain                XdpSocket::receive() — NAPI busy-poll   ║  ║
-║      (packet-processor thread,         (SO_BUSY_POLL + recvfrom MSG_DONTWAIT); ║  ║
-║       pinned to isolated CPU+1)        reads RX ring → offsets[]/lengths[];    ║  ║
-║        │                                _mm_pause() spin when empty (no sleep) ║  ║
-║        ▼                                batch = 256 (mcast) | 64 (ucast)       ║  ║
-║  [5] per-frame loop                    __builtin_prefetch next frame;          ║  ║
-║      stats + replicatePacket()         per-queue+total atomics (memory_order   ║  ║
-║        │                                _relaxed); recycleFrames() → FILL ring ║  ║
-║        ▼                                                                       ║  ║
-║  [6] RX stamp + parse                  clock_gettime(CLOCK_REALTIME)→          ║  ║
-║      extractUdpPayload / …M2u          replicator_ns (mcast, bswap→BE) written ║  ║
-║      → payload_data, len, group_nbo    into payload[m2u+16]; m2u magic="M2CU"  ║  ║
-║        │                                                                       ║  ║
-║        ▼                                                                       ║  ║
-║  [7] per-group fan-out set             getCachedGroupDestinations(group_nbo):   ║  ║
-║      → const vector<Destination>&      thread_local cache, 100ms TTL, lock-free ║  ║
-║        │                                (rebuilt from group_destinations_ under ║  ║
-║        │                                 destinations_mutex_ only on refresh)   ║  ║
-║        ▼                                                                       ║  ║
-║  [8] drain TX completions (1×/batch)   pollTxCompletions() → COMPLETION ring;   ║  ║
-║        │                                frees TX frames for reuse               ║  ║
-║        ▼                                                                       ║  ║
-║  [9] for each of K destinations: build + queue one TX frame                     ║  ║
-║      ┌─────────────────────────────────────────────────────────────────────┐  ║  ║
-║      │ mac==broadcast? (ARP unresolved) ─▶ kernel sendto (output_socket_)   │  ║  ║
-║      │ fwd_mode=inplace & last dest ─▶ patchHeadersInPlace + forwardFrame   │  ║  ║
-║      │                                  InPlace() (re-TX the RX frame, 0-cp)│  ║  ║
-║      │ else (copy, default): sendSinglePacketDirect()                        │  ║  ║
-║      │    reserveTxRing(1,&idx) ─▶ tx_addr=(idx & 2047)*4096                 │  ║  ║
-║      │    createUdpPacket(): Eth(cached MAC)/IP(cached saddr,RFC1071 csum)/  │  ║  ║
-║      │      UDP + payload copy into TX frame (0..2047)                       │  ║  ║
-║      │    stamp replicator_tx_ns @ off 74 (mcast) ─▶ setTxDescriptor ─▶      │  ║  ║
-║      │    submitTxRing(1)                                                    │  ║  ║
-║      └─────────────────────────────────────────────────────────────────────┘  ║  ║
-║        │                                TX ring + UMEM TX region (frames 0..2047)║  ║
-║        ▼                                                                       ║  ║
-║  [10] driver kick (1×, after all K)    requestDriverPoll() → sendto(MSG_DONTWAIT)║  ║
-║        │                                / needs_wakeup; NIC pulls TX ring       ║  ║
-║        ▼                                                                       ║  ║
-║  [11] NIC egress ── K unicast frames ──┴────────────────────────────◀═════════╝  ║
-╚══════════════════════════════════════════════════════════════════════════════════╝
-        │ wire ×K
-        ▼
-  DEST HOST(s)   [12] mcast_receive (AF_XDP RX, its own mcast.o + config_map[0]) OR
-                      a kernel UDP socket (rtt echo). Stamp rx_ns (CLOCK_REALTIME);
-                      compute hop1 = replicator_ns−ts_ns, hop2 = rx_ns−replicator_tx_ns,
-                      total = rx_ns−ts_ns.
-```
+![Replicator Workflow](../assets/replicator-workflow.svg)
 
 ## Replication paths — kernel / copy / zero-copy (and the flags that select them)
 
@@ -142,29 +59,7 @@ This is the axis the question is really about: once a packet is **matched at the
 XDP hook [2]**, how are the K copies produced? The frame forks three ways
 (`kernel` is mcast-only — it needs `mcast.o`'s `fwd_map`):
 
-```
-  matched frame sitting in a UMEM RX frame  (from XDP hook, step [2])
-                              │
-   ┌──────────────────────────┼───────────────────────────────────────────────┐
-   │ FWD_MODE=kernel          │ FWD_MODE=copy   (DEFAULT)     │ FWD_MODE=inplace │
-   ▼  (mcast only)            ▼                              ▼
- ══ KERNEL (XDP_TX) ══      ══ PACKET COPY ══             ══ ZERO-COPY (inplace) ══
- stays in step [2]:         steps [3]→[8] (AF_XDP RX,     steps [3]→[8] (same as copy),
- mcast.o reads fwd_map      busy-poll, parse, fan-out),   then step [9] per dest:
- [slot], rewrites L2/L3/    then step [9] PER DEST:        • LAST dest: patchHeaders
- L4 in the RX frame,          • reserveTxRing → pick a       InPlace() rewrites the RX
- recomputes IP csum, and      TX frame (0..2047)             frame's Eth/IP/UDP in place
- XDP_TX's it back out         • createUdpPacket() writes     (recompute IP csum) and
- the NIC.                     Eth/IP/UDP + memcpy() the      forwardFrameInPlace() re-TXes
- USERSPACE NEVER RUNS.        payload into that TX frame     THAT SAME UMEM frame
- (steps [3]–[11] skipped)     • setTxDescriptor → submit     • other K−1 dests: packet copy
-                                                             (the RX frame can TX only once)
- ─ payload copies: 0         ─ payload copies: K            ─ payload copies: K−1
- ─ userspace hops:  0        ─ works for ANY K              ─ works for ANY K
- ─ 1 dest / group            ─ most robust (default)        ─ falls back to copy on
- ─ no replicator_ns split      ─                              patch/submit failure
-   (BPF has no CLOCK_REALTIME)
-```
+![Datapath Modes](../assets/datapaths.svg)
 
 Regardless of mode, an **unresolved-ARP** destination (broadcast MAC) is always
 sent via the **kernel `sendto` fallback** (`sendToDestinationFallback`, step [9]),

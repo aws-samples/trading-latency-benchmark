@@ -265,6 +265,15 @@ export class FleetStack extends cdk.Stack {
         const nodeName = `${role}-${globalIndex}-${shortType}`;
         const prefix = `Node${globalIndex}`;
 
+        // Per-node agent config: stamp the role (known here) so the baked
+        // control-plane agent knows its role. (AWS::EC2::Instance can't enable
+        // IMDS instance-tags without a launch template, so we set it directly.)
+        const agentUd = UserData.forLinux();
+        agentUd.addCommands(
+          `echo "AGENT_ROLE=${role}" >> /etc/default/afxdp-agent`,
+          'systemctl restart afxdp-agent 2>/dev/null || true',
+        );
+
         const inst = new Instance(this, nodeId, {
           vpc,
           instanceType: new InstanceType(instType),
@@ -273,11 +282,16 @@ export class FleetStack extends cdk.Stack {
           vpcSubnets: { availabilityZones: [az] },
           keyPair,
           blockDevices: [{ deviceName: '/dev/xvda', volume: BlockDeviceVolume.ebs(100) }],
-          userData: UserData.forLinux(),
+          userData: agentUd,
         });
         inst.applyRemovalPolicy(RemovalPolicy.DESTROY);
         // Disable source/dest check for replication traffic (fan-out rewrites dst IP/MAC)
         (inst.node.defaultChild as ec2.CfnInstance).sourceDestCheck = false;
+        // Let the agent preflight read the control-plane NATS URL from SSM.
+        inst.role.addToPrincipalPolicy(new iam.PolicyStatement({
+          actions: ['ssm:GetParameter'],
+          resources: [cdk.Arn.format({ service: 'ssm', resource: 'parameter', resourceName: 'af-xdp/*' }, this)],
+        }));
 
         if (pgType) {
           const pg = getOrCreatePG(pgType, az, entry.pgName);

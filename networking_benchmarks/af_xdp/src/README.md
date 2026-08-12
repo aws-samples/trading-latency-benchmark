@@ -38,6 +38,12 @@ so the control-protocol + echo logic can be unit-tested without root or a NIC.
 
 ---
 
+## Datapath variants at a glance
+
+![Datapath Modes](assets/datapaths.svg)
+
+---
+
 ## Key data structures
 
 **UMEM & rings** (`XdpSocket.hpp`) — a UMEM is a contiguous mmap'd region carved
