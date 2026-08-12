@@ -76,6 +76,17 @@ export function createLive({ onUpdate, onJob } = {}) {
         .map(([k, unix]) => { const [kind, variation] = k.split('|'); return { kind, variation, unix }; });
     },
 
+    // Kinds present, newest first. At most two (ucast, mcast) - the view selector
+    // shows these, and each unifies every variation of that kind.
+    kinds() {
+      const m = new Map(); // kind -> max unix
+      for (const e of edges.values()) {
+        const u = e.unix || 0;
+        if (!m.has(e.kind) || u > m.get(e.kind)) m.set(e.kind, u);
+      }
+      return [...m.entries()].sort((a, b) => b[1] - a[1]).map(([kind, unix]) => ({ kind, unix }));
+    },
+
     // Adapt current state into the fleet.json schema for one kind+variation.
     // Only ONLINE nodes are included — the CDK stack may have many more instances
     // than are currently running; showing offline nodes bloats the heatmap with
@@ -124,7 +135,9 @@ export function createLive({ onUpdate, onJob } = {}) {
       // first leg (source → replicator) so the path is always honoured.
       const relayIdx = kind === 'mcast' ? order.findIndex((n) => n.role === 'replicator') : -1;
       for (const e of edges.values()) {
-        if (e.kind !== kind || e.variation !== variation) continue;
+        if (e.kind !== kind) continue;
+        // variation omitted => unify across all variations of this kind.
+        if (variation && e.variation !== variation) continue;
         const i = idx.get(e.src), j = idx.get(e.dst);
         if (i == null || j == null) continue;
         const m = e.metrics && e.metrics.service_rtt_us;
@@ -133,11 +146,14 @@ export function createLive({ onUpdate, onJob } = {}) {
           p50: m.p50, p90: m.p90, p99: m.p99, p999: m.p999, max: m.max,
           loss: +(e.metrics.loss_pct || 0).toFixed(3),
           unix: e.unix || 0,
+          variation: e.variation,
         };
+        // When unifying a kind, the freshest measurement wins the cell.
+        const fresher = (prev) => !prev || (cell.unix || 0) >= (prev.unix || 0);
         if (relayIdx >= 0 && i !== relayIdx && j !== relayIdx) {
           matrix[i][relayIdx] = matrix[i][relayIdx] || cell;   // source → replicator (shared)
-          matrix[relayIdx][j] = cell;                          // replicator → destination
-        } else {
+          if (fresher(matrix[relayIdx][j])) matrix[relayIdx][j] = cell; // replicator → destination
+        } else if (fresher(matrix[i][j])) {
           matrix[i][j] = cell;
         }
       }

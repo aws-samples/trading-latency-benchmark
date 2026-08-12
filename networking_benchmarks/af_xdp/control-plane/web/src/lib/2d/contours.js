@@ -25,7 +25,10 @@ export function renderContours(ctx) {
     });
     return g;
   };
-  const PAD_BASE = 10, STEP = 12;
+  // PAD_BASE: clearance from the innermost nodes to the AZ border.
+  // STEP: additional clearance per tier, i.e. the distance between one
+  // contour border and the next one out.
+  const PAD_BASE = 20, STEP = 20;
   // Extra top padding so the contour label (top:-11px) never clips above the canvas.
   const LABEL_H = 18;
   const contourDefs = [

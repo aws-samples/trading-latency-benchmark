@@ -48,7 +48,7 @@ func TestStoreInsertAndRead(t *testing.T) {
 	}
 	s.ch <- row
 	// Give the writer time to flush.
-	time.Sleep(700 * time.Millisecond)
+	s.Flush()
 
 	var count int
 	err = s.db.QueryRow("SELECT COUNT(*) FROM measurements WHERE src_ip=? AND dst_ip=?",
@@ -266,7 +266,7 @@ func TestStoreBatchFlush(t *testing.T) {
 		}
 	}
 	// After 200 rows the batch should flush within 100ms.
-	time.Sleep(300 * time.Millisecond)
+	s.Flush()
 
 	var count int
 	s.db.QueryRow("SELECT COUNT(*) FROM measurements").Scan(&count)

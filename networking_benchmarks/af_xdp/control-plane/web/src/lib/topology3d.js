@@ -113,6 +113,14 @@ export function mountTopology3D(container, fleet, opts = {}) {
   labelRenderer.domElement.style.pointerEvents = 'none';
   container.appendChild(labelRenderer.domElement);
   const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true;
+  // Shift makes left-drag pan. Right-drag still pans as well, so nothing is
+  // lost; shift is simply reachable on a trackpad without a second button.
+  const setPanModifier = (on) => {
+    controls.mouseButtons.LEFT = on ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
+  };
+  const onKeyShift = (ev) => { if (ev.key === 'Shift') setPanModifier(ev.type === 'keydown'); };
+  window.addEventListener('keydown', onKeyShift);
+  window.addEventListener('keyup', onKeyShift);
   scene.add(new THREE.AmbientLight(0xffffff, 0.8));
   const dl = new THREE.DirectionalLight(0xffffff, 0.75); dl.position.set(1,1,1); scene.add(dl);
 
@@ -139,6 +147,7 @@ export function mountTopology3D(container, fleet, opts = {}) {
   const PG_DISC_COL = 0xf0883e; // orange PG marker disc
 
   const nodeMeshes = [];
+  const targetSpheres = [];
   const nodeEdges = [];   // per node { front, back } grey outline; recoloured gold on select
   fleet.nodes.forEach((n, i) => {
     const col = new THREE.Color(capabilityColor(n, capScale).border), emissive = col.clone().multiplyScalar(0.3);
@@ -166,6 +175,22 @@ export function mountTopology3D(container, fleet, opts = {}) {
     div.innerHTML = (n.public_ip ? '<div class="ipp">' + n.public_ip + '</div>' : '')
       + '<div class="ipv">' + n.private_ip + '</div>'
       + roleTag;
+    // Selection sphere, top-left of the node. 3D has no DOM node body to hang a
+    // checkbox on, so it rides the CSS2D label: a real sphere mesh would need
+    // raycast hit-testing and would still be hard to hit at small node sizes.
+    const box = document.createElement('span');
+    box.className = 'target-sphere';
+    box.dataset.targetSphere = n.instance_id || n.private_ip;
+    box.title = 'Select for the next run';
+    div.appendChild(box);
+    targetSpheres[i] = box;
+    box.addEventListener('click', (ev) => {
+      // Do not also pin/select the node body underneath.
+      ev.stopPropagation();
+      ev.preventDefault();
+      if (opts.onToggleTarget) opts.onToggleTarget(box.dataset.targetSphere);
+    });
+
     const lab = new CSS2DObject(div); lab.position.set(0, 0, 0); mesh.add(lab);   // centered on node
   });
 
@@ -389,11 +414,16 @@ export function mountTopology3D(container, fleet, opts = {}) {
       const iid = node.instance_id || node.private_ip;
       const targeted = tids.has(iid);
       e.front.visible = e.back.visible = m.visible;
+      const sph = targetSpheres[i];
+      if (sph) {
+        sph.classList.toggle('checked', targeted);
+        // Contour is permanently visible; only the checked state varies.
+      }
       if (sel) {
         m.material.color.set(GOLD); m.material.emissive.set(GOLD).multiplyScalar(0.45);
         e.front.material.color.set(GOLD); e.back.material.color.set(GOLD);
       } else if (targeted) {
-        // Gold wireframe outline for targeted nodes (distinct from selected).
+        // Gold outline for targeted nodes (distinct from selected).
         m.material.color.copy(m.userData.baseColor);
         m.material.emissive.copy(m.userData.baseEmissive).multiplyScalar(i === hover ? 1.6 : 1);
         e.front.material.color.set(GOLD); e.back.material.color.set(GOLD);
@@ -511,7 +541,7 @@ export function mountTopology3D(container, fleet, opts = {}) {
     + '<div class="hint-row"><b>Click</b> a node \u2014 select it + its 1-hop neighbours; click again to deselect</div>'
     + '<div class="hint-row"><b>Shift+Click</b> a node \u2014 toggle target-set membership (gold outline)</div>'
     + '<div class="hint-row"><b>Deselect all</b> \u2014 restore the full view</div>'
-    + '<div class="hint-row"><b>Drag</b> = rotate &middot; <b>scroll</b> = zoom &middot; <b>right-drag</b> = pan</div>'
+    + '<div class="hint-row"><b>Drag</b> = rotate &middot; <b>scroll</b> = zoom &middot; <b>shift+drag</b> = pan</div>'
     + '<div class="hint-row"><b>Drag</b> a panel title to move it; click to fold</div>'
     + '</div>';
   // Shared Boundaries toggles — flip .visible on each level's collected objects.
@@ -544,6 +574,6 @@ export function mountTopology3D(container, fleet, opts = {}) {
 
   return {
     getView() { return { pos: camera.position.toArray(), target: controls.target.toArray() }; },
-    dispose() { cancelAnimationFrame(rafId); window.removeEventListener('resize', onResize); panelCtx.disposers.forEach(fn => fn()); pinned.forEach((p) => { p.dispose(); if (p.el.parentNode) p.el.parentNode.removeChild(p.el); }); pinned.clear(); },
+    dispose() { cancelAnimationFrame(rafId); window.removeEventListener('resize', onResize); window.removeEventListener('keydown', onKeyShift); window.removeEventListener('keyup', onKeyShift); panelCtx.disposers.forEach(fn => fn()); pinned.forEach((p) => { p.dispose(); if (p.el.parentNode) p.el.parentNode.removeChild(p.el); }); pinned.clear(); },
   };
 }

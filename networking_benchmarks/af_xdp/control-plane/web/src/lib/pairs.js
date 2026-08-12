@@ -10,10 +10,85 @@ export const SCOPE_FANOUT = 'fanout';
 export const SCOPE_FANIN = 'fanin';
 
 export const SCOPES = [
-  { id: SCOPE_AMONG, label: 'Among selected', hint: 'how these nodes see each other' },
-  { id: SCOPE_FANOUT, label: 'Selected \u2192 all', hint: 'how these nodes reach the fleet' },
-  { id: SCOPE_FANIN, label: 'All \u2192 selected', hint: 'how the fleet reaches these nodes (costly)' },
+  {
+    id: SCOPE_AMONG,
+    label: 'Between selected',
+    hint: 'each selected node measures to every other selected node',
+  },
+  {
+    id: SCOPE_FANOUT,
+    label: 'Selected \u2192 everyone else',
+    hint: 'each selected node measures to the whole fleet',
+  },
+  {
+    id: SCOPE_FANIN,
+    label: 'Everyone else \u2192 selected',
+    hint: 'the whole fleet measures to each selected node (costly: one host transition per source)',
+  },
 ];
+
+/**
+ * Selection presets. Each resolves against the current fleet to a set of node
+ * ids, so the same chip works in 2D, 3D and the panel.
+ */
+export const PRESETS = [
+  { id: 'pg', label: 'PG', attr: 'cpg_name' },
+  { id: 'vpc', label: 'VPC', attr: 'vpc_id' },
+  { id: 'az', label: 'AZ', attr: 'az' },
+  { id: 'region', label: 'Region', attr: 'region' },
+  { id: 'all', label: 'All' },
+];
+
+// Values that mean "unknown" rather than a real group. Grouping on these would
+// lump unrelated nodes together, which is worse than selecting nothing.
+const UNKNOWN = new Set(['', 'unknown', 'none', undefined, null]);
+
+/**
+ * Resolve a preset NAME into the node ids it selects.
+ *
+ * @param {string} name  preset id from PRESETS
+ * @param {Array}  nodes fleet nodes
+ * @param {string|null} anchorId  node whose group to match; when absent the
+ *   largest group is used, which is both the most useful default and stable
+ *   across repeated presses
+ * @returns {Array<string>} node ids (never characters - callers spread this
+ *   into a Set, and passing a bare string there yields one entry per letter)
+ */
+export function resolvePreset(name, nodes, anchorId) {
+  const all = nodes || [];
+  const up = all.filter((n) => n.online);
+
+  if (name === 'clear') return [];
+  if (name === 'all') return up.map(idOf);
+
+  const preset = PRESETS.find((p) => p.id === name);
+  if (!preset || !preset.attr) return [];
+  const attr = preset.attr;
+
+  // Group online nodes by the attribute, skipping unknowns.
+  const groups = new Map();
+  for (const n of up) {
+    const v = n[attr];
+    if (UNKNOWN.has(v)) continue;
+    if (!groups.has(v)) groups.set(v, []);
+    groups.get(v).push(idOf(n));
+  }
+  if (groups.size === 0) return [];
+
+  // An anchor picks its own group. The anchor may itself be offline, in which
+  // case its group still resolves but it is not selected (it cannot be measured).
+  if (anchorId) {
+    const anchor = all.find((n) => idOf(n) === anchorId || n.instance_id === anchorId);
+    if (anchor && !UNKNOWN.has(anchor[attr]) && groups.has(anchor[attr])) {
+      return groups.get(anchor[attr]);
+    }
+  }
+
+  // No usable anchor: the largest group, ties broken by fleet order.
+  let best = [];
+  for (const g of groups.values()) if (g.length > best.length) best = g;
+  return best;
+}
 
 const idOf = (n) => n.instance_id || n.instanceId || n.private_ip || n.name;
 

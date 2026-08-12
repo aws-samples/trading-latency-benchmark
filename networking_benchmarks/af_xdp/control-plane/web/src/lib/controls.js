@@ -29,6 +29,10 @@ const CSS = `
 .cp-seg{display:flex;border:1px solid #30363d;border-radius:7px;overflow:hidden}
 .cp-seg button{background:transparent;color:#8b949e;border:none;padding:5px 12px;cursor:pointer;font:600 12px inherit}
 .cp-seg button.on{background:rgba(88,166,255,.18);color:#58a6ff}
+.cp-seg a{background:transparent;color:#8b949e;border:none;padding:5px 12px;cursor:pointer;font:600 12px inherit;text-decoration:none;display:inline-block}
+.cp-seg a:hover{color:#e6edf3;background:rgba(88,166,255,.12)}
+.cp-seg a.disabled{opacity:.4;cursor:not-allowed;color:#6e7681}
+.cp-seg a.disabled:hover{background:transparent;color:#6e7681}
 .cp-live{background:transparent;color:#8b949e;border:1px solid #30363d;border-radius:7px;
   padding:5px 12px;cursor:pointer;font:600 12px inherit}
 .cp-live.on{background:rgba(248,81,73,.16);color:#f85149;border-color:#da3633}
@@ -52,13 +56,18 @@ const CSS = `
 .cp-target-info{color:#8b949e;font:12px inherit;flex:1}
 .cp-target-info.active{color:#ffd700}
 .cp-presets{gap:4px}
+.cp-presets .cp-cancel{margin-left:auto;margin-right:2px}
+.cp-tip{color:#6e7681;font:10px inherit;font-style:italic}
+.cp-presets button.on{background:rgba(240,136,62,.22);color:#f0883e;border-color:#f0883e}
 .cp-cost-hint{color:#f0883e;font:10px inherit;margin-left:4px}
 .cp-icon{background:#21262d;color:#adbac7;border:1px solid #30363d;border-radius:6px;padding:4px 9px;cursor:pointer;font:600 14px inherit;line-height:1;flex:0 0 auto}
 .cp-icon:hover{background:#30363d;color:#fff}
 .cp-num{width:58px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:3px 5px;font:12px inherit}
 .cp-dim{color:#6e7681;font:11px inherit;margin-left:2px}
-.cp-log-label{color:#6e7681;font:700 10px inherit;letter-spacing:.6px;margin:2px 0 3px}
-.cp-status{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:6px 8px;
+.cp-log-label{color:#6e7681;font:700 10px inherit;letter-spacing:.6px}
+.cp-log-row{display:flex;align-items:center;gap:6px;margin:2px 0 3px}
+.cp-log-row .cp-log-dl{margin-left:auto;padding:0 4px;font-size:11px;line-height:1.4}
+.cp-status{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:6px 8px;white-space:pre-wrap;overflow-y:auto;max-height:140px;
   color:#3fb950;font:12px 'SF Mono','Fira Code',ui-monospace,Menlo,monospace;
   min-height:34px;max-height:120px;overflow:auto;white-space:pre-wrap;word-break:break-word;
   font-variant-numeric:tabular-nums}
@@ -67,9 +76,11 @@ const CSS = `
 
 import { enhancePanel, foldAllPanels, resetAllPanels } from './2d/panels.js';
 import { esc } from './2d/palette.js';
-import { SCOPES, SCOPE_AMONG, SCOPE_FANOUT, countPairs } from './pairs.js';
+import { SCOPES, SCOPE_AMONG, SCOPE_FANOUT, PRESETS, countPairs } from './pairs.js';
 
 export function mountControls(host, opts = {}) {
+  const OPS_LOG_MAX = 5000, LOG_TAIL = 40;
+  const opsLog = [];
   const { onSetMode, onToggleLive, onSelectView, onRun, onPickResult, onHeartbeat, onReport } = opts;
   if (!document.getElementById(STYLE_ID)) {
     const s = document.createElement('style'); s.id = STYLE_ID; s.textContent = CSS; document.head.appendChild(s);
@@ -89,25 +100,29 @@ export function mountControls(host, opts = {}) {
       <div class="row"><span class="cp-lbl">Timezone</span><select class="cp-sel cp-tz" data-tz title="Display timezone for the log + Show list"></select></div>
       <div class="cp-hr"></div>
 
-      <!-- NORMAL mode: Show selector + one-shot Run Tests -->
+      <!-- NORMAL mode: View buttons + one-shot Run Tests -->
       <div data-normal>
-        <div class="row"><span class="cp-lbl">Show</span>
-          <select class="cp-sel" data-view><option value="">(no data yet)</option></select>
-          <button class="cp-icon" data-report title="Download report (heatmap + all latencies) for the shown run">\u2913</button>
+        <div class="row"><span class="cp-lbl">View</span>
+          <span class="cp-seg" data-view-seg></span>
         </div>
         <div class="cp-hr"></div>
         <div data-target-block>
-          <div class="row"><span class="cp-section">Target Set</span></div>
-          <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span><button class="cp-btn cp-btn-sm" data-clear-targets style="display:none">Clear</button></div>
-          <div class="row"><span class="cp-lbl">Scope</span><select class="cp-sel" data-scope></select></div>
-          <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">Same PG</button><button class="cp-btn cp-btn-sm" data-preset="az">Same AZ</button><button class="cp-btn cp-btn-sm" data-preset="vpc">Same VPC</button><button class="cp-btn cp-btn-sm" data-preset="region">Same Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm" data-preset="clear">Clear</button></div>
+          <div class="row center"><span class="cp-section">Targets</span><span class="cp-panel-caret collapsed" data-fold-targets>\u25B6</span></div>
+          <div data-targets-content style="display:none">
+          <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span></div>
+          <div class="row"><span class="cp-tip" data-target-tip>Mark an instance for a group selection</span></div>
+            <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm cp-cancel" data-cancel-targets title="Clear the target set">Cancel</button></div>
+          <div class="row"><select class="cp-sel" data-scope></select></div>
+          </div>
         </div>
         <div class="cp-hr"></div>
-        <div class="row center"><span class="cp-section">Test Latency</span></div>
-        <div class="row"><span class="cp-lbl">Packets</span><input class="cp-num" data-count value="5000" title="Measurement packets per pair (100–1,000,000)"></div>
-        <div class="row"><span class="cp-lbl">Rate</span><input class="cp-num" data-rate value="20000" title="Ucast send rate (1,000–1,000,000)"><span class="cp-dim">pps</span></div>
+        <div class="row center"><span class="cp-section">Test Latency</span><span class="cp-panel-caret collapsed" data-fold-latency>\u25B6</span></div>
+        <div data-latency-content style="display:none">
+        <div class="row"><span class="cp-lbl">Packets</span><input class="cp-num" data-count value="10000" title="Measurement packets per pair (100–1,000,000)"></div>
+        <div class="row"><span class="cp-lbl">Rate</span><input class="cp-num" data-rate value="10000" title="Ucast send rate (1,000–1,000,000)"><span class="cp-dim">pps</span></div>
         <div class="row"><span class="cp-lbl">Interval</span><input class="cp-num" data-interval value="100" title="Mcast inter-packet interval (10–100,000)"><span class="cp-dim">µs</span></div>
         <div class="row"><span class="cp-lbl">Parallel</span><input class="cp-num" data-max-parallel value="4" title="Max concurrent pairs per round. Lower = more accurate (less NIC contention). 1 = fully serial (slowest, most correct)."><span class="cp-dim">pairs</span></div>
+        <div class="row"><span class="cp-lbl">Warmup</span><input class="cp-num" data-warmup value="1000" title="Warmup packets before measurement begins"><span class="cp-dim">pkts</span></div>
         <div class="row"><span class="cp-lbl">Max loss</span><input class="cp-num" data-max-loss value="2" title="Reject a pair outright when its loss exceeds this percent. rtt computes percentiles ONLY from datagrams that returned, so a lossy run reports the latency of its surviving subset — a survivorship-biased number that is not comparable to a clean run. Rejected pairs are recorded as failures, not as results. Set -1 to disable (not recommended)."><span class="cp-dim">% loss</span></div>
         <div class="cp-hr"></div>
         <div class="row"><span class="cp-lbl">unicast</span></div>
@@ -126,6 +141,7 @@ export function mountControls(host, opts = {}) {
             <button class="cp-btn" data-run-mcast="kernel" title="XDP_TX kernel forward — no userspace replicator, single-destination only, lowest possible hop latency">kernel</button>
             <button class="cp-btn" data-run-mcast="all" title="Run all 3 mcast forward modes sequentially (copy → inplace → kernel)">all</button>
           </span>
+        </div>
         </div>
       </div>
 
@@ -152,7 +168,7 @@ export function mountControls(host, opts = {}) {
       </div>
 
       <div class="cp-hr"></div>
-      <div class="cp-log-label">LOG</div>
+      <div class="cp-log-row"><span class="cp-log-label">LOG</span><button class="cp-icon cp-log-dl" data-log-download title="Download the full session ops log">\u2913</button></div>
       <div class="cp-status" data-status></div>
     </div>
   `;
@@ -175,7 +191,7 @@ export function mountControls(host, opts = {}) {
     if (allFolded) { resetAllPanels(); allFolded = false; foldAllBtn.textContent = '\u29C9'; }
     else { foldAllPanels(true); allFolded = true; foldAllBtn.textContent = '\u29C7'; }
   });
-  const viewSel = $('[data-view]');
+  const viewSeg = $('[data-view-seg]');
   const statsEl = $('[data-stats]');
   const statusEl = $('[data-status]');
   const num = (s) => Math.max(1, parseInt($(s).value, 10) || 0);
@@ -200,18 +216,29 @@ export function mountControls(host, opts = {}) {
     try { return new Intl.DateTimeFormat([], o).format(new Date(ms)); } catch { return new Date(ms).toLocaleTimeString(); }
   };
   let lastCombos = null, lastSel = null;
-  const renderCombos = (combos, sel) => {
-    lastCombos = combos; lastSel = sel;
-    const cur = sel ? `${sel.kind}|${sel.variation}` : viewSel.value;
-    if (!combos || !combos.length) { viewSel.innerHTML = '<option value="">(no data yet)</option>'; return; }
-    // Newest-first, labelled "HH:MM TZ · kind/variation".
-    viewSel.innerHTML = combos.map((c) => {
-      const v = `${c.kind}|${c.variation}`;
-      const t = c.unix ? fmtTime(c.unix * 1000) + ' · ' : '';
-      return `<option value="${v}"${v === cur ? ' selected' : ''}>${t}${c.kind}/${c.variation}</option>`;
+  let activeViewKind = null;
+  const renderViewButtons = (kinds, sel) => {
+    lastCombos = kinds; lastSel = sel;
+    // Anchors, not buttons: a button plus window.open can be redirected into the
+    // CURRENT tab by the browser's popup settings, which rewrote this page's URL.
+    // target=_blank on a real link always opens a tab and never navigates here.
+    // Both kinds are always rendered; one without data is disabled, so the panel
+    // states what exists rather than hiding it.
+    const have = new Set((kinds || []).map((c) => c.kind));
+    viewSeg.innerHTML = ['ucast', 'mcast'].map((k) => {
+      const on = have.has(k);
+      return on
+        ? `<a data-view-btn="${esc(k)}" href="?report=${esc(k)}" target="_blank" rel="noopener"`
+          + ` title="Open the ${esc(k)} report in a new tab">${esc(k)}</a>`
+        : `<a data-view-btn="${esc(k)}" class="disabled" aria-disabled="true"`
+          + ` title="No ${esc(k)} results yet">${esc(k)}</a>`;
     }).join('');
+    viewSeg.querySelectorAll('a.disabled').forEach((a) => {
+      a.addEventListener('click', (ev) => ev.preventDefault());
+    });
   };
-  tzSel.addEventListener('change', () => { selectedTz = tzSel.value; if (lastCombos) renderCombos(lastCombos, lastSel); });
+
+  tzSel.addEventListener('change', () => { selectedTz = tzSel.value; if (lastCombos) renderViewButtons(lastCombos, lastSel); });
 
   let mode = opts.initialMode || '2d';
   let liveOn = !!opts.initialLive;
@@ -230,15 +257,6 @@ export function mountControls(host, opts = {}) {
 
   segBtns.forEach((b) => b.addEventListener('click', () => { mode = b.dataset.mode; paintMode(); onSetMode && onSetMode(mode); }));
   liveBtn.addEventListener('click', () => { liveOn = !liveOn; paintLive(); syncSections(); onToggleLive && onToggleLive(liveOn); });
-  viewSel.addEventListener('change', () => {
-    // A browse-result option carries data-run (a results/ subdir path); a live
-    // combo option carries a "kind|variation" value. The Show dropdown hosts both.
-    const opt = viewSel.selectedOptions[0];
-    if (opt && opt.dataset.run !== undefined) { onPickResult && onPickResult(opt.dataset.run); return; }
-    const v = viewSel.value; if (!v) return;
-    const [kind, variation] = v.split('|');
-    onSelectView && onSelectView({ kind, variation });
-  });
   // Track the currently running one-shot button. While a run is active it stays
   // orange; every other run button is disabled (gray) until the run finishes.
   const runBtns = [...el.querySelectorAll('[data-run-ucast],[data-run-mcast]')];
@@ -262,7 +280,7 @@ export function mountControls(host, opts = {}) {
   };
 
   el.querySelectorAll('[data-run-ucast]').forEach((b) => b.addEventListener('click', () => {
-    startRun(b, { kind: 'ucast', variation: b.dataset.runUcast, count: clamp(num('[data-count]'), 100, 1000000), rate: clamp(num('[data-rate]'), 1000, 1000000), warmup: 1000, max_parallel: clamp(num('[data-max-parallel]'), 1, 100), max_loss_pct: clamp(numf('[data-max-loss]', 2), -1, 100) });
+    startRun(b, { kind: 'ucast', variation: b.dataset.runUcast, count: clamp(num('[data-count]'), 100, 1000000), rate: clamp(num('[data-rate]'), 1000, 1000000), warmup: clamp(num('[data-warmup]'), 0, 100000), max_parallel: clamp(num('[data-max-parallel]'), 1, 100), max_loss_pct: clamp(numf('[data-max-loss]', 2), -1, 100) });
   }));
   el.querySelectorAll('[data-run-mcast]').forEach((b) => b.addEventListener('click', () => {
     const mcastMode = b.dataset.runMcast;
@@ -270,40 +288,89 @@ export function mountControls(host, opts = {}) {
     startRun(b, { kind: 'mcast', modes, count: clamp(num('[data-count]'), 100, 1000000), interval_us: clamp(num('[data-interval]'), 10, 100000), timeout_sec: 25 });
   }));
 
-  // Download report (heatmap + all latencies) for the currently-shown run.
-  $('[data-report]').addEventListener('click', () => onReport && onReport());
+  $('[data-log-download]').addEventListener('click', () => {
+    const blob = new Blob([opsLog.join('\n') + '\n'], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement('a'), {
+      href: url, download: `afxdp-ops-log-${Date.now()}.txt`,
+    });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  });
 
   // ── Target set: scope select, presets, clear ────────────────────────────────
   const { onScopeChange, onPreset, onClearTargets } = opts;
   const scopeSel = $('[data-scope]');
   const targetInfo = $('[data-target-info]');
-  const clearBtn = $('[data-clear-targets]');
-  // Populate scope select from SCOPES.
-  scopeSel.innerHTML = SCOPES.map((s) =>
-    `<option value="${s.id}">${s.label}${s.id === 'fanin' ? ' (costly)' : ''}</option>`
-  ).join('');
+  const targetTip = $('[data-target-tip]');
+  const cancelBtn = $('[data-cancel-targets]');
+  // Scope options carry a live pair count, so each one states what it will
+  // actually run instead of leaving the arrow notation to be decoded.
+  const paintScopeOptions = (count, totalNodes) => {
+    const prev = scopeSel.value;
+    scopeSel.innerHTML = SCOPES.map((s) => {
+      const n = count ? countPairs(totalNodes, count, s.id) : 0;
+      const suffix = count ? ` \u2014 ${n} pair${n === 1 ? '' : 's'}` : '';
+      return `<option value="${s.id}" title="${s.hint}">${s.label}${suffix}</option>`;
+    }).join('');
+    if (prev) scopeSel.value = prev;
+  };
+  paintScopeOptions(0, 0);
+  scopeSel.disabled = true;
   scopeSel.addEventListener('change', () => { onScopeChange && onScopeChange(scopeSel.value); });
-  clearBtn.addEventListener('click', () => { onClearTargets && onClearTargets(); });
-  // Presets call onPreset with an array of instance IDs.
+  // Chips pass the preset NAME; App resolves it against the fleet.
+  cancelBtn.addEventListener('click', () => { onClearTargets && onClearTargets(); });
   el.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => {
     onPreset && onPreset(b.dataset.preset);
   }));
 
   let _lastTargetState = { count: 0, pairs: 0, scope: 'among', totalNodes: 0 };
-  const paintTargetBlock = ({ count, pairs, scope: sc, totalNodes }) => {
-    _lastTargetState = { count, pairs, scope: sc, totalNodes };
+  const paintTargetBlock = ({ count, pairs, scope: sc, totalNodes, preset }) => {
+    _lastTargetState = { count, pairs, scope: sc, totalNodes, preset };
+    // Each preset expands the marked instance into its group, so there is
+    // nothing for them to act on until an instance is marked.
+    el.querySelectorAll('[data-preset]').forEach((b) => {
+      b.disabled = count === 0;
+      b.classList.toggle('on', !!preset && b.dataset.preset === preset);
+      b.title = count === 0
+        ? 'Mark an instance first'
+        : `Select every instance in the same ${b.textContent.trim()} as the marked one`;
+    });
+    if (targetTip) targetTip.style.display = count === 0 ? '' : 'none';
+    if (cancelBtn) cancelBtn.disabled = count === 0;
+    scopeSel.disabled = count === 0;
+    paintScopeOptions(count, totalNodes);
     scopeSel.value = sc;
     if (count === 0) {
-      const fullPairs = countPairs(totalNodes, 0, 'among');
-      targetInfo.textContent = `No selection \u2014 full mesh (${fullPairs} pairs)`;
+      targetInfo.textContent = '';
       targetInfo.classList.remove('active');
-      clearBtn.style.display = 'none';
     } else {
       targetInfo.textContent = `${count} selected \u00b7 ${pairs} pairs`;
       targetInfo.classList.add('active');
-      clearBtn.style.display = '';
     }
   };
+
+  // ── Test Latency fold toggle ────────────────────────────────────────────────
+  const foldTargetsBtn = $('[data-fold-targets]');
+  const targetsContent = $('[data-targets-content]');
+  if (foldTargetsBtn && targetsContent) {
+    foldTargetsBtn.addEventListener('click', () => {
+      const hidden = targetsContent.style.display === 'none';
+      targetsContent.style.display = hidden ? '' : 'none';
+      foldTargetsBtn.classList.toggle('collapsed', !hidden);
+      foldTargetsBtn.textContent = hidden ? '\u25BC' : '\u25B6';
+    });
+  }
+  const foldLatencyBtn = $('[data-fold-latency]');
+  const latencyContent = $('[data-latency-content]');
+  if (foldLatencyBtn && latencyContent) {
+    foldLatencyBtn.addEventListener('click', () => {
+      const hidden = latencyContent.style.display === 'none';
+      latencyContent.style.display = hidden ? '' : 'none';
+      foldLatencyBtn.classList.toggle('collapsed', !hidden);
+      foldLatencyBtn.textContent = hidden ? '\u25BC' : '\u25B6';
+    });
+  }
 
   // ── Live heartbeat: choose a mode -> App re-runs it every interval (min 30s) ──
   const hbIntervalSec = () => {
@@ -330,20 +397,28 @@ export function mountControls(host, opts = {}) {
   return {
     setMode(m) { mode = m; paintMode(); },
     setLive(on) { liveOn = on; paintLive(); syncSections(); },
-    setStatus(text) { statusEl.textContent = text || ''; },
+    timezone() { return selectedTz; },
+    setStatus(text) {
+      // Keep the full session in the ring; display only the most recent line.
+      if (text) {
+        const t = new Date().toISOString().replace('T', ' ').slice(0, 19);
+        opsLog.push(`${t}  ${text}`);
+        if (opsLog.length > OPS_LOG_MAX) opsLog.splice(0, opsLog.length - OPS_LOG_MAX);
+      }
+      statusEl.textContent = opsLog.length ? opsLog[opsLog.length - 1] : '';
+    },
+    opsLog() { return opsLog.slice(); },
     endRun() { endRunUI(); },
     setStats({ nodes = 0, online = 0, edges = 0 } = {}) {
       statsEl.innerHTML = `<b>${online}</b>/${nodes} online &middot; <b>${edges}</b> edges`;
     },
     // Populate the Show dropdown with saved-run browse results (dev-only API).
     setResults(runs) {
+      // Browse results are no longer shown in a dropdown - log only.
       if (!runs || !runs.length) return;
-      viewSel.innerHTML = ['<option value="" disabled selected>Browse results\u2026 (' + runs.length + ')</option>']
-        .concat(runs.map((r) => '<option data-run="' + esc(r.path) + '" value="run:' + esc(r.path) + '">' + esc(r.path) + '</option>'))
-        .join('');
     },
-    // combos: [{kind,variation,unix}]; sel: {kind,variation} currently shown
-    setCombos(combos, sel) { renderCombos(combos, sel); },
+    // kinds: [{kind,unix}]; sel: {kind,variation} currently shown
+    setCombos(kinds, sel) { renderViewButtons(kinds, sel); },
     setTargets(state) { paintTargetBlock(state); },
     dispose() { el.remove(); },
   };

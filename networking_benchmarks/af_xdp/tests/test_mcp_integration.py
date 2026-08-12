@@ -27,7 +27,19 @@ pytestmark = pytest.mark.no_cpp_binaries
 
 AF_XDP_DIR = Path(__file__).parent.parent
 CP_DIR = AF_XDP_DIR / "control-plane"
-STORE_GO = CP_DIR / "backend" / "store.go"
+def _find_store_go() -> Path:
+    """Locate the Go file declaring the measurements schema.
+
+    Searched rather than hardcoded: the backend has already been reorganised
+    into sub-packages once, and a stale path here fails as 18 collection errors
+    that look nothing like "a file moved".
+    """
+    hits = [p for p in CP_DIR.rglob("store.go") if "CREATE TABLE" in p.read_text()]
+    if not hits:
+        raise FileNotFoundError(
+            f"no store.go declaring CREATE TABLE found under {CP_DIR}"
+        )
+    return sorted(hits)[0]
 
 
 # ── fixture helpers ───────────────────────────────────────────────────────────
@@ -38,11 +50,12 @@ def extract_schema() -> str:
     Keeping the fixture tied to the real DDL means these tests cannot drift into
     asserting against a schema the backend no longer creates.
     """
-    src = STORE_GO.read_text()
+    store_go = _find_store_go()
+    src = store_go.read_text()
     # The schema lives in a Go raw-string literal: schema := ` ... `
     m = re.search(r"schema\s*:=\s*`(.*?)`", src, re.S)
     if not m:
-        pytest.fail(f"could not find the schema literal in {STORE_GO}")
+        pytest.fail(f"could not find the schema literal in {store_go}")
     ddl = m.group(1)
     # PRAGMA journal_mode/synchronous are runtime settings, not DDL; sqlite3
     # accepts them but they are irrelevant to a fixture.

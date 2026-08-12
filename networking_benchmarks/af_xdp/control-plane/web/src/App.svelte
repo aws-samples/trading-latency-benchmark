@@ -1,11 +1,11 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, afterUpdate } from 'svelte';
   import { mountTopology2D } from './lib/2d/index.js';
   import { mountTopology3D } from './lib/topology3d.js';
   import { createLive, runCampaign, cancelCampaign } from './lib/live.js';
   import { mountControls } from './lib/controls.js';
-  import { buildReportHTML } from './lib/report.js';
-  import { prunedTargets, countPairs, SCOPE_AMONG, SCOPE_FANOUT } from './lib/pairs.js';
+  import { buildCombinedReportBody, buildCombinedReportHTML, REPORT_CSS, reportInteractions } from './lib/report-combined.js';
+  import { prunedTargets, countPairs, SCOPE_AMONG, SCOPE_FANOUT, resolvePreset } from './lib/pairs.js';
 
   let container;        // viz host (wiped on remount)
   let controlsHost;     // persistent overlay host for the shared panel
@@ -20,9 +20,16 @@
 
   let runs = [];
 
+  // ── Live report overlay state ──
+  let reportOverlayOpen = false;
+  let reportRetry = null;
+  let reportOverlayEl = null;
+
   // ── Target set — scopes the next run to a subset of nodes ──
   let targetIds = new Set();
   let scope = 'among';
+  let activePreset = null;   // highlighted chip
+  let targetAnchor = null;   // the marked instance presets cluster around
 
   // ── backend connection (SSE) — the DATA source. Always open when a backend is
   //    present; independent of "Live mode" (which is the heartbeat mode below). ──
@@ -45,6 +52,122 @@
   function resolveJobDone() { const ws = jobDoneWaiters; jobDoneWaiters = []; ws.forEach((fn) => fn()); }
   function waitForDone(timeoutMs = 180000) {
     return new Promise((res) => { const t = setTimeout(res, timeoutMs); jobDoneWaiters.push(() => { clearTimeout(t); res(); }); });
+  }
+
+  // ── Live report overlay ──
+  function getReportViews() {
+    const combos = (conn ? conn.combos() : []).filter((c) => c.kind === kind);
+    const views = combos.length
+      ? combos.map((c) => ({ ...c, fleet: conn.toFleet(c.kind, c.variation) }))
+      : (fleet ? [{ kind, variation, fleet }] : []);
+    return views;
+  }
+
+  function openReportOverlay() {
+    reportOverlayOpen = true;
+    rerenderReportOverlay();
+  }
+
+  // The browser's print header prints document.title; blank it so the page is
+  // not stamped with "AF_XDP topology". The URL half of that header is a print
+  // dialog setting and cannot be suppressed from CSS.
+  function printReport() {
+    const views = getReportViews();
+    if (!views.length) return;
+    const doc = buildCombinedReportHTML(views, panel?.timezone?.() || '')
+      .replace('</head>', `<style>
+        @page { size: landscape; margin: 0; }
+        @media print {
+          html, body { background: #fff !important; color: #111 !important; }
+          /* @page margin is 0 so browsers drop their header/footer; put the
+             page margin back on the content instead. */
+          body { padding: 12mm 10mm !important; }
+          table { break-inside: auto; page-break-inside: auto; }
+          tr, th, td { break-inside: avoid; page-break-inside: avoid; }
+          thead { display: table-header-group; }
+          details { display: block; }
+          details > * { display: block; }
+          .heat td, .heat th, td, th { border-color: #bbb !important; }
+          th { background: #f1f5f9 !important; color: #334155 !important; }
+          td { color: #111 !important; }
+          .method, .coverage, .selbar { background: #f8fafc !important; color: #1e293b !important;
+            border-color: #ddd !important; }
+          .mode-badge { background: #e5e7eb !important; color: #1f2937 !important; }
+        }
+      </style></head>`);
+    const f = document.createElement('iframe');
+    f.setAttribute('aria-hidden', 'true');
+    f.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+    document.body.appendChild(f);
+    f.contentDocument.open();
+    f.contentDocument.write(doc);
+    f.contentDocument.close();
+    const go = () => {
+      // A print stylesheet cannot force a <details> open - the UA hides the
+      // contents until the attribute is present - so set it on the printed copy.
+      f.contentDocument.querySelectorAll('details').forEach((d) => d.setAttribute('open', ''));
+      f.contentWindow.focus();
+      f.contentWindow.print();
+      setTimeout(() => f.remove(), 1000);
+    };
+    if (f.contentDocument.readyState === 'complete') go();
+    else f.contentWindow.addEventListener('load', go, { once: true });
+  }
+
+
+  function closeReportOverlay() {
+    reportOverlayOpen = false;
+    if (reportOverlayEl) reportOverlayEl.innerHTML = '';
+  }
+
+  function ensureReportCss() {
+    if (document.getElementById('afxdp-report-css')) return;
+    const st = document.createElement('style');
+    st.id = 'afxdp-report-css';
+    st.textContent = REPORT_CSS;
+    document.head.appendChild(st);
+  }
+
+  function rerenderReportOverlay() {
+    if (!reportOverlayOpen) return;
+    // The element is bound by Svelte only after the {#if} flushes, and the first
+    // SSE event can arrive before that. Returning silently left the tab blank
+    // until a manual reload happened to order those two the other way round, so
+    // retry on the next tick and let whichever arrives last trigger the render.
+    if (!reportOverlayEl || !getReportViews().length) {
+      if (!reportRetry) {
+        reportRetry = setTimeout(function () { reportRetry = null; rerenderReportOverlay(); }, 120);
+      }
+      return;
+    }
+    ensureReportCss();
+    const views = getReportViews();
+    // Preserve scroll position and IP selection across re-renders
+    const scrollTop = reportOverlayEl.scrollTop;
+    const selectedIPs = new Set();
+    reportOverlayEl.querySelectorAll('#inv-table tr.sel').forEach((tr) => {
+      if (tr.dataset.ip) selectedIPs.add(tr.dataset.ip);
+    });
+
+    const body = buildCombinedReportBody(views, panel?.timezone?.() || '');
+    const contentEl = reportOverlayEl.querySelector('.report-content');
+    if (contentEl) {
+      contentEl.innerHTML = body;
+    } else {
+      reportOverlayEl.innerHTML = `<div class="report-content">${body}</div>`;
+    }
+
+    const root = reportOverlayEl.querySelector('.report-content');
+    reportInteractions(root);
+
+    // Restore IP selection
+    if (selectedIPs.size > 0) {
+      root.querySelectorAll('#inv-table tr[data-ip]').forEach((tr) => {
+        if (selectedIPs.has(tr.dataset.ip)) tr.click();
+      });
+    }
+    // Restore scroll
+    reportOverlayEl.scrollTop = scrollTop;
   }
 
   function remount() {
@@ -105,14 +228,18 @@
   // Rebuild the viz from live state for the current kind+variation (debounced).
   function liveRerender() {
     if (!conn) return;
-    const combos = conn.combos();
-    panel?.setCombos(combos, { kind, variation });
+    // At most two entries: ucast and/or mcast, each unifying its variations.
+    panel?.setCombos(conn.kinds(), { kind });
     fleet = conn.toFleet(kind, variation);
     // Prune targetIds: a terminated/offline node cannot silently scope a run.
     const pruned = prunedTargets(targetIds, fleet.nodes);
     if (pruned.size !== targetIds.size) targetIds = pruned;
     updateTargetPanel();
-    loading = false; error = ''; remount();
+    loading = false; error = '';
+    // A report tab renders no map, so skip the mount, and render the report
+    // before anything optional so it cannot be starved by a later failure.
+    if (reportOverlayOpen) rerenderReportOverlay();
+    else remount();
     const s = conn.stats();
     panel?.setStats({ ...s, updated: Date.now() });
   }
@@ -127,11 +254,15 @@
     const N = fleet ? fleet.nodes.filter((n) => n.online !== false).length : 0;
     const k = targetIds.size;
     const pairs = countPairs(N, k, scope);
-    panel.setTargets({ count: k, pairs, scope, totalNodes: N });
+    panel.setTargets({ count: k, pairs, scope, totalNodes: N, preset: activePreset });
   }
 
   // Target toggle handler — called from 2D checkbox / shift+click and 3D shift+click.
   function onToggleTarget(instanceId) {
+    // A manual pick no longer corresponds to a preset, so drop the highlight.
+    activePreset = null;
+    // This instance becomes the anchor the group presets expand from.
+    targetAnchor = targetIds.has(instanceId) ? null : instanceId;
     if (targetIds.has(instanceId)) targetIds.delete(instanceId);
     else targetIds.add(instanceId);
     // D3: auto-switch scope when among yields 0 pairs (k<2).
@@ -242,26 +373,46 @@
       onToggleLive: (on) => { heartbeatOn = on; if (!on) { stopHeartbeat(); panel?.setStatus('live monitoring off'); } },
       // A heartbeat mode was chosen (or cleared) in the live panel.
       onHeartbeat: (sel) => { if (!sel) { stopHeartbeat(); panel?.setStatus('heartbeat stopped'); } else { startHeartbeat(sel); } },
-      onSelectView: ({ kind: k, variation: v }) => { kind = k; variation = v; liveRerender(); },
+      onSelectView: ({ kind: k }) => { kind = k; variation = null; liveRerender(); },
       onPickResult: (p) => { if (p) load(`/api/fleet?path=${encodeURIComponent(p)}`, p); },
-      onReport: () => {
-        if (!fleet || !(fleet.nodes || []).length) { panel?.setStatus('no data to report yet'); return; }
-        const html = buildReportHTML(fleet, kind, variation);
-        const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
-        const a = Object.assign(document.createElement('a'), {
-          href: url, download: `afxdp-report-${kind}-${variation}-${Date.now()}.html`,
-        });
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
-        panel?.setStatus(`downloaded report ${kind}/${variation}`);
-      },
       onRun: doRun,
+      onClearTargets: () => {
+        targetIds = new Set(); activePreset = null; targetAnchor = null; scope = SCOPE_AMONG;
+        updateTargetPanel(); remount();
+      },
       onScopeChange: (s) => { scope = s; updateTargetPanel(); remount(); },
-      onPreset: (ids) => { targetIds = new Set(ids); if (scope === SCOPE_AMONG && targetIds.size === 1) scope = SCOPE_FANOUT; updateTargetPanel(); remount(); },
-      onClearTargets: () => { targetIds = new Set(); scope = SCOPE_AMONG; updateTargetPanel(); remount(); },
+      onPreset: (name) => {
+        // Presets are group expansions of the MARKED instance: PG selects every
+        // instance sharing its placement group, AZ every one in its AZ, and so
+        // on. Pressing the active preset again collapses back to just that
+        // instance, keeping the anchor so another grouping can be tried without
+        // re-marking. The buttons are disabled while nothing is marked.
+        const anchor = targetAnchor || (targetIds.size ? [...targetIds][0] : null);
+        if (!anchor) return;
+        if (activePreset === name) {
+          targetIds = new Set([anchor]);
+          activePreset = null;
+          updateTargetPanel(); remount(); return;
+        }
+        targetIds = new Set(resolvePreset(name, fleet?.nodes || [], anchor));
+        activePreset = targetIds.size ? name : null;
+        if (scope === SCOPE_AMONG && targetIds.size === 1) scope = SCOPE_FANOUT;
+        updateTargetPanel(); remount();
+      },
     });
 
     const params = new URLSearchParams(location.search);
+
+    // If opened as a report tab (?report=<kind>), render only the live report
+    // overlay. The tab opens its own SSE connection (fresh app instance) so it
+    // stays live. No topology is rendered.
+    if (params.get('report')) {
+      kind = params.get('report');
+      connect();
+      reportOverlayOpen = true;
+      return;
+    }
+
     // Default: connect to the live backend (shows recent test or a blank map).
     // Only load a static fleet.json when explicitly requested via ?data=.
     if (params.get('data')) await load(params.get('data'), params.get('data'));
@@ -269,24 +420,73 @@
 
     try { const res = await fetch('/api/results'); if (res.ok) { runs = await res.json(); panel?.setResults(runs); } } catch { /* no dev API */ }
   });
+  afterUpdate(() => {
+    if (reportOverlayOpen && reportOverlayEl && !reportOverlayEl.querySelector('.report-content')) {
+      rerenderReportOverlay();
+    }
+  });
+
   onDestroy(() => { if (handle) handle.dispose(); stopHeartbeat(); if (conn) conn.close(); if (panel) panel.dispose(); });
 </script>
 
 <div class="controls-host" bind:this={controlsHost}></div>
 <div class="root" bind:this={container}></div>
 
+{#if reportOverlayOpen}
+<div class="report-overlay" data-report-overlay>
+  <div class="report-toolbar">
+    <button class="report-toolbar-btn" on:click={printReport}>Save as PDF</button>
+  </div>
+  <div class="report-body" bind:this={reportOverlayEl}></div>
+</div>
+{/if}
+
 {#if loading}<div class="msg">Loading topology…</div>{/if}
 {#if error}<div class="msg err">Failed to load: {error}</div>{/if}
 
 <style>
   .root { position: fixed; inset: 0; }
-  /* controls-host MUST be highest z-index — above the 3D CSS2DRenderer overlay
-     (which is position:absolute with high z-index) and above all canvas elements.
-     pointer-events:none lets clicks through to the canvas; .cp-panel is auto. */
   .controls-host { position: fixed; inset: 0; pointer-events: none; z-index: 9999; }
   .controls-host :global(.cp-panel) { pointer-events: auto; }
   .msg { position: fixed; bottom: 16px; right: 16px; z-index: 9999; color: #e6edf3;
     background: rgba(22,27,34,.92); border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px;
     font: 13px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
   .msg.err { color: #f85149; border-color: #f85149; }
+
+  .report-overlay { position: fixed; inset: 0; z-index: 10000; display: flex; flex-direction: column;
+    background: #0d1117; }
+  .report-toolbar { display: flex; gap: 8px; padding: 8px 16px; background: #161b22;
+    border-bottom: 1px solid #30363d; flex-shrink: 0; }
+  .report-toolbar-btn { background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+    border-radius: 6px; padding: 6px 14px; cursor: pointer; font: 600 13px system-ui; }
+  .report-toolbar-btn:hover { background: #30363d; color: #fff; }
+  .report-body { flex: 1; overflow: auto; padding: 22px;
+    font-family: system-ui, -apple-system, sans-serif; color: #e6edf3; }
+
+  @media print {
+    /* Landscape: the measurements table is wide. */
+    @page { size: landscape; margin: 10mm; }
+    .controls-host, .root, .report-toolbar, .msg { display: none !important; }
+    /* Undo the whole screen layout. While the overlay is fixed + flex with an
+       overflow:auto body, printing captures only the visible viewport, which is
+       why just the first page came out. */
+    :global(html), :global(body) { height: auto !important; overflow: visible !important;
+      background: #fff !important; }
+    .report-overlay { position: static !important; inset: auto !important; display: block !important;
+      height: auto !important; overflow: visible !important; z-index: auto !important;
+      background: #fff; }
+    .report-body { flex: none !important; height: auto !important; max-height: none !important;
+      overflow: visible !important; padding: 0; color: #111; background: #fff; }
+    .report-body :global(table) { break-inside: avoid; page-break-inside: avoid; }
+    .report-body :global(details) { display: block; }
+    .report-body :global(details[open]), .report-body :global(details) { open: true; }
+    .report-body :global(details > *) { display: block; }
+    .report-body :global(details > summary) { display: list-item; }
+    .report-body :global(.coverage) { background: #fefce8; color: #92400e; border-color: #d4d4d4; }
+    .report-body :global(.method) { background: #f8fafc; color: #1e293b; border-color: #d4d4d4; }
+    .report-body :global(th) { background: #f1f5f9; color: #334155; }
+    .report-body :global(td), .report-body :global(th) { border-color: #cbd5e1; }
+    .report-body :global(.meta) { color: #475569; }
+    .report-body :global(h1), .report-body :global(h2) { color: #111; }
+  }
 </style>

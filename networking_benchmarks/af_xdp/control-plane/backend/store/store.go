@@ -53,10 +53,9 @@ type Store struct {
 	// so this is the handoff between them. 0 means "outside any campaign".
 	currentRun atomic.Int64
 
-	// flushed is signalled by the writer after each batch commit so tests and
-	// shutdown can wait for durability instead of sleeping.
-	flushMu sync.Mutex
-	flushCh chan struct{}
+	// flushReq carries a caller's ack channel to the writer, which commits at
+	// once and closes it. This is what makes Flush deterministic.
+	flushReq chan chan struct{}
 }
 
 // SetCurrentRun records which campaign subsequent telemetry belongs to.
@@ -78,54 +77,26 @@ func (s *Store) CurrentRun() int64 {
 }
 
 // Flush blocks until the writer has committed everything queued at call time.
-// Without this, a caller can only sleep and hope, which makes tests flaky and
-// gives shutdown no way to guarantee the last batch reached disk.
+//
+// It asks the writer to commit immediately rather than waiting for the batch
+// timer, so a caller never pays batchTimeout just to observe its own write.
+// Shutdown and tests both need that guarantee; polling or sleeping instead
+// makes tests slow and, worse, flaky.
 func (s *Store) Flush() {
 	if s == nil {
 		return
 	}
-	s.flushMu.Lock()
-	if s.flushCh == nil {
-		s.flushCh = make(chan struct{}, 1)
-	}
-	ch := s.flushCh
-	s.flushMu.Unlock()
-	// Drain any stale signal, then wait for the next commit.
+	ack := make(chan struct{})
 	select {
-	case <-ch:
-	default:
+	case s.flushReq <- ack:
+	case <-s.stopCh:
+		return // writer is gone; nothing can still be queued
+	case <-time.After(5 * time.Second):
+		return
 	}
-	deadline := time.After(5 * time.Second)
-	for {
-		if len(s.ch) == 0 {
-			// Queue drained; one more commit boundary guarantees it is on disk.
-			select {
-			case <-ch:
-			case <-time.After(batchTimeout + 200*time.Millisecond):
-			case <-deadline:
-			}
-			return
-		}
-		select {
-		case <-ch:
-		case <-time.After(50 * time.Millisecond):
-		case <-deadline:
-			return
-		}
-	}
-}
-
-// signalFlush notifies any waiting Flush that a batch was committed.
-func (s *Store) signalFlush() {
-	s.flushMu.Lock()
-	if s.flushCh == nil {
-		s.flushCh = make(chan struct{}, 1)
-	}
-	ch := s.flushCh
-	s.flushMu.Unlock()
 	select {
-	case ch <- struct{}{}:
-	default:
+	case <-ack:
+	case <-time.After(5 * time.Second):
 	}
 }
 
@@ -150,9 +121,10 @@ func OpenStore(path string, retentionDays int) (*Store, error) {
 	}
 
 	s := &Store{
-		db:     db,
-		ch:     make(chan measurementRow, storeChanCap),
-		stopCh: make(chan struct{}),
+		db:       db,
+		ch:       make(chan measurementRow, storeChanCap),
+		flushReq: make(chan chan struct{}, 8),
+		stopCh:   make(chan struct{}),
 	}
 	s.wg.Add(1)
 	go s.writer()
@@ -282,7 +254,6 @@ func (s *Store) writer() {
 			log.Printf("store: commit: %v", err)
 		}
 		batch = batch[:0]
-		s.signalFlush()
 	}
 
 	for {
@@ -315,6 +286,19 @@ func (s *Store) writer() {
 				}
 				timer.Reset(batchTimeout)
 			}
+		case ack := <-s.flushReq:
+			// Drain whatever is queued, commit it, then acknowledge.
+		pending:
+			for {
+				select {
+				case r := <-s.ch:
+					batch = append(batch, r)
+				default:
+					break pending
+				}
+			}
+			flush()
+			close(ack)
 		case <-timer.C:
 			flush()
 			timer.Reset(batchTimeout)

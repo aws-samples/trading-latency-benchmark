@@ -123,10 +123,10 @@ export function renderNodes(ctx) {
     const roleLabel = node.role && ROLE_LABEL[node.role];
     const roleBadge = roleLabel
       ? '<span class="role-badge role-' + esc(ROLE_CSS[node.role] || node.role) + '">' + roleLabel + '</span>' : '';
-    // Target checkbox (D1): visible when target set is non-empty, appears on hover otherwise.
+    // Target checkbox (D1): contour is always visible; only the fill changes.
     const instanceId = node.instance_id || node.private_ip;
     const isTargeted = ctx.targetIds.has(instanceId);
-    const targetBoxClass = 'target-box' + (isTargeted ? ' checked' : '') + (ctx.targetIds.size > 0 ? ' visible' : '');
+    const targetBoxClass = 'target-box' + (isTargeted ? ' checked' : '');
     el.innerHTML = '<span class="' + targetBoxClass + '" data-target-box></span>'
       + '<span class="ip ip-private">' + esc(node.private_ip) + '</span>'
       + '<span class="ip ip-public">' + (node.public_ip ? esc(node.public_ip) : '\u2014') + '</span>'

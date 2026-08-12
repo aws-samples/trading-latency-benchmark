@@ -34,31 +34,51 @@ func ResolvePairs(online []registry.Node, ids []string, scope string) (
 	// Only online nodes are ever measurable. A node that dropped out between the
 	// UI selecting it and the campaign starting must not be dispatched to.
 	up := make([]registry.Node, 0, len(online))
-	byID := map[string]registry.Node{}
 	for _, n := range online {
 		if !n.Online {
 			continue
 		}
 		up = append(up, n)
-		byID[n.InstanceID] = n
+	}
+
+	// A target may be named by instance id OR private IP. The web identifies
+	// nodes by private IP throughout - the matrix, edges and pinned tables are
+	// all keyed that way - so accepting only instance ids rejects every
+	// selection the UI can express.
+	matches := func(n registry.Node, id string) bool {
+		return id == n.InstanceID || id == n.PrivateIP
 	}
 
 	// Resolve the target set, preserving the fleet's own ordering so a run is
 	// deterministic regardless of the order the user clicked nodes in.
 	var targets []registry.Node
 	if len(ids) > 0 {
-		want := map[string]bool{}
+		unresolved := map[string]bool{}
 		for _, id := range ids {
-			want[id] = true
+			unresolved[id] = true
 		}
 		for _, n := range up {
-			if want[n.InstanceID] {
-				targets = append(targets, n)
-				delete(want, n.InstanceID) // de-duplicate repeated ids
+			hit := false
+			for id := range unresolved {
+				if matches(n, id) {
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				continue
+			}
+			targets = append(targets, n)
+			// Drop every alias of this node, so naming it by id AND by IP
+			// cannot add it twice.
+			for id := range unresolved {
+				if matches(n, id) {
+					delete(unresolved, id)
+				}
 			}
 		}
-		for id := range want {
-			skipped = append(skipped, id) // offline or not in the fleet at all
+		for id := range unresolved {
+			skipped = append(skipped, id) // offline, or not in the fleet at all
 		}
 	}
 

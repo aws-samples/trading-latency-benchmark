@@ -30,9 +30,9 @@ export const CSS = `
 
 /* Target checkbox (D1): per-node circular checkbox for target-set membership. */
 .t2d-root .node .target-box { position: absolute; top: -6px; left: -6px; width: 14px; height: 14px;
-  border-radius: 50%; border: 2px solid rgba(255,215,0,0.5); background: rgba(13,17,23,0.85);
-  cursor: pointer; z-index: 35; opacity: 0; transition: opacity 0.15s; pointer-events: auto; }
-.t2d-root .node:hover .target-box, .t2d-root .node .target-box.visible { opacity: 1; }
+    border-radius: 50%; border: 2px solid rgba(255,215,0,0.5); background: rgba(13,17,23,0.85);
+    cursor: pointer; z-index: 35; opacity: 1; transition: transform 0.12s; pointer-events: auto; }
+  .t2d-root .node:hover .target-box { transform: scale(1.15); }
 .t2d-root .node .target-box.checked { background: #ffd700; border-color: #ffd700; opacity: 1; }
 /* Targeted node: gold ring, visually distinct from .selected (table-pinned). */
 .t2d-root .node.targeted { box-shadow: 0 0 0 3px rgba(255,215,0,0.7), 0 0 12px 2px rgba(255,215,0,0.3); z-index: 25; }
