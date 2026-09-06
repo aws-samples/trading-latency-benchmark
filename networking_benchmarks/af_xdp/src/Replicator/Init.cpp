@@ -128,14 +128,17 @@ void Replicator::initialize(bool useZeroCopy) {
     std::cout << "Interface " << listen_interface_
               << " IP=" << cached_iface_ip_ << std::endl;
 
-    // Forward path selector (REPLICATOR_FWD_MODE): copy (default) | inplace | kernel.
+    // Forward path selector (REPLICATOR_FWD_MODE): copy (default) | inplace | bpf_tx.
+    // "bpf_tx" forwards via the in-kernel eBPF XDP_TX hook, never reaching
+    // userspace — distinct from REPLICATOR_MODE=echo (plain UDP sockets,
+    // --echo-mode) and rtt's "kernel" variation (also plain sockets).
     if (const char* fm = getenv("REPLICATOR_FWD_MODE")) {
         if      (strcmp(fm, "inplace") == 0) fwd_mode_ = 1;
-        else if (strcmp(fm, "kernel")  == 0) fwd_mode_ = 2;
+        else if (strcmp(fm, "bpf_tx")  == 0) fwd_mode_ = 2;
         else                                 fwd_mode_ = 0;
     }
     std::cout << "Forward mode: "
-              << (fwd_mode_ == 2 ? "kernel (XDP_TX)" : fwd_mode_ == 1 ? "inplace (zero-copy)" : "copy")
+              << (fwd_mode_ == 2 ? "bpf_tx (XDP_TX)" : fwd_mode_ == 1 ? "inplace (zero-copy)" : "copy")
               << std::endl;
 
     // Upstream control: join control multicast group and prepare forward socket
@@ -160,11 +163,11 @@ void Replicator::configureXdpProgram() {
         throw std::runtime_error("Could not find config_map in loaded XDP program — cannot configure filter");
     }
 
-    // fwd_map is only used by REPLICATOR_FWD_MODE=kernel; absence is non-fatal
-    // (an older mcast.o without it just can't do kernel forward).
+    // fwd_map is only used by REPLICATOR_FWD_MODE=bpf_tx; absence is non-fatal
+    // (an older mcast.o without it just can't do bpf_tx forward).
     fwd_map_fd_ = XdpSocket::getXdpMapFd("fwd_map");
     if (fwd_mode_ == 2 && fwd_map_fd_ < 0) {
-        std::cerr << "[mcast] REPLICATOR_FWD_MODE=kernel but fwd_map not found in XDP program; "
+        std::cerr << "[mcast] REPLICATOR_FWD_MODE=bpf_tx but fwd_map not found in XDP program; "
                      "falling back to userspace copy forward" << std::endl;
         fwd_mode_ = 0;
     }

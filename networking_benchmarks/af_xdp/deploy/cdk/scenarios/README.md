@@ -8,11 +8,11 @@ Load via: `--context scenario=<name>` (e.g. `--context scenario=u-cpg-3`)
 
 All nodes act as peers (role is irrelevant for ucast - the orchestrator uses all online nodes). Measures point-to-point latency.
 
-**Instance type: `c7i.4xlarge`** (set per entry). Unicast co-locates the replicator
+**Instance type: `m8a.2xlarge`** (default; set per entry). Unicast co-locates the replicator
 poll thread + rtt sender + rtt receiver on the *same* node, needing 5 dedicated cores
 (OS, ENA IRQ, replicator poll, rtt send, rtt recv). Core pinning is derived **dynamically at runtime** from the
 isolated set (`run_ucast.yaml` `auto_pin` + the replicator's `initializeCpuCores`), so
-the same AMI/code adapts to any size.
+the same AMI/code adapts to any size or vendor (Intel `c7i`/`c6in`/... or AMD `m8a`).
 
 | File | Topology | Instances | Notes |
 |------|----------|:---------:|-------|
@@ -20,20 +20,24 @@ the same AMI/code adapts to any size.
 | `u-xaz-xcpg-10.json` | Cross AZ (a+b): 2 CPGs + 2 SPGs + 2 unplaced | 10 | Full placement matrix |
 | `u-cpg-22.json` | Same AZ (b), single cluster PG (eu-central-1) | 22 | Large CPG: source + replicator + 20 destinations |
 | `u-m8azn-metal-5.json` | 2 same cluster PG (az a) + 1 same AZ (a, unplaced) + 1 other AZ (b) + 1 other region (eu-west-1) | 5 | `m8azn.metal-12xl` bare metal - cross-region requires the AMI baked in eu-west-1 |
+| `u-m8a-2xl-3.json` | Same AZ (a), single cluster PG | 3 | `m8a.2xlarge` virtual (AMD, no SMT - 8 vCPUs = 8 online cores, same core budget as `c7i.4xlarge`); comparable to the `mcast2ucast` DPDK benchmark's virtual-instance runs |
 
 ## mcast/ - Multicast fan-out benchmarks
 
 Explicit roles: source → replicator → destination(s). Measures fan-out latency.
 
-**Instance type: `c7i.2xlarge`** (set per entry in most mcast scenarios). Each node runs a single busy-poll app
+**Instance type: `m8a.2xlarge`** (default; set per entry in most mcast scenarios). Each node runs a single busy-poll app
 (`mcast_send` | replicator poll | `mcast_receive`), so 3 dedicated cores (OS, ENA IRQ,
-app) fit a 2xlarge - the cost-efficient choice.
+app) fit a 2xlarge - the cost-efficient choice, on either Intel (`c7i.2xlarge`) or AMD
+(`m8a.2xlarge`, no SMT - 8 vCPUs = 8 online cores, more headroom than the Intel
+equivalent's 4).
 
 | File | Topology | Instances | Notes |
 |------|----------|:---------:|-------|
 | `m-cpg-3.json` | Same AZ (a): source + replicator + destination in one cluster PG | 3 | Minimal mcast test (uses c7i.4xlarge) |
 | `m-xregion-3.json` | Cross region: source+replicator CPG (us-east-1), destination (eu-west-2) | 3 | Cross-region fan-out |
 | `m-xregion-xaz-xpg-6.json` | Source+replicator CPG (us-east-1a) → destinations across az-a/b + eu-west-2 | 6 | Mixed topology |
+| `m-m8a-metal-3.json` | Same AZ (a): source + replicator + destination, one cluster PG | 3 | `m8a.metal-24xl` bare metal (96 cores, AMD EPYC, no hypervisor) - comparable to the `mcast2ucast` DPDK benchmark's metal runs |
 
 ## all - Combined placement comparison
 
@@ -67,7 +71,7 @@ Create any JSON file with the `FleetEntry` schema:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | `c7i.4xlarge` | EC2 instance type |
+| `type` | string | `m8a.2xlarge` | EC2 instance type |
 | `count` | number | `1` | Number of instances |
 | `role` | string | `destination` | `source`, `replicator`, or `destination` |
 | `az` | string | `a` | AZ suffix (e.g. `"b"`) or full name (e.g. `"eu-west-2a"`) |

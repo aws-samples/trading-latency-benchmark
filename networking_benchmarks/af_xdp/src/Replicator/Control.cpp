@@ -277,9 +277,9 @@ std::vector<uint8_t> Replicator::processControlMessage(const uint8_t* message, s
                         group_destinations_[group_ip].insert_or_assign(destination_ip, dest);
                         all_destinations_.insert_or_assign(destination_ip, dest);
                     }
-                    // Kernel forward mode: push this destination into fwd_map so
+                    // bpf_tx forward mode: push this destination into fwd_map so
                     // mcast.o XDP_TX-forwards the group in-kernel (single dest/group).
-                    updateKernelFwdTarget(group_ip, dest, true);
+                    updateBpfTxFwdTarget(group_ip, dest, true);
                     response.push_back(1);
                 } catch (const std::exception& e) {
                     std::cerr << "MCAST_JOIN failed: " << e.what() << std::endl;

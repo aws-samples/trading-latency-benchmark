@@ -160,14 +160,23 @@ export PATH=/opt/af-xdp:$PATH
 EOF
 
 # ── 4b. CPU isolation for non-competing busy-polling ──────────────────────────
-# Core layout (c7i.2xlarge = 4 physical cores, SMT disabled):
+# Core layout (any instance with >=5 online cores, e.g. c7i.4xlarge with nosmt,
+# or m8a.2xlarge which has no SMT to disable in the first place):
 #   core 0 : OS + NIC IRQs (housekeeping)
 #   core 1 : replicator AF_XDP busy-poll thread (queue 0 → core 1)
 #   core 2 : receiver (SCHED_FIFO)
 #   core 3 : sender   (SCHED_FIFO)
+#   core 4 : spare
 # isolcpus removes 1-4 from the scheduler's load balancer; nohz_full stops the
 # scheduler tick on them; rcu_nocbs offloads RCU callbacks; nosmt disables HT
-# siblings so each isolated core is a full physical core (deterministic).
+# siblings on vendors that have SMT (Intel) so each isolated core is a full
+# physical core - a no-op on vendors without SMT (AMD m8a, one vCPU per core).
+# This 4-core literal is fixed regardless of instance size or vendor; the
+# runtime narrows it to what the workload needs and never targets an offline
+# core (see initializeCpuCores / derivePins), but it does NOT scale up to use
+# more cores on a larger instance (e.g. m8a.metal-24xl's 96 cores) - that is a
+# deliberate tradeoff for core-count parity with comparable DPDK benchmarks,
+# not an oversight.
 ISOL="isolcpus=1-4 nohz_full=1-4 rcu_nocbs=1-4 nosmt intel_idle.max_cstate=0 processor.max_cstate=1 default_hugepagesz=2M hugepagesz=2M hugepages=512"
 if ! grep -q "isolcpus=" /etc/default/grub 2>/dev/null; then
   sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=\"|GRUB_CMDLINE_LINUX_DEFAULT=\"${ISOL} |" /etc/default/grub
@@ -300,7 +309,7 @@ IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
 IP=$(ip -4 addr show "$IFACE" | awk '/inet /{print $2}' | cut -d/ -f1)
 
 case "$MODE" in
-  kernel)  exec /opt/af-xdp/replicator --echo-mode "$IP" "$PORT" ;;
+  echo)    exec /opt/af-xdp/replicator --echo-mode "$IP" "$PORT" ;;
   ucast)   exec /opt/af-xdp/replicator "$IFACE" "$IP" "$PORT" "$ZC" ;;
   mcast)   exec /opt/af-xdp/replicator "$IFACE" "$MCAST_GROUP" "$PORT" "$ZC" --mcast ;;
   *) echo "Unknown REPLICATOR_MODE=$MODE" >&2; exit 1 ;;
@@ -312,7 +321,7 @@ chmod +x /usr/local/bin/start-replicator.sh
 cat > /etc/default/replicator <<'EOF'
 # Replicator configuration — sourced by start-replicator.sh
 # Override via ansible, cloud-init, or manual edit.
-REPLICATOR_MODE=ucast       # kernel | ucast | mcast
+REPLICATOR_MODE=ucast       # echo | ucast | mcast
 REPLICATOR_PORT=5000
 REPLICATOR_MCAST_GROUP=224.0.31.50
 REPLICATOR_ZEROCOPY=true    # AF_XDP zero-copy (ENA-supported); set false to force copy/DRV mode

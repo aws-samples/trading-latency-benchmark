@@ -29,13 +29,13 @@
 import { fmtLat, cellColor, isCrossRegion, esc, LATENCY_BEST_COLOR } from './2d/palette.js';
 import { buildCompareHTML } from './report.js';
 
-/** Short per-mode badge: K/X for ucast kernel/xdp, C/I/K for mcast fwd modes. */
+/** Short per-mode badge: K/X for ucast kernel/xdp, C/I/XT for mcast fwd modes. */
 export const MODE_BADGE = {
   'ucast/kernel': 'K',
   'ucast/xdp': 'X',
   'mcast/copy': 'C',
   'mcast/inplace': 'I',
-  'mcast/kernel': 'MK',
+  'mcast/bpf_tx': 'BT',
 };
 
 const modeKey = (kind, variation) => `${kind}/${variation}`;
@@ -268,7 +268,7 @@ function methodology(kind, variation) {
   const detail = isMcast
     ? `<dt>Clock</dt><dd><code>CLOCK_REALTIME</code> on all three nodes \u2014 necessarily, since a one-way delay spans hosts. chrony disciplines each node to the <b>ENA PHC hardware clock</b> (<code>refclock PHC /dev/ptp0</code>); AWS Time Sync is the fallback. Observed RMS offset is tens of nanoseconds.</dd>
        <dt>Stamps</dt><dd><code>ts_ns</code> at the source before TX ring submit, <code>replicator_ns</code> at replicator RX, <code>rx_ns</code> at destination RX. One-way = <code>rx_ns \u2212 ts_ns</code>.</dd>
-       <dt>Fwd mode</dt><dd><code>${esc(variation)}</code>. <code>XDP_TX</code> (kernel) is a single-destination passthrough, not a fan-out.</dd>`
+       <dt>Fwd mode</dt><dd><code>${esc(variation)}</code>. <code>XDP_TX</code> (<code>xdp_tx</code>) is a single-destination passthrough, not a fan-out.</dd>`
     : `<dt>Clock</dt><dd>A single <code>CLOCK_REALTIME</code> domain on one host, so <b>no inter-node clock sync is required</b> and none of its error enters the result. No TSC and no PHC are used for RTT.</dd>
        <dt>Stamps</dt><dd>TX <code>CLOCK_REALTIME</code> immediately before the send; RX a kernel software timestamp recorded in the NAPI receive path, before the socket queue.</dd>
        <dt>Variation</dt><dd><code>${esc(variation)}</code>. <code>--xdp-rx</code> is instrumented kernel RX, NOT a bypass receive.</dd>`;

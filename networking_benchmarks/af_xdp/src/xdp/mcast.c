@@ -82,11 +82,11 @@ struct {
     __type(value, struct unicast_config);
 } config_map SEC(".maps");
 
-// Kernel-side forward target (REPLICATOR_FWD_MODE=kernel). When enabled != 0 for
+// In-kernel forward target (REPLICATOR_FWD_MODE=bpf_tx). When enabled != 0 for
 // a matched config slot, the XDP program rewrites the frame's L2/L3/L4 headers for
 // this destination, stamps replicator_ns, and XDP_TX's it back out the NIC —
 // forwarding the packet entirely in the kernel, no AF_XDP/userspace round-trip.
-// Populated from userspace (Replicator) on join when in kernel mode. Parallel to
+// Populated from userspace (Replicator) on join when in bpf_tx mode. Parallel to
 // config_map (same slot index). All addresses network byte order.
 struct fwd_target {
     __u8  dmac[6];   // destination MAC
@@ -95,7 +95,7 @@ struct fwd_target {
     __u32 sip;       // replicator (source) IP
     __u16 dport;     // destination UDP port
     __u16 sport;     // replicator (source) UDP port
-    __u8  enabled;   // 0 = redirect to XSK (default); 1 = kernel XDP_TX forward
+    __u8  enabled;   // 0 = redirect to XSK (default); 1 = in-kernel XDP_TX forward
     __u8  pad[3];
 };
 
@@ -186,12 +186,12 @@ int mcast(struct xdp_md *ctx)
     if (matched_idx < 0)
         return XDP_PASS;
 
-    // ── Kernel-side forward (REPLICATOR_FWD_MODE=kernel) ──────────────────────
+    // ── In-kernel forward (REPLICATOR_FWD_MODE=bpf_tx) ─────────────────────────
     // If a forward target is enabled for the matched slot, rewrite the frame's
     // headers for the destination and XDP_TX it back out the NIC — no AF_XDP or
     // userspace round-trip.
     //
-    // Kernel forward (REPLICATOR_FWD_MODE=kernel): rewrite headers and XDP_TX.
+    // bpf_tx forward (REPLICATOR_FWD_MODE=bpf_tx): rewrite headers and XDP_TX.
     // Userspace only enables this when exactly one destination is registered;
     // fan-out to multiple destinations requires bpf_clone_redirect(), which is
     // not used here. copy or inplace mode handles multi-destination workloads.

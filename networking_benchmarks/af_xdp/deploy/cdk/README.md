@@ -75,7 +75,7 @@ JSON array of `FleetEntry` objects - all fields optional with sensible defaults:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | `c7i.4xlarge` | EC2 instance type |
+| `type` | string | `m8a.2xlarge` | EC2 instance type |
 | `count` | number | `1` | Number of instances to create |
 | `role` | string | `destination` | Logical role: `source`, `replicator`, or `destination` |
 | `az` | string | `a` | AZ suffix (e.g. `"a"`) or full name (e.g. `"us-east-1a"`) |
@@ -146,7 +146,7 @@ Entries whose `region` differs from the primary region create a **second** Fleet
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `instanceType` | `c7i.xlarge` | Builder instance type |
+| `instanceType` | `m8a.2xlarge` | Builder instance type |
 | `gitRepo` | `https://github.com/aws-samples/trading-latency-benchmark.git` | Source repo to clone |
 | `gitRef` | `main` | Git ref/branch to build from |
 

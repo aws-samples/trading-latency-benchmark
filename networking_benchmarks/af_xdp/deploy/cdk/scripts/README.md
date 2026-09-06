@@ -4,7 +4,7 @@ AMI bake script executed as EC2 UserData during the `ami-builder` deployment.
 
 ## bake-ami.sh
 
-Runs on a temporary c7i.xlarge instance, takes ~9-10 minutes, produces a universal AMI for all roles.
+Runs on a temporary builder instance (default `m8a.2xlarge`), takes ~9-10 minutes, produces a universal AMI for all roles. The build targets `-march=x86-64-v3` (not `-march=native`), so the resulting binaries run correctly regardless of which vendor (Intel or AMD) the builder or the fleet nodes happen to be.
 
 ### Execution Flow
 
@@ -64,7 +64,7 @@ intel_idle.max_cstate=0 processor.max_cstate=1
 default_hugepagesz=2M hugepagesz=2M hugepages=512
 ```
 
-Active after first boot. On a 4-physical-core `c7i.2xlarge`: core 0 = OS + housekeeping, cores 1-3 = isolated for datapath. The runtime narrows this to what the workload needs (replicator `initializeCpuCores`, `run_ucast.yaml` `auto_pin`, `run_mcast` pinning).
+Active after first boot. `isolcpus=1-4` is a fixed 4-core literal regardless of instance size or vendor: on an 8-online-core instance that leaves core 0 = OS + housekeeping, cores 1-4 = isolated for datapath, cores 5-7 unused. The runtime narrows this to what the workload needs (replicator `initializeCpuCores`, `run_ucast.yaml` `auto_pin`, `run_mcast` pinning) and never targets an offline core regardless of how SMT/`nosmt` shrinks the online set (see `nosmt` note above - it's a no-op on `m8a`, which has no SMT).
 
 ### Binaries Installed (`/opt/af-xdp/`)
 

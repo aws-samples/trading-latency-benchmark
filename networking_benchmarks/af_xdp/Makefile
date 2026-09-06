@@ -1,5 +1,11 @@
 CXX = g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -O3 -march=native -mtune=native
+# x86-64-v3 (AVX2/FMA/BMI2/etc.) instead of -march=native: native bakes in
+# whatever ISA extensions the BUILD host's CPU happens to have, which is unsafe
+# once the fleet spans both Intel (c7i/c6in/...) and AMD (m8a) - a binary built
+# on one vendor can hit an illegal instruction on the other. x86-64-v3 is
+# supported by both vendor families in the fleet and already covers the
+# msse4.2/avx2/fma flags below, so those are now redundant but kept explicit.
+CXXFLAGS = -std=c++17 -Wall -Wextra -O3 -march=x86-64-v3 -mtune=generic
 CXXFLAGS += -flto -fno-omit-frame-pointer -g
 CXXFLAGS += -DNDEBUG -funroll-loops -MMD -MP
 CXXFLAGS += -msse4.2 -mavx2 -mfma

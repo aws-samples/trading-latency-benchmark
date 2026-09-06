@@ -112,7 +112,7 @@ func (r *Runner) SetFwdMode(mode string) error {
 	return r.waitReplicator(true, 30*time.Second)
 }
 
-// SetMode sets REPLICATOR_MODE (ucast|mcast|kernel) and the fan-out FWD_MODE
+// SetMode sets REPLICATOR_MODE (ucast|mcast|echo) and the fan-out FWD_MODE
 // (copy clears it), then restarts the replicator so it re-attaches with the new
 // program. Used to put the replicator node into mcast fan-out for a campaign.
 func (r *Runner) SetMode(mode, fwd string) error {
@@ -171,7 +171,7 @@ func (r *Runner) PurgeDests() error {
 	return err
 }
 
-// ReplicatorMode returns the REPLICATOR_MODE value from /etc/default/replicator (ucast|mcast|kernel).
+// ReplicatorMode returns the REPLICATOR_MODE value from /etc/default/replicator (ucast|mcast|echo).
 func (r *Runner) ReplicatorMode() string {
 	out, _ := sh(`grep -o 'REPLICATOR_MODE=[a-z]*' /etc/default/replicator 2>/dev/null | cut -d= -f2`)
 	return strings.TrimSpace(out)
@@ -416,8 +416,12 @@ func (r *Runner) RunMcastReceive(p proto.McastParams) (proto.Metrics, error) {
 	// Clear the previous run's log so McastRxReady cannot read a stale
 	// "listening" line from an earlier mode as readiness for this one.
 	_ = os.Remove(mcastRxLog)
-	cmd := fmt.Sprintf(`sudo timeout %d taskset -c %d %s -I %s -g %s -p %d -c %d -t %d -j /tmp/mcast_results.json >/tmp/mcast_receive.log 2>&1`,
-		p.TimeoutSec+5, recv, r.bin("mcast_receive"), iface(), p.Group, p.DataPort, p.Count, p.TimeoutSec)
+	flags := ""
+	if p.RxQueue != 0 {
+		flags += fmt.Sprintf(" -q %d", p.RxQueue)
+	}
+	cmd := fmt.Sprintf(`sudo timeout %d taskset -c %d %s -I %s -g %s -p %d -c %d -t %d%s -j /tmp/mcast_results.json >/tmp/mcast_receive.log 2>&1`,
+		p.TimeoutSec+5, recv, r.bin("mcast_receive"), iface(), p.Group, p.DataPort, p.Count, p.TimeoutSec, flags)
 	if _, err := sh(cmd); err != nil {
 		// timeout/exit is expected; fall through to read JSON
 		_ = err
@@ -437,8 +441,15 @@ func (r *Runner) RunMcastReceive(p proto.McastParams) (proto.Metrics, error) {
 func (r *Runner) RunMcastSend(p proto.McastParams) error {
 	_, recv := derivePins()
 	send := recv // sender uses an isolated core too
-	cmd := fmt.Sprintf(`sudo taskset -c %d %s -I %s -D %s -g %s -p %d -c %d -i %d`,
-		send, r.bin("mcast_send"), iface(), p.ReplicatorIP, p.Group, p.DataPort, p.Count, p.IntervalUs)
+	flags := ""
+	if p.Size != 0 {
+		flags += fmt.Sprintf(" -s %d", p.Size)
+	}
+	if p.TxQueue != 0 {
+		flags += fmt.Sprintf(" -q %d", p.TxQueue)
+	}
+	cmd := fmt.Sprintf(`sudo taskset -c %d %s -I %s -D %s -g %s -p %d -c %d -i %d%s`,
+		send, r.bin("mcast_send"), iface(), p.ReplicatorIP, p.Group, p.DataPort, p.Count, p.IntervalUs, flags)
 	_, err := sh(cmd)
 	return err
 }

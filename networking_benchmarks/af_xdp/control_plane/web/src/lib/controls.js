@@ -145,8 +145,8 @@ export function mountControls(host, opts = {}) {
           <span class="cp-btn-group">
             <button class="cp-btn" data-run-mcast="copy" title="Replicator copies each RX frame into a fresh TX buffer per destination — safest, one kernel alloc per fan-out">copy</button>
             <button class="cp-btn" data-run-mcast="inplace" title="Replicator patches destination MAC/IP in-place on the RX frame — zero-copy for the last destination, fastest fan-out">inplace</button>
-            <button class="cp-btn" data-run-mcast="kernel" title="XDP_TX kernel forward — no userspace replicator, single-destination only, lowest possible hop latency">kernel</button>
-            <button class="cp-btn" data-run-mcast="all" title="Run all 3 mcast forward modes sequentially (copy → inplace → kernel)">all</button>
+            <button class="cp-btn" data-run-mcast="bpf_tx" title="XDP_TX in-kernel forward — no userspace replicator, single-destination only, lowest possible hop latency">bpf_tx</button>
+            <button class="cp-btn" data-run-mcast="all" title="Run all 3 mcast forward modes sequentially (copy → inplace → bpf_tx)">all</button>
           </span>
         </div>
         </div>
@@ -169,7 +169,7 @@ export function mountControls(host, opts = {}) {
         <div class="row"><span class="cp-btn-group">
           <button class="cp-btn" data-hb-mcast="copy">copy</button>
           <button class="cp-btn" data-hb-mcast="inplace">inplace</button>
-          <button class="cp-btn" data-hb-mcast="kernel">kernel</button>
+          <button class="cp-btn" data-hb-mcast="bpf_tx">bpf_tx</button>
           <button class="cp-btn" data-hb-mcast="all">all</button>
         </span></div>
       </div>
@@ -310,7 +310,7 @@ export function mountControls(host, opts = {}) {
   }));
   el.querySelectorAll('[data-run-mcast]').forEach((b) => b.addEventListener('click', () => {
     const mcastMode = b.dataset.runMcast;
-    const modes = mcastMode === 'all' ? ['copy', 'inplace', 'kernel'] : [mcastMode];
+    const modes = mcastMode === 'all' ? ['copy', 'inplace', 'bpf_tx'] : [mcastMode];
     startRun(b, { kind: 'mcast', modes, count: clamp(num('[data-count]'), 100, 1000000), interval_us: clamp(num('[data-interval]'), 10, 100000), timeout_sec: 25 });
   }));
 
@@ -403,7 +403,7 @@ export function mountControls(host, opts = {}) {
   el.querySelectorAll('[data-hb-ucast]').forEach((b) => b.addEventListener('click', () => hbClick(b, { kind: 'ucast', variation: b.dataset.hbUcast })));
   el.querySelectorAll('[data-hb-mcast]').forEach((b) => b.addEventListener('click', () => {
     const m = b.dataset.hbMcast;
-    hbClick(b, { kind: 'mcast', modes: m === 'all' ? ['copy', 'inplace', 'kernel'] : [m] });
+    hbClick(b, { kind: 'mcast', modes: m === 'all' ? ['copy', 'inplace', 'bpf_tx'] : [m] });
   }));
 
   return {

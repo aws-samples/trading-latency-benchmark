@@ -149,6 +149,25 @@ type UcastMatrixParams struct {
 	Nodes []string `json:"nodes,omitempty"`
 	// Scope expands Nodes into ordered pairs: among (default) | fanout | fanin.
 	Scope string `json:"scope,omitempty"`
+
+	// XdpTx/XdpRx independently override the client TX/RX transport, matching
+	// what deploy/ansible/run_ucast.yaml already allows (separate xdp_tx/xdp_rx
+	// booleans). nil => derive both from Variation=="xdp" (unchanged default
+	// behavior: "kernel" means neither, "xdp" means both).
+	XdpTx *bool `json:"xdp_tx,omitempty"`
+	XdpRx *bool `json:"xdp_rx,omitempty"`
+	// XdpTxQueue overrides the AF_XDP TX queue used when XdpTx is enabled
+	// (mirrors rtt's `--xdp-tx=<queue>`). 0 => default (queue 1).
+	XdpTxQueue int `json:"xdp_tx_queue,omitempty"`
+
+	// SendCPU/RecvCPU pin the rtt client's TX/RX threads to specific cores
+	// (mirrors rtt's positional send_cpu/recv_cpu args). CPU 0 is always the
+	// OS/SSH housekeeping core in this fleet's isolcpus layout, so — like
+	// every other 0-means-default field in this struct — 0 means "derive from
+	// the isolated CPU set" (matches ansible's auto_pin default) rather than
+	// "pin to CPU 0".
+	SendCPU int `json:"send_cpu,omitempty"`
+	RecvCPU int `json:"recv_cpu,omitempty"`
 }
 
 // DefaultMaxLossPct is the loss ceiling applied when UcastMatrixParams.MaxLossPct
@@ -169,6 +188,26 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 
 	xdpTx := p.Variation == "xdp"
 	xdpRx := p.Variation == "xdp"
+	// XdpTx/XdpRx, when explicitly set, override the Variation-derived default
+	// so a caller can enable one leg without the other — the same independence
+	// deploy/ansible/run_ucast.yaml already offers via separate xdp_tx/xdp_rx vars.
+	if p.XdpTx != nil {
+		xdpTx = *p.XdpTx
+	}
+	if p.XdpRx != nil {
+		xdpRx = *p.XdpRx
+	}
+	xdpTxQueue := 1
+	if p.XdpTxQueue != 0 {
+		xdpTxQueue = p.XdpTxQueue
+	}
+	sendCPU, recvCPU := -1, -1
+	if p.SendCPU != 0 {
+		sendCPU = p.SendCPU
+	}
+	if p.RecvCPU != 0 {
+		recvCPU = p.RecvCPU
+	}
 	if p.Count == 0 {
 		p.Count = 10000
 	}
@@ -396,8 +435,8 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 				awaitRestore(d.InstanceID)
 				cmd := proto.Command{Type: proto.CmdRunRTT, RTT: &proto.RTTParams{
 					TargetIP: d.PrivateIP, DataPort: p.DataPort, ListenIP: s.PrivateIP, ListenPort: p.ListenPort,
-					Count: p.Count, Rate: p.Rate, Warmup: p.Warmup, SendCPU: -1, RecvCPU: -1,
-					XdpTx: xdpTx, XdpTxQueue: 1, XdpRx: xdpRx, MaxLossPct: p.MaxLossPct,
+					Count: p.Count, Rate: p.Rate, Warmup: p.Warmup, SendCPU: sendCPU, RecvCPU: recvCPU,
+					XdpTx: xdpTx, XdpTxQueue: xdpTxQueue, XdpRx: xdpRx, MaxLossPct: p.MaxLossPct,
 				}}
 				res, err := o.dispatchRetry(s.InstanceID, cmd, perPair, 2)
 				n := atomic.AddInt64(&done, 1)
@@ -505,12 +544,23 @@ func max64(a, b int64) int64 {
 
 // McastMatrixParams configures a multicast fan-out campaign across fwd modes.
 type McastMatrixParams struct {
-	Modes      []string `json:"modes"` // subset of copy|inplace|kernel (default: all)
+	Modes      []string `json:"modes"` // subset of copy|inplace|bpf_tx (default: all)
 	Group      string   `json:"group"`
 	DataPort   int      `json:"data_port"`
 	Count      int      `json:"count"`
 	IntervalUs int      `json:"interval_us"`
 	TimeoutSec int      `json:"timeout_sec"`
+
+	// Size is the mcast_send payload size in bytes (mirrors `-s`; tool minimum
+	// 32B, tool default 64B). 0 => tool default. Matches mcast2ucast's
+	// `--payload` sweep parameter, which af_xdp had no equivalent of before.
+	Size int `json:"size,omitempty"`
+	// TxQueue overrides mcast_send's AF_XDP TX queue (mirrors `-q`). 0 => tool
+	// default (queue 1); queue 0 carries RSS/SSH traffic, see tools/README.md.
+	TxQueue int `json:"tx_queue,omitempty"`
+	// RxQueue overrides mcast_receive's AF_XDP/XDP queue index (mirrors `-q`).
+	// 0 is both "unset" and the tool default.
+	RxQueue int `json:"rx_queue,omitempty"`
 }
 
 // RunMcastMatrix drives the source -> replicator -> destination fan-out for each
@@ -535,7 +585,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 	atomic.StoreInt32(&o.cancel, 0)
 
 	if len(p.Modes) == 0 {
-		p.Modes = []string{"copy", "inplace", "kernel"}
+		p.Modes = []string{"copy", "inplace", "bpf_tx"}
 	}
 	if p.Group == "" {
 		p.Group = "224.0.31.50"
@@ -552,6 +602,9 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 	if p.TimeoutSec == 0 {
 		p.TimeoutSec = 60
 	}
+	// Size/TxQueue/RxQueue are left at 0 when unset — RunMcastSend/RunMcastReceive
+	// (and the C++ tools underneath) already treat 0 as "use the tool default",
+	// so no explicit default assignment is needed here.
 
 	source := o.reg.ByRole("source")
 	replicators := o.reg.AllByRole("replicator")
@@ -637,16 +690,16 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 			log.Printf("campaign mcast cancelled (replicator=%s)", replicator.PrivateIP)
 			return
 		}
-		// kernel (XDP_TX) mode is a single-destination passthrough - it cannot
+		// bpf_tx (XDP_TX) mode is a single-destination passthrough - it cannot
 		// fan out to multiple receivers. Use only the first destination as the
 		// representative measurement; copy/inplace test the full fan-out.
 		modeDests := dests
-		if mode == "kernel" && len(dests) > 1 {
+		if mode == "bpf_tx" && len(dests) > 1 {
 			modeDests = dests[:1]
 			o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
 				"replicator": replicator.PrivateIP,
-				"msg": fmt.Sprintf("kernel mode: single-destination only (XDP_TX passthrough) - using %s", dests[0].PrivateIP)})
-			log.Printf("mcast/kernel: limiting to 1 destination (%s) - XDP_TX is single-dest passthrough", dests[0].PrivateIP)
+				"msg": fmt.Sprintf("bpf_tx mode: single-destination only (XDP_TX passthrough) - using %s", dests[0].PrivateIP)})
+			log.Printf("mcast/bpf_tx: limiting to 1 destination (%s) - XDP_TX is single-dest passthrough", dests[0].PrivateIP)
 		}
 
 		// Anchor this (replicator, mode) combination in the runs table so its
@@ -782,7 +835,7 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 					res, err := o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdMcastReceive,
 						Mcast: &proto.McastParams{Group: p.Group, DataPort: p.DataPort, Count: p.Count,
 							TimeoutSec: p.TimeoutSec, ReplicatorIP: replicator.PrivateIP, SourceIP: source.PrivateIP,
-							Variation: mode}}, recvT)
+							Variation: mode, RxQueue: p.RxQueue}}, recvT)
 					results[i] = rr{d.PrivateIP, res, err}
 				}()
 			}
@@ -812,7 +865,7 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 			atomic.AddInt64(&msMSettle, time.Since(tSettle).Milliseconds())
 			sres, serr := o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdMcastSend,
 				Mcast: &proto.McastParams{Group: p.Group, DataPort: p.DataPort, ReplicatorIP: replicator.PrivateIP,
-					Count: p.Count, IntervalUs: p.IntervalUs}}, recvT)
+					Count: p.Count, IntervalUs: p.IntervalUs, Size: p.Size, TxQueue: p.TxQueue}}, recvT)
 			wg.Wait()
 			atomic.AddInt64(&msMRun, time.Since(tRun).Milliseconds())
 			close(stopWatch)

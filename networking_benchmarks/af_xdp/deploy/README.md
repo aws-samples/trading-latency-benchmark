@@ -56,7 +56,7 @@ afxdpctl sync --key ~/.ssh/virginia.pem --region us-east-1
 
 # 3. Run a benchmark
 afxdpctl run ucast kernel           # or: xdp (AF_XDP zero-copy TX)
-afxdpctl run mcast copy,inplace,kernel
+afxdpctl run mcast copy,inplace,bpf_tx
 
 # 4. Generate report
 afxdpctl report -o results.html
@@ -137,20 +137,28 @@ All nodes boot the same AMI - role determines topology wiring at runtime (via an
 
 ## Instance Sizing (cost vs cores)
 
-The CDK **scenarios pick the instance type per workload** (via the `FleetEntry.type` field): **mcast → `c7i.2xlarge`**, **ucast → `c7i.4xlarge`**. Instances run `nosmt` (SMT off) for latency stability, so **online cores = vCPUs / 2**, and `bake-ami.sh` isolates a block for the datapath (`isolcpus=1-4`).
+The CDK **default instance type is `m8a.2xlarge`** (AMD, no SMT - 8 vCPUs = 8 online
+cores), overridable per entry via `FleetEntry.type`. Intel instances (`c7i`, `c6in`, ...)
+run `nosmt` (SMT off) for latency stability, so their **online cores = vCPUs / 2**;
+`m8a` has no SMT to disable, so its vCPU count already equals its online core count.
+Either way `bake-ami.sh` isolates a fixed 4-core block for the datapath
+(`isolcpus=1-4`), and the build targets `-march=x86-64-v3` (not `-march=native`) so
+binaries run correctly on both vendor families.
 
 | Workload | Instance | Online cores | Datapath cores needed | Fits? |
 |----------|----------|:------------:|-----------------------|:-----:|
-| **mcast** | `c7i.2xlarge` | 4 (0-3) | 3 - OS + IRQ + 1 app | ✅ |
-| **ucast** | `c7i.4xlarge` | 8 (0-7) | 5 - OS + IRQ + replicator-poll + rtt-send + rtt-recv | ✅ |
+| **mcast** | `m8a.2xlarge` (or `c7i.2xlarge`) | 8 (`m8a`) / 4 (`c7i`) | 3 - OS + IRQ + 1 app | ✅ |
+| **ucast** | `m8a.2xlarge` (or `c7i.4xlarge`) | 8 | 5 - OS + IRQ + replicator-poll + rtt-send + rtt-recv | ✅ |
 
-Core pinning is derived dynamically at runtime from the isolated set, so **one AMI serves all instance sizes**.
+Core pinning is derived dynamically at runtime from the isolated set, so **one AMI
+serves all instance sizes and both vendor families** (Intel and AMD), including bare
+metal (`m8a.metal-24xl`, `m8azn.metal-12xl`) with no code changes.
 
 ## Key Decisions
 
 - **Universal AMI:** One AMI for all roles - no per-role variants needed
 - **Replicator on boot:** Every instance starts `replicator.service` in unicast mode by default
-- **Mode switching:** `/etc/default/replicator` controls mode (kernel/ucast/mcast)
+- **Mode switching:** `/etc/default/replicator` controls mode (echo/ucast/mcast)
 - **Control-plane agent baked in:** The Go agent is built into the AMI; failure is FATAL (fails the bake)
 - **SSM discovery:** Agents discover the NATS URL from SSM at boot (preflight retries for 60s)
 

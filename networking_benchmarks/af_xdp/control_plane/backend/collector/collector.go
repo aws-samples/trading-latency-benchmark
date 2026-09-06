@@ -40,7 +40,8 @@ type Collector struct {
 func NewCollector() *Collector { return &Collector{edges: map[string]*Edge{}} }
 
 // edgeKey produces the map key for an edge. kind is included so mcast and ucast
-// edges with the same variation name stay distinct (e.g. mcast/kernel vs ucast/kernel).
+// edges with the same variation name stay distinct (e.g. ucast/kernel vs
+// mcast/bpf_tx could otherwise coincidentally share a name).
 func edgeKey(kind, variation, src, dst string) string {
 	return kind + "|" + variation + "|" + src + "|" + dst
 }

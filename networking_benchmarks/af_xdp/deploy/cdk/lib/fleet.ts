@@ -20,17 +20,19 @@ import {
 } from 'aws-cdk-lib/aws-ec2';
 import { Tags, RemovalPolicy } from 'aws-cdk-lib';
 
-// DEFAULT is c7i.4xlarge = 16 vCPU / 8 physical cores (nosmt -> 8 online).
-// MULTICAST: each node runs a single busy-poll app so it needs only 3
-// dedicated cores (OS, ENA IRQ, app). UNICAST is heavier: the sender co-locates
-// the replicator poll thread AND the rtt sender AND the rtt receiver, and each
-// wants its own physical core alongside OS + a SEPARATE ENA-IRQ core (keeping the
-// IRQ off the poll core avoids the tail jitter that hit --xdp-tx) = 5 cores.
-// One AMI serves both: core pinning is derived
-// dynamically at runtime from the isolated set (bake-ami.sh isolcpus, the
-// replicator's initializeCpuCores, and run_ucast.yaml auto_pin), so it adapts to
-// whatever instance a scenario deploys — 4xlarge -> metal.
-const DEFAULT_INSTANCE_TYPE = 'c7i.4xlarge';
+// DEFAULT is m8a.2xlarge = 8 vCPU / 8 physical cores (AMD, no SMT -> all 8
+// online). MULTICAST: each node runs a
+// single busy-poll app so it needs only 3 dedicated cores (OS, ENA IRQ, app).
+// UNICAST is heavier: the sender co-locates the replicator poll thread AND the
+// rtt sender AND the rtt receiver, and each wants its own physical core
+// alongside OS + a SEPARATE ENA-IRQ core (keeping the IRQ off the poll core
+// avoids the tail jitter that hit --xdp-tx) = 5 cores. One AMI serves both:
+// core pinning is derived dynamically at runtime from the isolated set
+// (bake-ami.sh isolcpus, the replicator's initializeCpuCores, and
+// run_ucast.yaml auto_pin), so it adapts to whatever instance a scenario
+// deploys — 2xlarge -> metal, Intel -> AMD (see Makefile's -march=x86-64-v3,
+// which keeps the built binary portable across both vendor families).
+const DEFAULT_INSTANCE_TYPE = 'm8a.2xlarge';
 const DEFAULT_ROLE = 'destination';
 const DEFAULT_PRIMARY_CIDR = '10.61.0.0/16';
 const DEFAULT_SECONDARY_CIDR = '10.62.0.0/16';
@@ -46,7 +48,7 @@ export type Tenancy = 'shared' | 'instance' | 'host';
 
 /** A single node in the fleet specification. */
 export interface FleetEntry {
-  /** EC2 instance type. Default: c7i.4xlarge */
+  /** EC2 instance type. Default: m8a.2xlarge */
   type?: string;
   /** Number of instances. Default: 1 */
   count?: number;

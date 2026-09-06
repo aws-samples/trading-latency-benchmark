@@ -51,7 +51,7 @@ type Heartbeat struct {
 	InstanceID     string  `json:"instance_id"`
 	Unix           int64   `json:"unix"`
 	State          string  `json:"state"`                    // idle|running|error
-	ReplicatorMode string  `json:"replicator_mode,omitempty"` // ucast|mcast|kernel
+	ReplicatorMode string  `json:"replicator_mode,omitempty"` // ucast|mcast|echo
 	ReplicatorSvc  string  `json:"replicator_svc,omitempty"`  // active|inactive
 	ClockOffsetUs  float64 `json:"clock_offset_us"`
 	CurrentCmdID   string  `json:"current_cmd_id,omitempty"`
@@ -90,8 +90,8 @@ type Command struct {
 	Type      CmdType      `json:"type"`
 	RTT       *RTTParams   `json:"rtt,omitempty"`
 	Mcast     *McastParams `json:"mcast,omitempty"`
-	FwdMode   string       `json:"fwd_mode,omitempty"`   // copy|inplace|kernel (set_fwd_mode / set_mode)
-	Mode      string       `json:"mode,omitempty"`       // ucast|mcast|kernel (set_mode)
+	FwdMode   string       `json:"fwd_mode,omitempty"`   // copy|inplace|bpf_tx (set_fwd_mode / set_mode)
+	Mode      string       `json:"mode,omitempty"`       // ucast|mcast|echo (set_mode)
 	SvcAction string       `json:"svc_action,omitempty"` // stop|start|restart (replicator_svc)
 	Group     string       `json:"group,omitempty"`      // for join_group
 	Host      *HostStateParams `json:"host,omitempty"`   // for ensure_host
@@ -135,7 +135,7 @@ const (
 // HostStateParams asks the agent to converge local state to Profile.
 type HostStateParams struct {
 	Profile HostProfile `json:"profile"`
-	FwdMode string      `json:"fwd_mode"` // mcast-replicator only: copy|inplace|kernel
+	FwdMode string      `json:"fwd_mode"` // mcast-replicator only: copy|inplace|bpf_tx
 
 	// NeedXdpStamp applies to HostClient: attach the standalone XDP program so
 	// rtt --xdp-rx can stamp at ingress. The kernel variation stamps via
@@ -176,7 +176,20 @@ type McastParams struct {
 	Count        int    `json:"count"`
 	IntervalUs   int    `json:"interval_us"`
 	TimeoutSec   int    `json:"timeout_sec"`
-	Variation    string `json:"variation,omitempty"` // fwd mode (copy|inplace|kernel) — tags telemetry
+	Variation    string `json:"variation,omitempty"` // fwd mode (copy|inplace|bpf_tx) — tags telemetry
+
+	// Size is the mcast_send payload size in bytes (mirrors `-s`; tool minimum
+	// is 32 = WIRE_APP_HDR_LEN). 0 => runner/tool default (64B). mcast_receive
+	// has no payload-size flag — it reads whatever size mcast_send sent.
+	Size int `json:"size,omitempty"`
+	// TxQueue is mcast_send's AF_XDP TX queue (mirrors `-q`). 0 => runner/tool
+	// default (queue 1). Queue 0 is RSS-pinned; a ZC TX bind there can wedge
+	// the host NIC (see tools/README.md), so 0 is treated as "unset", not
+	// "explicitly queue 0".
+	TxQueue int `json:"tx_queue,omitempty"`
+	// RxQueue is mcast_receive's AF_XDP/XDP queue index (mirrors `-q`). 0 is
+	// both "unset" and the tool's own default, so it is always safe to pass.
+	RxQueue int `json:"rx_queue,omitempty"`
 }
 
 // CommandResult is the ack for a Command. Data carries command-specific output

@@ -128,7 +128,7 @@ Supported commands:
 | `reregister` | Re-publish Registration immediately |
 | `cleanup` | Kill mcast_send/mcast_receive + detach XDP from the NIC |
 | `clock_sync` | `chronyc makestep` + burst, return achieved offset µs |
-| `set_fwd_mode` | Set `REPLICATOR_FWD_MODE` in `/etc/default/replicator` + restart service |
+| `set_fwd_mode` | Set `REPLICATOR_FWD_MODE` (copy\|inplace\|bpf_tx) in `/etc/default/replicator` + restart service |
 | `set_mode` | Set `REPLICATOR_MODE` (+ fwd) + restart service |
 | `replicator_svc` | `systemctl stop/start/restart replicator` |
 | `join_group` | `replicator_ctl <ip> mcast <group>` (join mcast group) |
@@ -190,8 +190,9 @@ on heartbeat, staleness window → offline (default 20 s). Query helpers:
 ### collector.go - NxN measurement matrix
 
 Edges keyed **`kind|variation|src|dst`** (+ a 60-entry p50 history ring for
-sparklines). The `kind` in the key is deliberate: mcast fwd-mode `kernel` and
-ucast variation `kernel` share src→dst and would otherwise collide.
+sparklines). The `kind` in the key matters whenever a ucast and mcast variation
+happen to share a name (e.g. both could be `"xdp"`-flavored) - without it they'd
+collide on src→dst alone.
 
 `Apply(Telemetry)` updates or creates the edge and returns a copy for SSE broadcast.
 
@@ -295,14 +296,14 @@ The `kind` field selects the campaign type; remaining fields are campaign-specif
 ```json
 {
   "kind": "mcast",
-  "modes": ["copy", "inplace", "kernel"],
+  "modes": ["copy", "inplace", "bpf_tx"],
   "count": 10000,
   "interval_us": 200,
   "timeout_sec": 30
 }
 ```
 
-- `modes`: subset of `copy` | `inplace` | `kernel` (default: all three).
+- `modes`: subset of `copy` | `inplace` | `bpf_tx` (default: all three).
 
 Runs against **every online replicator** automatically (see
 [Multi-replicator mcast campaigns](#multi-replicator-mcast-campaigns)); there is
@@ -393,7 +394,7 @@ replicator:
 
 1. Identify online nodes by role: `source`, every online `replicator`, all `destination`s.
 2. Stop the replicator service on source + destinations (free AF_XDP queue) - once, shared across all replicators.
-3. For each replicator, for each fwd mode (`copy`, `inplace`, `kernel`):
+3. For each replicator, for each fwd mode (`copy`, `inplace`, `bpf_tx`):
    - Open a `runs` row tagging this replicator's identity/PG/AZ (see [Multi-replicator mcast campaigns](#multi-replicator-mcast-campaigns)).
    - Set that replicator to `mcast/<mode>` (skipped if already set).
    - Destinations join the multicast group + clock-sync gate.
@@ -542,7 +543,7 @@ Driven from the web panel or `POST /api/run`.
 | `xdp` | AF_XDP zero-copy | kernel socket + XDP-stamped ts | removes the kernel TX stack (zero-copy TX) AND uses an **XDP-stamped** ingress ts on RX (NOT a kernel bypass on the RX side) - both together, driven by one `variation` value |
 
 **mcast (one-way source → replicator fan-out → dest), fwd modes:** `copy`,
-`inplace`, `kernel` - set on the replicator per mode; one-way latency uses the
+`inplace`, `bpf_tx` - set on the replicator per mode; one-way latency uses the
 XDP/PHC ingress stamp on the destination, gated on clock convergence.
 
 ---
@@ -558,7 +559,7 @@ full dev loop. Talks to `-cp` (default `$CP_URL` or `http://localhost:8080`).
 afxdpctl fleet                       # show online nodes + edge count
 afxdpctl run ucast kernel            # launch a ucast/kernel campaign (streams events to stdout)
 afxdpctl run ucast xdp               # ucast with AF_XDP zero-copy TX + XDP-stamped RX
-afxdpctl run mcast copy,inplace      # multicast with two fwd modes
+afxdpctl run mcast copy,inplace,bpf_tx  # multicast with all three fwd modes
 afxdpctl cancel                      # abort the running campaign
 afxdpctl report -o results.html      # download an HTML report from current data
 afxdpctl report -kind mcast          # filter report to mcast edges only

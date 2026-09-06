@@ -15,7 +15,7 @@ sub-microsecond timing resolution.
 | `Replicator/Internal.hpp` | Shared internal header for the `Replicator/*.cpp` units (common includes + debug macros) |
 | `Replicator/Core.cpp` | Replicator impl - lifecycle (ctor/dtor/move), thread start/stop, statistics, CPU affinity |
 | `Replicator/Init.cpp` | Replicator impl - XDP program load, per-queue AF_XDP socket setup, `config_map` seeding |
-| `Replicator/Groups.cpp` | Replicator impl - dynamic BPF group slots (ref-counted) + kernel XDP_TX forward target |
+| `Replicator/Groups.cpp` | Replicator impl - dynamic BPF group slots (ref-counted) + in-kernel XDP_TX forward target (`bpf_tx` mode) |
 | `Replicator/Control.cpp` | Replicator impl - control protocol thread + message handling + upstream forwarding |
 | `Replicator/Destinations.cpp` | Replicator impl - `Destination` type, destination registry, thread-local fan-out cache |
 | `Replicator/DataPath.cpp` | Replicator impl - RX busy-poll, replicate/fan-out, UDP/m2u parse, zero-copy TX, packet build |

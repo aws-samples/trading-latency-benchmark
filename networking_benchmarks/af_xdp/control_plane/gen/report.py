@@ -74,6 +74,18 @@ INSTANCE_METADATA: Dict[str, Dict[str, Any]] = {
     "c6i.4xlarge":   {"enis": 8,  "bw_gbps": 25,   "pps_mpps": 5,   "nitro_gen": 4, "vcpus": 16,  "mem_gb": 32,   "metal": False},
     "c6i.8xlarge":   {"enis": 8,  "bw_gbps": 25,   "pps_mpps": 5,   "nitro_gen": 4, "vcpus": 32,  "mem_gb": 64,   "metal": False},
     "c6i.metal":     {"enis": 15, "bw_gbps": 50,   "pps_mpps": 10,  "nitro_gen": 4, "vcpus": 128, "mem_gb": 256,  "metal": True},
+    # m8a family (AMD EPYC "Turin", Nitro 6, no SMT - vcpus == physical cores)
+    "m8a.large":     {"enis": 3,  "bw_gbps": 12.5, "pps_mpps": 2,   "nitro_gen": 6, "vcpus": 2,   "mem_gb": 8,    "metal": False},
+    "m8a.xlarge":    {"enis": 4,  "bw_gbps": 12.5, "pps_mpps": 2,   "nitro_gen": 6, "vcpus": 4,   "mem_gb": 16,   "metal": False},
+    "m8a.2xlarge":   {"enis": 4,  "bw_gbps": 12.5, "pps_mpps": 2,   "nitro_gen": 6, "vcpus": 8,   "mem_gb": 32,   "metal": False},
+    "m8a.4xlarge":   {"enis": 8,  "bw_gbps": 15,   "pps_mpps": 3,   "nitro_gen": 6, "vcpus": 16,  "mem_gb": 64,   "metal": False},
+    "m8a.8xlarge":   {"enis": 8,  "bw_gbps": 20,   "pps_mpps": 4,   "nitro_gen": 6, "vcpus": 32,  "mem_gb": 128,  "metal": False},
+    "m8a.12xlarge":  {"enis": 8,  "bw_gbps": 30,   "pps_mpps": 6,   "nitro_gen": 6, "vcpus": 48,  "mem_gb": 192,  "metal": False},
+    "m8a.16xlarge":  {"enis": 15, "bw_gbps": 40,   "pps_mpps": 8,   "nitro_gen": 6, "vcpus": 64,  "mem_gb": 256,  "metal": False},
+    "m8a.24xlarge":  {"enis": 15, "bw_gbps": 40,   "pps_mpps": 8,   "nitro_gen": 6, "vcpus": 96,  "mem_gb": 384,  "metal": False},
+    "m8a.metal-24xl": {"enis": 15, "bw_gbps": 40,  "pps_mpps": 8,   "nitro_gen": 6, "vcpus": 96,  "mem_gb": 384,  "metal": True},
+    "m8a.48xlarge":  {"enis": 15, "bw_gbps": 75,   "pps_mpps": 15,  "nitro_gen": 6, "vcpus": 192, "mem_gb": 768,  "metal": False},
+    "m8a.metal-48xl": {"enis": 15, "bw_gbps": 75,  "pps_mpps": 15,  "nitro_gen": 6, "vcpus": 192, "mem_gb": 768,  "metal": True},
 }
 
 # Fallback metadata for unknown instance types (derive from size suffix)

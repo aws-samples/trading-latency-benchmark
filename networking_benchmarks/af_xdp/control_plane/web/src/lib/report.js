@@ -247,7 +247,7 @@ export function buildReportHTML(fleet, kind, variation) {
       <dt>Stamps</dt><dd><code>ts_ns</code> at the source immediately before TX ring submit, <code>replicator_ns</code> at replicator RX entry, <code>rx_ns</code> at destination RX. One-way = <code>rx_ns − ts_ns</code>, split as <code>replicator_ns − ts_ns</code> (source→replicator) and <code>rx_ns − replicator_ns</code> (replicator→destination).</dd>
       <dt>Clock</dt><dd><code>CLOCK_REALTIME</code> on all three nodes — necessarily, since a one-way delay spans hosts. chrony disciplines each node to the <b>ENA PHC hardware clock</b> (<code>refclock PHC /dev/ptp0</code>, <code>phc_enable=1</code>), reading the Nitro clock directly rather than over NTP-UDP; AWS Time Sync (<code>169.254.169.123</code>, <code>xleave</code>, <code>minpoll 2</code>) is the fallback until PHC is up. Observed RMS offset is tens of nanoseconds, well below the microsecond figures reported here.</dd>
       <dt>Gate</dt><dd>A run aborts when the inter-node offset exceeds the configured ceiling: a destination clock behind the source produces an invalid, possibly negative, one-way delay. Percentiles derive only from datagrams that arrived.</dd>
-      <dt>On <code>kernel</code> fwd mode</dt><dd><code>XDP_TX</code> is a single-destination passthrough rather than a fan-out, so that mode measures one representative destination.</dd>
+      <dt>On <code>xdp_tx</code> fwd mode</dt><dd><code>XDP_TX</code> is a single-destination passthrough rather than a fan-out, so that mode measures one representative destination.</dd>
     </dl>
   </details>` : `
   <div class="metric-kind">Reported value is a <b>ROUND-TRIP TIME</b> (RTT) through the remote replicator's echo, at queue depth 1 — one datagram in flight at a time.</div>
