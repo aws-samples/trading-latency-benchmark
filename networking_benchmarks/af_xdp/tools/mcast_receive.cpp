@@ -595,11 +595,10 @@ int main(int argc, char *argv[])
 	/* ── NAPI busy-poll ───────────────────────────────────────────────
 	 * Drive RX in-app so drain latency does not depend on the NIC's
 	 * gro_flush_timeout. These options only take effect inside a socket
-	 * syscall, so the RX loop issues recvfrom(MSG_DONTWAIT) on every empty
-	 * ring peek — see the loop below. Without that syscall these setsockopts
-	 * are inert and delivery falls back to the deferred-NAPI timer (~10µs per
-	 * packet). Best paired with a small gro_flush_timeout as a safety net.
-	 * Guards mirror XdpSocket. */
+	 * syscall, so the RX loop issues poll() on every empty ring peek - see the
+	 * loop below. Without that syscall these setsockopts are inert and delivery
+	 * falls back to the deferred-NAPI timer (~10µs per packet). Best paired
+	 * with a small gro_flush_timeout as a safety net. Guards mirror XdpSocket. */
 #ifndef SO_BUSY_POLL
 #define SO_BUSY_POLL 46
 #endif
@@ -611,11 +610,9 @@ int main(int argc, char *argv[])
 #endif
 	{
 		int on = 1, busy_us = 50, budget = 64;
-		/* Report each result. These were previously set and their return values
-		 * discarded, which hid whether busy-poll was active at all - and an
-		 * inert SO_BUSY_POLL is indistinguishable from a working one except by
-		 * a ~10us per-packet latency difference. Print it so a run's tuning
-		 * state is visible in the log instead of being inferred. */
+		/* Report each result. An inert SO_BUSY_POLL is indistinguishable from a
+		 * working one except by a ~10us per-packet latency difference, so print
+		 * the state rather than leaving it to be inferred from timings. */
 		int r_pref = setsockopt(xsk_fd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &on, sizeof(on));
 		int r_busy = setsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL, &busy_us, sizeof(busy_us));
 		int r_budg = setsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
@@ -699,12 +696,11 @@ int main(int argc, char *argv[])
 
 	struct pollfd pfd = { xsk_fd, POLLIN, 0 };
 
-	/* Idle deadline. The RX loop now busy-polls instead of parking in a
-	 * poll(timeout*1000), so it no longer self-throttles when nothing is
-	 * arriving — without an explicit deadline a stalled run would spin an
-	 * isolated core at 100% until the external `timeout` killed it. Reset on
-	 * every drained batch, so this fires only after `timeout` seconds of no
-	 * progress, matching the give-up semantics the long poll() used to provide. */
+	/* Idle deadline. The RX loop busy-polls rather than blocking, so it does not
+	 * self-throttle when nothing is arriving - without an explicit deadline a
+	 * stalled run would spin an isolated core at 100% until the external
+	 * `timeout` killed it. Reset on every drained batch, so this fires only
+	 * after `timeout` seconds without progress. */
 	struct timespec t_idle;
 	clock_gettime(CLOCK_MONOTONIC, &t_idle);
 
@@ -717,16 +713,14 @@ int main(int argc, char *argv[])
 			/* App-driven busy-poll. xsk_ring_cons__peek is a pure userspace
 			 * ring read, so without a socket syscall here SO_BUSY_POLL never
 			 * engages and frame delivery falls back to the gro_flush_timeout
-			 * deferral timer - a fixed ~10us per-packet penalty paid by the
-			 * AF_XDP RX path but NOT by a busy-polled kernel recvfrom().
+			 * deferral timer - a fixed ~10us per-packet penalty on the AF_XDP
+			 * RX path that a busy-polled kernel recvfrom() does not pay.
 			 *
-			 * poll() (not recvfrom) is the canonical AF_XDP busy-poll entry
-			 * point: xsk_poll() calls sk_busy_loop() when SO_BUSY_POLL is
-			 * active, running NAPI in this pinned thread. A zero timeout makes
-			 * it one non-blocking pass, so the loop keeps spinning the ring.
-			 * An earlier revision drove this with recvfrom(MSG_DONTWAIT)
-			 * instead and measurably did NOT remove the deferral penalty
-			 * (hop2 stayed ~22-24us vs ~11us with deferral disabled). */
+			 * poll() (not recvfrom) is the AF_XDP busy-poll entry point:
+			 * xsk_poll() calls sk_busy_loop() when SO_BUSY_POLL is active,
+			 * running NAPI in this pinned thread. A zero timeout makes it one
+			 * non-blocking pass, so the loop keeps spinning the ring.
+			 * recvfrom() does NOT reliably enter this path on an XSK fd. */
 			poll(&pfd, 1, 0);
 			/* Fill-ring wakeup only when the driver asks for it. */
 			if (xsk_ring_prod__needs_wakeup(&fq))

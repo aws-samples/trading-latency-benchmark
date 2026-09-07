@@ -7,18 +7,33 @@ eu-central-1a). The kernel baseline initially measured *faster* than the AF_XDP
 were responsible. Three are in the benchmark harness, one is a fleet tuning
 interaction that penalises only the AF_XDP path.
 
-## Result after removing all four confounds
+## Final verified result
 
-Load-matched (same AF_XDP endpoints on both sides, deferral disabled, 10k pps,
-20000/20000 packets received in both runs, single destination):
+Fix deployed, **deferral at production values** (`napi_defer_hard_irqs=2`,
+`gro_flush_timeout=10µs`), load-matched, zero loss, single destination, run via
+`afxdpctl run mcast copy,kernel`:
 
-| Replicator fwd mode | p50 | hop1 | hop2 (contains the replicator's TX) |
+| Rate | copy p50 | kernel p50 | copy hop1 / hop2 | kernel hop1 / hop2 |
+|---|---|---|---|---|
+| 50k pps | **38 µs** | 44 µs | 21 / **17** | 21 / **25** |
+| 100k pps | **41 µs** | 47 µs | 23 / **17** | 25 / **22** |
+
+AF_XDP is ~6 µs (~14 %) faster end-to-end at both rates, and the gap sits in
+**hop2** - the leg containing the replicator's forward path - exactly where it
+should. Every earlier "kernel wins" / "dead heat" number was an artifact.
+
+### How the destination fix progressed (same `copy` config throughout)
+
+| `mcast_receive` RX driver | deferral | copy p50 | copy hop2 |
 |---|---|---|---|
-| `copy` (AF_XDP) | **36 µs** | 25 µs | **11 µs** |
-| `kernel` (plain sockets) | 39 µs | 25 µs | **13 µs** |
+| original (`poll()` gated on `needs_wakeup`) | ON | 45 µs | 24 µs |
+| attempt 1 - `recvfrom(MSG_DONTWAIT)` | ON | 45 µs | 22 µs |
+| **attempt 2 - `poll(fd,1,0)` unconditional** | **ON** | **37 µs** | **16 µs** |
+| reference: original, deferral off | OFF | 36 µs | 11 µs |
 
-AF_XDP wins on the leg that actually contains the replicator's forward path, as
-expected. Every earlier "kernel wins" / "dead heat" number was an artifact.
+The working fix reaches with deferral *enabled* what previously required
+disabling deferral fleet-wide. Attempt 1 is recorded because it disproves the
+intuitive remedy: `recvfrom` does not drive AF_XDP busy-poll.
 
 ---
 
@@ -151,60 +166,77 @@ warns `gro_flush_timeout=0` strands packets in busy-poll gaps and produces
 multi-second bursts, and it would also regress the replicator/`rtt` paths that
 currently depend on the deferred regime.
 
-### 1. Issue the busy-poll syscall on every empty peek (primary fix)
+### 1. Drive the busy-poll with `poll()`, not `recvfrom()` (implemented)
 
-`XdpSocket::receive()` already does exactly this and documents why - mirror it
-in `tools/mcast_receive.cpp`. On an empty `xsk_ring_cons__peek`, unconditionally
-issue a non-blocking `recvfrom()` on the XSK fd so `SO_BUSY_POLL` runs the NAPI
-poll in this thread:
+**`poll()` is the AF_XDP busy-poll entry point** - `xsk_poll()` calls
+`sk_busy_loop()` when `SO_BUSY_POLL` is active on the fd. `recvfrom()` does
+**not** reliably enter that path on an XSK fd. This was established
+experimentally, not from documentation: a first attempt using
+`recvfrom(MSG_DONTWAIT)` on every empty peek was measured and **did not remove
+the penalty** (see the attempt table below).
+
+Applied in `tools/mcast_receive.cpp`, on an empty `xsk_ring_cons__peek`:
 
 ```c
-uint32_t rcvd = xsk_ring_cons__peek(&rx, BATCH, &idx_rx);
 if (rcvd == 0) {
-        /* Drive NAPI from this pinned thread: with SO_PREFER_BUSY_POLL +
-         * SO_BUSY_POLL set on the XSK fd this spins the poll for up to
-         * SO_BUSY_POLL us and pulls frames the instant the NIC posts them,
-         * instead of waiting on the gro_flush_timeout deferral. Issued on
-         * EVERY empty peek, not gated on needs_wakeup, so NAPI is driven
-         * regardless of fill-ring state. */
-        recvfrom(xsk_fd, NULL, 0, MSG_DONTWAIT, NULL, NULL);
+        poll(&pfd, 1, 0);                  /* one non-blocking busy-poll pass */
         if (xsk_ring_prod__needs_wakeup(&fq))
-                poll(&pfd, 1, /* short */ 1);
+                recvfrom(xsk_fd, NULL, 0, MSG_DONTWAIT, NULL, NULL);
+        ...
         continue;
 }
 ```
 
 Key points:
-- The `recvfrom` is expected to fail with `EAGAIN`; the return value is
-  deliberately ignored. Its purpose is entering the kernel so busy-poll runs.
-- It must **not** be gated on `needs_wakeup` - that gate is what currently makes
-  the existing `poll()` ineffective.
-- Keep a `poll()` fallback for the fill-ring wakeup, but with a short timeout so
-  the loop cannot park for `timeout * 1000` ms while frames are arriving. The
-  current `poll(&pfd, 1, timeout * 1000)` (up to 30 s) is only safe because the
-  ring is normally non-empty; it becomes the stall path once the loop is
-  restructured.
-- The existing `SO_BUSY_POLL` / `SO_PREFER_BUSY_POLL` / `SO_BUSY_POLL_BUDGET`
-  setsockopts in `mcast_receive` are already correct and need no change - they
-  are simply never exercised today.
+- `poll()` must be called **unconditionally** on an empty peek. The original code
+  did call `poll()`, but gated behind `if (xsk_ring_prod__needs_wakeup(&fq))` -
+  a *fill-ring* condition that is usually false on an empty RX ring, so the poll
+  almost never ran. That gate was the whole bug.
+- Zero timeout keeps it a single non-blocking pass so the loop keeps spinning.
+- `recvfrom` is retained strictly for the fill-ring wakeup it is meant for.
+- The original `poll(&pfd, 1, timeout * 1000)` (up to 30 s) was also the loop's
+  implicit give-up mechanism. Removing it required adding an explicit idle
+  deadline, or a stalled run spins an isolated core at 100% until the external
+  `timeout` fires.
 
-### 2. Apply the same audit to `mcast_send`'s TX-completion path
+### 2. Same fix applied to the replicator - correctness only, no measured gain
 
-`mcast_send` spins on `xsk_ring_cons__peek(&cq, ...)` for completions and only
-calls `sendto()` when `needs_wakeup`. That is the TX-side analogue of the same
-mistake and is a candidate cause of the unexplained hop1 cost (below). Verify
-whether the completion ring is being drained promptly or is also waiting on a
-deferral timer.
+`XdpSocket::receive()` had the identical ineffective pattern (`recvfrom` on empty
+peek, with a comment claiming it drove NAPI). Changed to the same `poll()`-based
+form, and confirmed busy-poll is genuinely configured there:
 
-### 3. Restore the deferral settings on the fleet
+```
+XSK busy-poll (fd=9): SO_PREFER_BUSY_POLL=ok SO_BUSY_POLL(50us)=ok
+                      SO_BUSY_POLL_BUDGET(64)=ok readback=50us
+```
 
-The diagnostic left `napi_defer_hard_irqs=0` / `gro_flush_timeout=0` on the
-replicator (`i-070cb63e7996f3554`) and destination (`i-09ea968c8811bc4f5`).
-Restore to the baked values (`2` / `10000`) once the `mcast_receive` fix lands,
-and re-run to confirm the AF_XDP advantage survives *with* deferral enabled -
-that is the real acceptance test for this fix.
+**It produced no measurable improvement** (copy p50 37 -> 38 us, hop1 21 -> 21).
+That is expected in hindsight: **hop1 was never deferral-bound**. At 10k pps with
+deferral fully *disabled*, hop1 was still 25 us - it is dominated by the source's
+TX doorbell plus wire (see the hop1 section below), which a replicator-side RX
+change cannot affect. hop2 is where the AF_XDP RX deferral actually lived, which
+is why fixing the *destination* mattered and fixing the replicator did not.
 
-### 4. Harness changes so these errors cannot recur silently
+The change is kept for correctness, not speed: it removes a latent dependency on
+`gro_flush_timeout` keeping its current value, and makes the replicator's RX
+genuinely busy-polled as its comment always claimed.
+
+### 3. `mcast_send` needs no fix - verified
+
+`mcast_send` is TX-only: `rx_size = 0` and the RX ring is `nullptr` in
+`xsk_socket__create`. There is no RX ring, so no busy-poll RX path exists and no
+deferral penalty can apply. Its per-packet `needs_wakeup` -> `sendto()` doorbell
+is the *required* TX kick under `XDP_USE_NEED_WAKEUP`, not a defect.
+
+### 4. Deferral settings restored
+
+`napi_defer_hard_irqs` / `gro_flush_timeout` were returned to the baked values
+(`2` / `10000`) on the replicator and destination before the acceptance test, so
+the results below hold under production tuning. Disabling deferral fleet-wide was
+only ever a diagnostic: `README.md` warns `gro_flush_timeout=0` strands packets
+in busy-poll gaps.
+
+### 5. Harness changes so these errors cannot recur silently
 
 - **Decouple endpoint transport from replicator fwd mode.** Add an explicit
   knob (e.g. `endpoint_transport: afxdp|kernel` on `McastMatrixParams`) instead

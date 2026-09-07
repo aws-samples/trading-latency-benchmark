@@ -24,6 +24,7 @@
 #include <sys/resource.h>
 #include <sys/mman.h>
 #include <fcntl.h>
+#include <poll.h>          // poll() drives the AF_XDP busy-poll path in receive()
 #include <net/if.h>
 #include <linux/if_link.h>
 #include <linux/if_ether.h>
@@ -487,11 +488,22 @@ int XdpSocket::bind(const std::string& ifName, int queueId, int flags) {
     {
         int xfd = xsk_socket__fd(wrapper_->xsk);
         int on = 1, busy_us = 50, budget = 64;
-        setsockopt(xfd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &on, sizeof(on));
-        setsockopt(xfd, SOL_SOCKET, SO_BUSY_POLL, &busy_us, sizeof(busy_us));
-        setsockopt(xfd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
-        DEBUG_PRINT("XSK busy-poll enabled: prefer=1 busy_us=%d budget=%d (fd=%d)\n",
-                    busy_us, budget, xfd);
+        // Report results rather than discarding them: an inert SO_BUSY_POLL is
+        // indistinguishable from a working one except by a ~10us per-packet
+        // latency difference. receive()'s poll() is what drives the busy-poll
+        // path these options enable.
+        int r_pref = setsockopt(xfd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &on, sizeof(on));
+        int r_busy = setsockopt(xfd, SOL_SOCKET, SO_BUSY_POLL, &busy_us, sizeof(busy_us));
+        int r_budg = setsockopt(xfd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
+        int rb = 0; socklen_t rl = sizeof(rb);
+        getsockopt(xfd, SOL_SOCKET, SO_BUSY_POLL, &rb, &rl);
+        std::cout << "XSK busy-poll (fd=" << xfd << "): SO_PREFER_BUSY_POLL="
+                  << (r_pref == 0 ? "ok" : strerror(errno))
+                  << " SO_BUSY_POLL(" << busy_us << "us)="
+                  << (r_busy == 0 ? "ok" : strerror(errno))
+                  << " SO_BUSY_POLL_BUDGET(" << budget << ")="
+                  << (r_budg == 0 ? "ok" : strerror(errno))
+                  << " readback=" << rb << "us" << std::endl;
     }
 
     // Populate the fill queue
@@ -749,13 +761,20 @@ int XdpSocket::receive(std::vector<int>& offsets, std::vector<int>& lengths) {
         // App-driven busy-poll: run NAPI in *this* thread's context (the pinned
         // isolated CPU) so RX delivery does not wait on the deferred ENA hard IRQ
         // (napi_defer_hard_irqs / gro_flush_timeout) which fires on a different,
-        // often-contended CPU. With SO_PREFER_BUSY_POLL + SO_BUSY_POLL set on this
-        // fd (see openSocket), this recvfrom spins the NAPI poll for up to
-        // SO_BUSY_POLL microseconds, pulling frames the instant the NIC posts them,
-        // and also wakes the fill ring when needed. Issued on every empty peek
-        // (not gated on needs_wakeup) so NAPI is driven regardless of fill state —
-        // this is what makes hop1 (source->replicator) gro-independent.
-        recvfrom(xsk_socket__fd(wrapper_->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
+        // often-contended CPU.
+        //
+        // poll() is the entry point that drives this: xsk_poll() calls
+        // sk_busy_loop() when SO_BUSY_POLL is active on the fd (set in
+        // openSocket). A zero timeout makes it a single non-blocking pass, so the
+        // caller's loop keeps spinning the ring. recvfrom() does NOT reliably
+        // enter the busy-poll path on an XSK fd, so it is used strictly for the
+        // fill-ring wakeup it is meant for.
+        struct pollfd pfd{};
+        pfd.fd     = xsk_socket__fd(wrapper_->xsk);
+        pfd.events = POLLIN;
+        poll(&pfd, 1, 0);
+        if (xsk_ring_prod__needs_wakeup(&wrapper_->fq))
+            recvfrom(xsk_socket__fd(wrapper_->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
     }
 
     return valid_packets;
