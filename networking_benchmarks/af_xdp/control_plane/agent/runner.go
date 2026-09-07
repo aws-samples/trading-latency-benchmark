@@ -420,6 +420,9 @@ func (r *Runner) RunMcastReceive(p proto.McastParams) (proto.Metrics, error) {
 	if p.RxQueue != 0 {
 		flags += fmt.Sprintf(" -q %d", p.RxQueue)
 	}
+	if p.Variation == "kernel" {
+		flags += " -k"
+	}
 	cmd := fmt.Sprintf(`sudo timeout %d taskset -c %d %s -I %s -g %s -p %d -c %d -t %d%s -j /tmp/mcast_results.json >/tmp/mcast_receive.log 2>&1`,
 		p.TimeoutSec+5, recv, r.bin("mcast_receive"), iface(), p.Group, p.DataPort, p.Count, p.TimeoutSec, flags)
 	if _, err := sh(cmd); err != nil {
@@ -448,6 +451,9 @@ func (r *Runner) RunMcastSend(p proto.McastParams) error {
 	if p.TxQueue != 0 {
 		flags += fmt.Sprintf(" -q %d", p.TxQueue)
 	}
+	if p.Variation == "kernel" {
+		flags += " -k"
+	}
 	cmd := fmt.Sprintf(`sudo taskset -c %d %s -I %s -D %s -g %s -p %d -c %d -i %d%s`,
 		send, r.bin("mcast_send"), iface(), p.ReplicatorIP, p.Group, p.DataPort, p.Count, p.IntervalUs, flags)
 	_, err := sh(cmd)
@@ -469,6 +475,9 @@ func (r *Runner) McastRxReady() bool {
 	if _, err := sh(`pgrep -x mcast_receive >/dev/null 2>&1`); err != nil {
 		return false
 	}
-	_, err := sh(fmt.Sprintf(`grep -q "AF_XDP listening" %s 2>/dev/null`, mcastRxLog))
+	// "AF_XDP listening" (AF_XDP fwd modes) or "kernel socket listening"
+	// (-k / REPLICATOR_FWD_MODE=kernel, see run_kernel_receive in
+	// mcast_receive.cpp) — either readiness line satisfies this check.
+	_, err := sh(fmt.Sprintf(`grep -Eq "AF_XDP listening|kernel socket listening" %s 2>/dev/null`, mcastRxLog))
 	return err == nil
 }

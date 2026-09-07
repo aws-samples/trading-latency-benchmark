@@ -80,8 +80,19 @@ private:
     bool mcast_mode_;         // mcast mode: m2u-tagged unicast UDP carries the multicast group
     // Forward path (REPLICATOR_FWD_MODE env): 0=copy (build packet in a TX-pool frame),
     // 1=inplace (patch the RX frame's headers + TX that same UMEM frame — no payload copy),
-    // 2=kernel (XDP program forwards via XDP_TX; userspace fan-out is bypassed).
+    // 2=bpf_tx (XDP program forwards via XDP_TX; userspace fan-out is bypassed),
+    // 3=kernel (plain UDP sockets end-to-end; no XDP/eBPF anywhere in the mcast path).
     int  fwd_mode_ = 0;
+
+    // kernel fwd mode's RX socket (fwd_mode_==3). Bound once in initialize();
+    // processMcastKernelRx() polls it. -1 for every other fwd mode.
+    int kernel_rx_socket_{-1};
+
+    // kernel fwd mode only changes behavior in mcast mode: unicast delivery has
+    // no equivalent to CTRL_MCAST_JOIN's destination registration, so a plain
+    // kernel RX loop would have no delivery mechanism. See initialize()'s notice
+    // logged when this is false but REPLICATOR_FWD_MODE=kernel was requested.
+    bool kernelFwdActive() const { return fwd_mode_ == 3 && mcast_mode_; }
 
     // ── Dynamic group tracking (mcast mode) / static seed (unicast mode) ─────
     // config_map_fd_: BPF map fd retained after initialize() for runtime updates.
@@ -320,6 +331,14 @@ private:
     void processPacketsForQueue(int queueId);
 
     /**
+     * REPLICATOR_FWD_MODE=kernel RX loop: one thread, one plain UDP socket,
+     * no AF_XDP/eBPF anywhere in the path. poll()-with-timeout so stop() is
+     * never blocked on a recvfrom() that may never return. Mirrors
+     * processPacketsForQueue's role but for the kernel-socket transport.
+     */
+    void processMcastKernelRx();
+
+    /**
      * Handle control protocol messages
      */
     void handleControlProtocol();
@@ -353,6 +372,26 @@ private:
     bool extractUdpPayloadMulticast(const uint8_t* packetData, size_t packetLen,
                               const uint8_t*& payloadData, size_t& payloadLen,
                               uint32_t& group_nbo);
+
+    /**
+     * Transport-agnostic m2u frame processing: reads the m2u magic/group at
+     * the start of m2u_data and stamps replicator_ns into the app payload.
+     * Does NOT unwrap Eth/IP/UDP — the caller must already have positioned
+     * m2u_data at the m2u header (AF_XDP: after extractUdpPayloadMulticast;
+     * kernel socket: recvfrom()'s buffer already starts here, the kernel
+     * stripped Eth/IP/UDP before userspace ever sees it).
+     * Shared by replicatePacket (AF_XDP) and processMcastKernelRx (kernel fwd mode).
+     *
+     * @param m2u_data    Buffer starting at the 8-byte m2u header.
+     * @param m2u_len     Length of m2u_data.
+     * @param payload_data Output: same as m2u_data (payload is emitted [m2u|app] verbatim).
+     * @param payload_len  Output: length of the m2u+app payload, clamped to m2u_len.
+     * @param group_nbo    Output: multicast group, network byte order.
+     * @return false if m2u_data is too short or the magic doesn't match.
+     */
+    bool processMcastFrame(const uint8_t* m2u_data, size_t m2u_len,
+                            const uint8_t*& payload_data, size_t& payload_len,
+                            uint32_t& group_nbo);
 
     /**
      * Fallback method using regular socket when zero-copy fails

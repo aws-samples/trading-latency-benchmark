@@ -146,7 +146,8 @@ export function mountControls(host, opts = {}) {
             <button class="cp-btn" data-run-mcast="copy" title="Replicator copies each RX frame into a fresh TX buffer per destination — safest, one kernel alloc per fan-out">copy</button>
             <button class="cp-btn" data-run-mcast="inplace" title="Replicator patches destination MAC/IP in-place on the RX frame — zero-copy for the last destination, fastest fan-out">inplace</button>
             <button class="cp-btn" data-run-mcast="bpf_tx" title="XDP_TX in-kernel forward — no userspace replicator, single-destination only, lowest possible hop latency">bpf_tx</button>
-            <button class="cp-btn" data-run-mcast="all" title="Run all 3 mcast forward modes sequentially (copy → inplace → bpf_tx)">all</button>
+            <button class="cp-btn" data-run-mcast="kernel" title="Plain UDP sockets end-to-end, no AF_XDP/eBPF anywhere — apples-to-apples kernel-stack baseline. Opt-in only: NOT included in 'all'.">kernel</button>
+            <button class="cp-btn" data-run-mcast="all" title="Run the 3 AF_XDP mcast forward modes sequentially (copy → inplace → bpf_tx). kernel baseline is opt-in — run it separately.">all</button>
           </span>
         </div>
         </div>
@@ -170,6 +171,7 @@ export function mountControls(host, opts = {}) {
           <button class="cp-btn" data-hb-mcast="copy">copy</button>
           <button class="cp-btn" data-hb-mcast="inplace">inplace</button>
           <button class="cp-btn" data-hb-mcast="bpf_tx">bpf_tx</button>
+          <button class="cp-btn" data-hb-mcast="kernel" title="Opt-in only: not included in 'all'">kernel</button>
           <button class="cp-btn" data-hb-mcast="all">all</button>
         </span></div>
       </div>

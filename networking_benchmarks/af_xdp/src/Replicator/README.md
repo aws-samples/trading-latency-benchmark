@@ -60,7 +60,8 @@ Resolved in `Init.cpp` into the XDP bind/attach flags - this controls the
 
 This is the axis the question is really about: once a packet is **matched at the
 XDP hook [2]**, how are the K copies produced? The frame forks three ways
-(`bpf_tx` is mcast-only - it needs `mcast.o`'s `fwd_map`):
+(`bpf_tx` is mcast-only - it needs `mcast.o`'s `fwd_map`). A fourth value,
+`kernel`, sits outside this fork entirely - see below the table.
 
 ![Datapath Modes](../assets/datapaths.svg)
 
@@ -74,6 +75,28 @@ MAC and restores the fast path.
 | `copy` *(default / unset)* | [1]→[11] full | **K** | step [9], per destination | any K; most robust |
 | `inplace` (zero-copy) | [1]→[8], then [9] split | **K−1** | step [9]: last dest reuses RX frame | any K; RX frame spent on last dest |
 | `bpf_tx` (XDP_TX) | [1]→[2] only | **0** | step [2] in `mcast.o` | **mcast only**; 1 dest/group; no `replicator_ns` split |
+| `kernel` (plain sockets) | none of [1]–[11] - no AF_XDP/eBPF at all | **K** | one `recvfrom()`/`sendto()` loop, `processMcastKernelRx` | **mcast only**; unlimited dests; apples-to-apples baseline for the other three |
+
+**`kernel` is not a fourth fork of the XDP hook - it never reaches one.**
+`copy`/`inplace`/`bpf_tx` all still require `mcast.o` loaded and the AF_XDP
+datapath present; `kernel` skips `loadXdpProgram()`/`configureXdpProgram()`
+entirely (`Init.cpp`) and runs the whole RX→fan-out→TX path over a single plain
+`AF_INET`/`SOCK_DGRAM` socket (`DataPath.cpp`'s `processMcastKernelRx`). It
+exists specifically to give the other three modes a same-binary, same-control-
+protocol baseline against "no kernel bypass at all" - the AF_XDP-vs-plain-socket
+comparison this project's benchmarks are built around, applied to the
+*replicator* rather than only to the endpoints (`rtt`'s own `kernel` variation,
+`mcast_send -k`/`mcast_receive -k`). Group join/leave (`CTRL_MCAST_JOIN`/
+`CTRL_MCAST_LEAVE`) is unchanged - it was never IGMP for any mode - but this mode
+has no `MAX_GROUPS=16` ceiling (no `config_map` slot is ever allocated for it),
+so it can host more concurrent groups per replicator than the other three.
+Socket tuning matches the AF_XDP RX path's busy-poll parity
+(`SO_BUSY_POLL`/`SO_PREFER_BUSY_POLL`/`SO_BUSY_POLL_BUDGET`) plus `SO_RCVBUF` and
+kernel-software RX timestamping (`SO_TIMESTAMPING`) - **not** `SCHED_FIFO`, which
+the replicator uses in no fwd mode (see dev/roadmap notes for the reasoning).
+Expect a different loss/tail shape under high pps than the AF_XDP modes: this
+is a single `recvfrom()`-at-a-time loop, no ring batching, so `SO_RCVBUF`
+becomes the backpressure point in a way the AF_XDP ring does not.
 
 ### When each mode shines
 
@@ -103,7 +126,8 @@ MAC and restores the fast path.
   tail (p99 55, p99.9 60, max 153) at a p50 (43) on par with copy.
 
 Rule of thumb: **K=1 & tail-critical → `bpf_tx`; K=1 & simplest → `copy`;
-K≫1 (or large payloads) → `inplace`.**
+K≫1 (or large payloads) → `inplace`; comparing against no kernel bypass at
+all → `kernel`.**
 
 
 ### Combined example (systemd, `bake-ami.sh` → `start-replicator.sh`)
@@ -299,17 +323,27 @@ K unicast frames leave the ENA NIC, one per destination.
 1. **Startup:** `--mcast` → load **`mcast.o`**; `initialize()` seeds the inner group
    into `config_map` immediately (`addGroupDynamic(listen_ip_nbo_)`) so the BPF
    filter matches before any join. `REPLICATOR_FWD_MODE` selects copy/inplace/bpf_tx.
+   **`kernel` fwd mode skips this whole step** - no `mcast.o`, no `config_map`;
+   `initialize()` instead binds one plain UDP socket to `listen_port_` and returns
+   (see "Axis 3" above).
 2. **Join** (`Control.cpp`): each destination sends `CTRL_MCAST_JOIN [0x04][4B group]`;
    the replicator infers the destination IP from the UDP source address, ARP-resolves
    it, `addGroupDynamic(group)` (allocates a `config_map` slot, ref-counted), and adds
    it to `group_destinations_[group]`. In `bpf_tx` mode it also writes the
-   `fwd_target` into `fwd_map[slot]` (`updateBpfTxFwdTarget`).
+   `fwd_target` into `fwd_map[slot]` (`updateBpfTxFwdTarget`). **`kernel` fwd mode**
+   runs the identical join handshake but `addGroupDynamic` only ref-counts - there
+   is no `config_map` slot to allocate.
 3. **Source stream:** `mcast_send` emits `m2u`-tagged unicast to the replicator.
 4. **Datapath:** steps [1]–[11] (`copy`/`inplace`) or [1]–[2] (`bpf_tx`, `XDP_TX`).
    `group_nbo` comes from the m2u tag; fan-out is per-group from
-   `group_destinations_`.
+   `group_destinations_`. **`kernel` fwd mode** runs none of these steps: one
+   thread (`processMcastKernelRx`) loops `recvfrom()` → shared `processMcastFrame`
+   (the same m2u-parse + RX-stamp logic steps [3]-[4] use, minus the L2/L3 unwrap
+   since the kernel already stripped it) → `sendToDestinationFallback()` per
+   destination.
 5. **Leave:** `CTRL_MCAST_LEAVE` decrements the ref-count; the last leave zeroes the
-   `config_map` (and `fwd_map`) slot and returns it to the free pool.
+   `config_map` (and `fwd_map`) slot and returns it to the free pool. **`kernel`
+   fwd mode** just drops the ref-count entry - same as above, no slot exists.
 
 ## Upstream control forwarding (optional)
 
@@ -328,8 +362,8 @@ producer - decoupling destination-side control from the producer's location.
 | `Internal.hpp` | Shared implementation preamble for every `Replicator/*.cpp` TU: the common system-header block (`<bpf/*>`, `<netinet/*>`, …) and the `DEBUG_TX/DEBUG_PACKET` print macros. |
 | `Main.cpp` | Entry point. CLI parse (`interface listen_ip port [zero_copy] [--mcast] [--ctrl] [--producer]`), root check, mode dispatch, signal handling, the 10 s stats loop, and the `--echo-mode` branch (calls `run_echo_mode`). |
 | `Core.cpp` | Object lifecycle (ctor/dtor/move), `start()`/`stop()` (spawns/joins the per-queue processor threads + control + upstream threads), `isRunning`, `getStatistics`/`printStatistics`, and CPU affinity (`setCpuAffinity`, `initializeCpuCores`). |
-| `Init.cpp` | One-time setup: pick + `loadXdpProgram` (`ucast.o`/`mcast.o`), create/bind/register one `XdpSocket` per queue, open control + fallback sockets, cache interface IP/MAC, resolve `REPLICATOR_FWD_MODE`; `configureXdpProgram()` seeds `config_map` and the free-slot pool. |
-| `Groups.cpp` | Dynamic multicast group lifecycle against `config_map` - `addGroupDynamic`/`removeGroupDynamic` (ref-counted slot alloc/free under `group_mutex_`) - and `updateBpfTxFwdTarget` (writes `fwd_map` for `bpf_tx` mode). |
+| `Init.cpp` | One-time setup: resolve `REPLICATOR_FWD_MODE` first, then either bind the `kernel` fwd mode's plain UDP RX socket and return (no AF_XDP/eBPF at all), or pick + `loadXdpProgram` (`ucast.o`/`mcast.o`), create/bind/register one `XdpSocket` per queue, open control + fallback sockets, cache interface IP/MAC; `configureXdpProgram()` seeds `config_map` and the free-slot pool (AF_XDP fwd modes only). |
+| `Groups.cpp` | Dynamic multicast group lifecycle against `config_map` - `addGroupDynamic`/`removeGroupDynamic` (ref-counted slot alloc/free under `group_mutex_`; skips the BPF slot for `kernel` fwd mode - no `config_map` exists) - and `updateBpfTxFwdTarget` (writes `fwd_map` for `bpf_tx` mode). |
 | `Control.cpp` | The binary UDP control protocol: `handleControlProtocol` (recv loop) + `processControlMessage` (ADD/REMOVE/LIST/MCAST_JOIN/MCAST_LEAVE), plus upstream forwarding (`setUpstreamControl`, `joinControlMulticastGroup`, `handleUpstreamControl`). |
 | `Destinations.cpp` | The `Destination` type (ctor validates IP, defaults MAC to broadcast; `operator<`), the canonical registry (`addDestination`/`removeDestination`/`getDestinations`), and the thread-local fan-out cache (`dest_cache_` definition, `getCachedGroupDestinations`, `updateDestinationCache`). |
 | `DataPath.cpp` | The hot path: `processPacketsForQueue` (RX busy-poll loop), `replicatePacket` (RX stamp → parse → fan-out → TX), `extractUdpPayload`/`extractUdpPayloadMulticast`, `sendToDestinationWithQueue`/`sendToDestinationFallback`, `sendSinglePacketDirect`, `createUdpPacket`, `patchHeadersInPlace`. |
@@ -354,6 +388,9 @@ Shared header used across the engine and `tools/`: `src/common/ControlPort.hpp`
   replicator has a single listen address; slots 1–15 stay unused. **mcast:**
   dynamic + ref-counted, `target_ip` is the group → **up to 16 groups at once**.
   Fan-out destinations are unbounded (see `all_destinations_`/`group_destinations_`).
+  **`REPLICATOR_FWD_MODE=kernel` never loads this map at all** - no XDP program is
+  attached for that fwd mode, so group filtering is entirely userspace
+  (`getCachedGroupDestinations`) and there is no 16-group ceiling.
 - **`xsks_map`** (BPF `XSKMAP`, 256): RX queue index → AF_XDP socket; target of
   `bpf_redirect_map`.
 - **`fwd_map`** (BPF `ARRAY`, 16; mcast only): parallel to `config_map`; `fwd_target`

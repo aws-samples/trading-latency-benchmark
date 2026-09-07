@@ -29,13 +29,17 @@
 import { fmtLat, cellColor, isCrossRegion, esc, LATENCY_BEST_COLOR } from './2d/palette.js';
 import { buildCompareHTML } from './report.js';
 
-/** Short per-mode badge: K/X for ucast kernel/xdp, C/I/XT for mcast fwd modes. */
+/** Short per-mode badge: K/X for ucast kernel/xdp, C/I/BT/MK for mcast fwd modes. */
 export const MODE_BADGE = {
   'ucast/kernel': 'K',
   'ucast/xdp': 'X',
   'mcast/copy': 'C',
   'mcast/inplace': 'I',
   'mcast/bpf_tx': 'BT',
+  // 'MK' (not 'K') so it's visually distinct from ucast/kernel's badge in any
+  // mixed ucast+mcast view — both are plain-kernel-socket baselines but for
+  // different kinds.
+  'mcast/kernel': 'MK',
 };
 
 const modeKey = (kind, variation) => `${kind}/${variation}`;

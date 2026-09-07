@@ -544,7 +544,7 @@ func max64(a, b int64) int64 {
 
 // McastMatrixParams configures a multicast fan-out campaign across fwd modes.
 type McastMatrixParams struct {
-	Modes      []string `json:"modes"` // subset of copy|inplace|bpf_tx (default: all)
+	Modes      []string `json:"modes"` // subset of copy|inplace|bpf_tx|kernel (default: all)
 	Group      string   `json:"group"`
 	DataPort   int      `json:"data_port"`
 	Count      int      `json:"count"`

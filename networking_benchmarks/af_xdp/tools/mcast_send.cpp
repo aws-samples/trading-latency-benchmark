@@ -30,6 +30,7 @@
 #include <cstring>
 #include <cstdint>
 #include <cerrno>
+#include <vector>
 
 #include <arpa/inet.h>
 #include "common/wire.h"   // S1: single source of the on-wire layout
@@ -236,6 +237,84 @@ static int build_m2u_pkt(uint8_t *buf, int max_buf,
 	return total;
 }
 
+/* ── kernel mode (-k): plain UDP socket, no AF_XDP/root ──────────────────
+ * sendto() only needs [m2u(8) | app payload] — the kernel builds Eth/IP/UDP
+ * itself, unlike the AF_XDP path above which builds the full raw frame.
+ * Same wire.h layout, same replicator_ns/replicator_tx_ns semantics; this is
+ * the apples-to-apples TX-side counterpart of REPLICATOR_FWD_MODE=kernel. */
+static int run_kernel_send(const char *replicator_ip_s, const char *group, int port,
+                            int count, int interval_us, int pkt_size)
+{
+	int sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock < 0) { perror("socket"); return 1; }
+
+	struct sockaddr_in dst{};
+	dst.sin_family = AF_INET;
+	dst.sin_port   = htons((uint16_t)port);
+	if (inet_pton(AF_INET, replicator_ip_s, &dst.sin_addr) != 1) {
+		fprintf(stderr, "error: invalid replicator IP %s\n", replicator_ip_s);
+		close(sock);
+		return 1;
+	}
+
+	uint32_t mcast_ip_nbo;
+	inet_pton(AF_INET, group, &mcast_ip_nbo);
+
+	const int m2u_len = M2U_HDR_LEN;
+	const int buf_len = m2u_len + pkt_size;
+	std::vector<uint8_t> buf(buf_len, 0);
+
+	uint32_t magic_be = htonl(M2U_MAGIC);
+	memcpy(buf.data(),     &magic_be,     4);
+	memcpy(buf.data() + 4, &mcast_ip_nbo, 4);
+	/* payload bytes [0..15] (seq, ts_ns) are overwritten per packet below;
+	 * [16..31] (replicator_ns, replicator_tx_ns) stay zero — the receiver
+	 * treats a still-zero replicator_ns as "no hop breakdown available". */
+
+	printf("Sending %d packets to replicator %s (inner %s:%d)  "
+	       "payload=%dB  interval=%dus  [kernel mode]\n\n",
+	       count, replicator_ip_s, group, port, pkt_size, interval_us);
+
+	uint64_t interval_ns = (uint64_t)interval_us * 1000ULL;
+
+	for (int seq = 0; seq < count; seq++) {
+		uint64_t seq_be = htobe64_((uint64_t)seq);
+		memcpy(buf.data() + m2u_len + WIRE_APP_SEQ_OFF, &seq_be, 8);
+
+		/* Stamp ts_ns immediately before sendto(), mirroring the AF_XDP path's
+		 * "stamp right before submit" placement (there submit = ring push,
+		 * here submit = the sendto() call itself). */
+		uint64_t ts_be = htobe64_(now_ns());
+		memcpy(buf.data() + m2u_len + WIRE_APP_TS_NS_OFF, &ts_be, 8);
+
+		ssize_t sent = sendto(sock, buf.data(), buf.size(), 0,
+		                      reinterpret_cast<struct sockaddr *>(&dst), sizeof(dst));
+		if (sent < 0) {
+			perror("sendto");
+		}
+
+		if (seq % 100 == 0) {
+			printf("  sent %d/%d\r", seq, count);
+			fflush(stdout);
+		}
+
+		if (interval_us > 0) {
+			if (interval_us < 1000)
+				busy_wait_ns(interval_ns);
+			else {
+				struct timespec sl{};
+				sl.tv_sec  = interval_us / 1000000;
+				sl.tv_nsec = (long)(interval_us % 1000000) * 1000L;
+				nanosleep(&sl, nullptr);
+			}
+		}
+	}
+
+	printf("\nDone. Sent %d packets.\n", count);
+	close(sock);
+	return 0;
+}
+
 /* ── usage ────────────────────────────────────────────────────────────── */
 static void usage(const char *prog)
 {
@@ -247,7 +326,9 @@ static void usage(const char *prog)
 	       "  -c <count>       number of packets         (default: %d)\n"
 	       "  -i <interval_us> inter-packet gap µs       (default: %d)\n"
 	       "  -s <size>        payload bytes             (default: %d, min: %d)\n"
-	       "  -q <queue>       AF_XDP TX queue           (default: %d)\n"
+	       "  -q <queue>       AF_XDP TX queue           (default: %d, ignored with -k)\n"
+	       "  -k               kernel mode: plain UDP socket, no AF_XDP/root\n"
+	       "                   (apples-to-apples baseline vs REPLICATOR_FWD_MODE=kernel)\n"
 	       "  -h               this help\n",
 	       prog, DEF_IFACE, DEF_GROUP, DEF_PORT,
 	       DEF_COUNT, DEF_INTERVAL_US, DEF_SIZE, HDR_SIZE, DEF_TX_QUEUE);
@@ -264,8 +345,10 @@ int main(int argc, char *argv[])
 	int pkt_size    = DEF_SIZE;
 	int tx_queue    = DEF_TX_QUEUE;
 
+	bool kernel_mode = false;
+
 	int opt;
-	while ((opt = getopt(argc, argv, "I:D:g:p:c:i:s:q:h")) != -1) {
+	while ((opt = getopt(argc, argv, "I:D:g:p:c:i:s:q:kh")) != -1) {
 		switch (opt) {
 		case 'I': iface       = optarg;          break;
 		case 'D': replicator_ip_s = optarg;          break;
@@ -275,6 +358,7 @@ int main(int argc, char *argv[])
 		case 'i': interval_us = atoi(optarg);    break;
 		case 's': pkt_size    = atoi(optarg);    break;
 		case 'q': tx_queue    = atoi(optarg);    break;
+		case 'k': kernel_mode = true;             break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
 		}
@@ -286,6 +370,9 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 	if (pkt_size < HDR_SIZE) pkt_size = HDR_SIZE;
+
+	if (kernel_mode)
+		return run_kernel_send(replicator_ip_s, group, port, count, interval_us, pkt_size);
 
 	/* ── interface info ───────────────────────────────────────────────── */
 	iface_info src;

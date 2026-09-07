@@ -128,7 +128,7 @@ Supported commands:
 | `reregister` | Re-publish Registration immediately |
 | `cleanup` | Kill mcast_send/mcast_receive + detach XDP from the NIC |
 | `clock_sync` | `chronyc makestep` + burst, return achieved offset µs |
-| `set_fwd_mode` | Set `REPLICATOR_FWD_MODE` (copy\|inplace\|bpf_tx) in `/etc/default/replicator` + restart service |
+| `set_fwd_mode` | Set `REPLICATOR_FWD_MODE` (copy\|inplace\|bpf_tx\|kernel) in `/etc/default/replicator` + restart service |
 | `set_mode` | Set `REPLICATOR_MODE` (+ fwd) + restart service |
 | `replicator_svc` | `systemctl stop/start/restart replicator` |
 | `join_group` | `replicator_ctl <ip> mcast <group>` (join mcast group) |
@@ -303,7 +303,10 @@ The `kind` field selects the campaign type; remaining fields are campaign-specif
 }
 ```
 
-- `modes`: subset of `copy` | `inplace` | `bpf_tx` (default: all three).
+- `modes`: subset of `copy` | `inplace` | `bpf_tx` | `kernel` (default: the
+  three AF_XDP fwd modes - `kernel` is a plain-socket, no-AF_XDP baseline and
+  is **opt-in only**, never implied by an empty/omitted `modes` list or the
+  web UI's "all" button).
 
 Runs against **every online replicator** automatically (see
 [Multi-replicator mcast campaigns](#multi-replicator-mcast-campaigns)); there is

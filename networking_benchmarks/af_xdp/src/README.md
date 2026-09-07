@@ -134,6 +134,13 @@ to the replicator, intercepted by XDP. No kernel tunnel device is involved.
    `-g <group>`) seeds its own `config_map[0]` and receives via the AF_XDP
    socket. Multicast latency is **one-way** (source→dest), so it requires
    synchronized clocks (see accuracy).
+6. **Kernel baseline (`REPLICATOR_FWD_MODE=kernel`, `mcast_send -k`/
+   `mcast_receive -k`)** - the same m2u framing and control protocol, but with
+   AF_XDP/eBPF removed entirely: plain `AF_INET`/`SOCK_DGRAM` sockets on the
+   replicator and both endpoints. No `config_map`, no `MAX_GROUPS` ceiling, no
+   ring batching. Exists as an apples-to-apples "no kernel bypass" reference
+   point for the copy/inplace/bpf_tx measurements above - see
+   `src/Replicator/README.md`'s "Axis 3" section for the full comparison.
 
 ## Latency-critical RX/TX paths
 

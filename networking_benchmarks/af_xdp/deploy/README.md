@@ -56,7 +56,7 @@ afxdpctl sync --key ~/.ssh/virginia.pem --region us-east-1
 
 # 3. Run a benchmark
 afxdpctl run ucast kernel           # or: xdp (AF_XDP zero-copy TX)
-afxdpctl run mcast copy,inplace,bpf_tx
+afxdpctl run mcast copy,inplace,bpf_tx,kernel
 
 # 4. Generate report
 afxdpctl report -o results.html

@@ -34,6 +34,19 @@ void Replicator::addGroupDynamic(uint32_t group_nbo) {
         return;
     }
 
+    // kernel fwd mode has no XDP program loaded, so there is no config_map to
+    // allocate a slot from — group filtering happens entirely in userspace via
+    // getCachedGroupDestinations(). Ref-counting still runs (above/below) since
+    // Control.cpp's CTRL_MCAST_LEAVE depends on it regardless of fwd mode; only
+    // the BPF slot write is skipped. This also means kernel fwd mode has no
+    // MAX_GROUPS=16 ceiling — group_ref_counts_ is an unordered_map, not a
+    // fixed-size array.
+    if (kernelFwdActive()) {
+        group_ref_counts_[group_nbo] = 1;
+        std::cout << "[mcast] Added group " << group_str << " (kernel fwd mode, no config_map slot)" << std::endl;
+        return;
+    }
+
     // Grab a free config_map slot
     if (free_slots_.empty()) {
         std::cerr << "[mcast] config_map full (max 16 groups); ignoring Join for "
@@ -71,6 +84,14 @@ void Replicator::removeGroupDynamic(uint32_t group_nbo) {
 
     // Decrement — only remove when the last destination leaves
     if (--ref_it->second > 0) return;
+
+    // kernel fwd mode: no config_map slot was ever allocated for this group
+    // (see addGroupDynamic) — just drop the ref-count entry.
+    if (kernelFwdActive()) {
+        group_ref_counts_.erase(ref_it);
+        std::cout << "[mcast] Removed group " << group_str << " (kernel fwd mode)" << std::endl;
+        return;
+    }
 
     // Zero the BPF map slot so the verifier loop stops matching this group
     auto slot_it = group_slots_.find(group_nbo);

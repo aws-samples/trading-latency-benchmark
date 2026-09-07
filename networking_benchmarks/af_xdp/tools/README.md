@@ -239,7 +239,8 @@ mcast_send -D <replicator-ip> [options]
 | `-c <count>` | Packets to send | `10000` |
 | `-i <interval_us>` | Inter-packet gap in µs | `1000` |
 | `-s <size>` | Payload size in bytes (min: 32 = `WIRE_APP_HDR_LEN`) | `64` |
-| `-q <queue>` | AF_XDP TX queue (avoid queue 0 / RSS) | `1` |
+| `-q <queue>` | AF_XDP TX queue (avoid queue 0 / RSS); ignored with `-k` | `1` |
+| `-k` | Kernel mode: plain UDP socket, no AF_XDP/root (see below) | off |
 | `-h` | Print usage and exit 0 | - |
 
 Missing `-D` → `error: -D <replicator-ip> is required` + usage, exit 1.
@@ -260,6 +261,14 @@ overwrites only `seq` (8B) and `ts_ns` (8B) per packet. Timestamps
   multicast, so the group is only meaningful inside the m2u header.
 - No built-in RX / statistics - pair with `mcast_receive` on the destination.
 
+**`-k` (kernel mode):** skips AF_XDP entirely - opens a plain
+`socket(AF_INET, SOCK_DGRAM, 0)` and `sendto()`s `[m2u(8) | app payload]`
+directly; the kernel builds Eth/IP/UDP itself. No root required. This is the
+apples-to-apples TX-side counterpart of the replicator's
+`REPLICATOR_FWD_MODE=kernel` and `mcast_receive -k` - use all three together
+for a full plain-socket baseline run, or mix with AF_XDP `mcast_send`/
+`mcast_receive` to isolate which leg of the path benefits from AF_XDP.
+
 ---
 
 ### `mcast_receive` - AF_XDP multicast sink
@@ -278,12 +287,13 @@ mcast_receive -I <iface> [options]
 | `-p <port>` | Inner UDP destination port to match | `5000` |
 | `-c <count>` | Packets to receive before stopping | `10000` |
 | `-t <timeout>` | Seconds before giving up (watchdog) | `60` |
-| `-q <queue>` | XDP/AF_XDP queue index | `0` |
+| `-q <queue>` | XDP/AF_XDP queue index; ignored with `-k` | `0` |
 | `-r` | Print raw latencies (one per line, in ns) | off |
 | `-j <path>` | Write JSON results file | - |
+| `-k` | Kernel mode: plain UDP socket, no AF_XDP/root/XDP attach; `-I` not required (see below) | off |
 | `-h` | Print usage and exit 0 | - |
 
-Missing `-I` → `error: -I <iface> is required` + usage, exit 1.
+Missing `-I` → `error: -I <iface> is required` + usage, exit 1 (unless `-k`).
 
 **Datapath:**
 1. Loads `mcast.o` (BPF object, search paths: `./src/xdp/mcast.o`,
@@ -293,6 +303,16 @@ Missing `-I` → `error: -I <iface> is required` + usage, exit 1.
    matching m2u frames to the AF_XDP socket.
 4. Opens an RX-only AF_XDP socket with `XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD`
    (uses the already-attached program).
+
+**`-k` (kernel mode):** skips all four steps above - no `mcast.o`, no XDP
+attach, no AF_XDP socket. Binds a plain `AF_INET`/`SOCK_DGRAM` socket to
+`-p`'s port and filters by group in userspace (comparing the m2u header's
+group field against `-g`, since a kernel socket has no `config_map`-style
+kernel-side filter). `recvfrom()`'s buffer already starts at the m2u magic -
+the kernel stripped Eth/IP/UDP before userspace ever sees the datagram, so
+there is no header-parse step to run before it. Shares the same hop1/hop2/
+percentile/`-j` JSON reporting code as the AF_XDP path (`-r`/raw output
+included) - only frame acquisition and header-offset math differ.
 5. Enables NAPI busy-poll (`SO_BUSY_POLL=50µs`, `SO_PREFER_BUSY_POLL`,
    `SO_BUSY_POLL_BUDGET=64`).
 6. Polls RX ring in batches of 64; stamps `rx_ns = CLOCK_REALTIME` at each

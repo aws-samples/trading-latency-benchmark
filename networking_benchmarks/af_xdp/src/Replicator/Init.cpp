@@ -24,7 +24,103 @@
 
 void Replicator::initialize(bool useZeroCopy) {
     std::cout << "Initializing Replicator with zero-copy: " << (useZeroCopy ? "enabled" : "disabled") << std::endl;
-    
+
+    // Forward path selector (REPLICATOR_FWD_MODE): copy (default) | inplace | bpf_tx | kernel.
+    // Parsed BEFORE any AF_XDP setup below, because "kernel" skips AF_XDP/eBPF
+    // entirely — there is nothing to load or attach for this mode.
+    // "bpf_tx" forwards via the in-kernel eBPF XDP_TX hook, never reaching
+    // userspace. "kernel" runs the whole mcast path over plain UDP sockets —
+    // distinct from REPLICATOR_MODE=echo (plain UDP sockets, --echo-mode) and
+    // rtt's "kernel" variation (also plain sockets): those are different
+    // programs/tools, this is a fwd-mode of the same AF_XDP replicator binary.
+    if (const char* fm = getenv("REPLICATOR_FWD_MODE")) {
+        if      (strcmp(fm, "inplace") == 0) fwd_mode_ = 1;
+        else if (strcmp(fm, "bpf_tx")  == 0) fwd_mode_ = 2;
+        else if (strcmp(fm, "kernel")  == 0) fwd_mode_ = 3;
+        else                                 fwd_mode_ = 0;
+    }
+    if (fwd_mode_ == 3 && !mcast_mode_) {
+        // kernel fwd mode only has meaning in mcast mode (CTRL_MCAST_JOIN drives
+        // its destination registration); under unicast there is no equivalent
+        // join mechanism, so the setting is silently ignored — same behavior
+        // bpf_tx already has under unicast. Log it so it's discoverable rather
+        // than a silent no-op, consistent for every fwd-mode value, not just this one.
+        std::cout << "[fwd_mode] REPLICATOR_FWD_MODE=kernel requested under unicast mode; "
+                     "ignored (kernel fwd mode is mcast-only). Falling back to copy." << std::endl;
+        fwd_mode_ = 0;
+    }
+    std::cout << "Forward mode: "
+              << (fwd_mode_ == 3 ? "kernel (plain UDP sockets)"
+                : fwd_mode_ == 2 ? "bpf_tx (XDP_TX)"
+                : fwd_mode_ == 1 ? "inplace (zero-copy)" : "copy")
+              << std::endl;
+
+    if (kernelFwdActive()) {
+        // No AF_XDP, no eBPF, no UMEM — the entire mcast RX/TX path is plain
+        // UDP sockets. Bind the kernel RX socket here; processMcastKernelRx()
+        // (spawned in Core.cpp's start()) polls it. group filtering happens in
+        // userspace (getCachedGroupDestinations), not via a BPF config_map, so
+        // there is no config_map_fd_/fwd_map_fd_ to set up.
+        kernel_rx_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if (kernel_rx_socket_ < 0) {
+            throw std::runtime_error("Failed to create kernel fwd-mode RX socket: " + std::string(strerror(errno)));
+        }
+        int reuse = 1;
+        setsockopt(kernel_rx_socket_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        struct sockaddr_in bind_addr{};
+        bind_addr.sin_family      = AF_INET;
+        bind_addr.sin_port        = htons(listen_port_);
+        bind_addr.sin_addr.s_addr = INADDR_ANY;
+        if (bind(kernel_rx_socket_, reinterpret_cast<struct sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
+            throw std::runtime_error("Failed to bind kernel fwd-mode RX socket to port "
+                                      + std::to_string(listen_port_) + ": " + std::string(strerror(errno)));
+        }
+        std::cout << "kernel fwd mode: bound RX socket to 0.0.0.0:" << listen_port_ << std::endl;
+
+        // Cache interface IP/MAC (still needed by createUdpPacket/sendToDestinationFallback
+        // for outbound TX) and set up the control + output sockets, then return —
+        // none of the AF_XDP-specific setup below applies to this mode.
+        if (!getInterfaceIp(listen_interface_, cached_iface_ip_))
+            throw std::runtime_error("Failed to get IP for interface " + listen_interface_);
+        inet_aton(cached_iface_ip_.c_str(), reinterpret_cast<struct in_addr*>(&cached_iface_saddr_nbo_));
+        if (!getInterfaceMac(listen_interface_, cached_iface_mac_))
+            throw std::runtime_error("Failed to get MAC for interface " + listen_interface_);
+        listen_ip_nbo_ = parseIpAddress(listen_ip_);
+
+        control_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if (control_socket_ < 0) {
+            throw std::runtime_error("Failed to create control socket: " + std::string(strerror(errno)));
+        }
+        struct sockaddr_in control_addr{};
+        control_addr.sin_family      = AF_INET;
+        control_addr.sin_addr.s_addr = INADDR_ANY;
+        control_addr.sin_port        = htons(CONTROL_PORT);
+        int opt = 1;
+        if (setsockopt(control_socket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+            throw std::runtime_error("Failed to set SO_REUSEADDR: " + std::string(strerror(errno)));
+        }
+        if (bind(control_socket_, reinterpret_cast<struct sockaddr*>(&control_addr), sizeof(control_addr)) < 0) {
+            throw std::runtime_error("Failed to bind control socket: " + std::string(strerror(errno)));
+        }
+        output_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if (output_socket_ < 0) {
+            throw std::runtime_error("Failed to create output socket: " + std::string(strerror(errno)));
+        }
+
+        if (!ctrl_multicast_group_.empty()) {
+            joinControlMulticastGroup();
+            ctrl_forward_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
+            if (ctrl_forward_socket_ < 0) {
+                throw std::runtime_error("Failed to create ctrl forward socket: " + std::string(strerror(errno)));
+            }
+            std::cout << "Upstream control configured: " << ctrl_multicast_group_ << ":"
+                      << ctrl_multicast_port_ << " → " << producer_ip_ << ":" << producer_port_ << std::endl;
+        }
+
+        std::cout << "Replicator initialized successfully (kernel fwd mode, no AF_XDP)" << std::endl;
+        return;
+    }
+
     // Set resource limits for AF_XDP
     XdpSocket::setResourceLimits();
     
@@ -127,19 +223,6 @@ void Replicator::initialize(bool useZeroCopy) {
         throw std::runtime_error("Failed to get MAC for interface " + listen_interface_);
     std::cout << "Interface " << listen_interface_
               << " IP=" << cached_iface_ip_ << std::endl;
-
-    // Forward path selector (REPLICATOR_FWD_MODE): copy (default) | inplace | bpf_tx.
-    // "bpf_tx" forwards via the in-kernel eBPF XDP_TX hook, never reaching
-    // userspace — distinct from REPLICATOR_MODE=echo (plain UDP sockets,
-    // --echo-mode) and rtt's "kernel" variation (also plain sockets).
-    if (const char* fm = getenv("REPLICATOR_FWD_MODE")) {
-        if      (strcmp(fm, "inplace") == 0) fwd_mode_ = 1;
-        else if (strcmp(fm, "bpf_tx")  == 0) fwd_mode_ = 2;
-        else                                 fwd_mode_ = 0;
-    }
-    std::cout << "Forward mode: "
-              << (fwd_mode_ == 2 ? "bpf_tx (XDP_TX)" : fwd_mode_ == 1 ? "inplace (zero-copy)" : "copy")
-              << std::endl;
 
     // Upstream control: join control multicast group and prepare forward socket
     if (!ctrl_multicast_group_.empty()) {

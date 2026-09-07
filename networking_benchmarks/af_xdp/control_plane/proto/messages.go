@@ -176,7 +176,7 @@ type McastParams struct {
 	Count        int    `json:"count"`
 	IntervalUs   int    `json:"interval_us"`
 	TimeoutSec   int    `json:"timeout_sec"`
-	Variation    string `json:"variation,omitempty"` // fwd mode (copy|inplace|bpf_tx) — tags telemetry
+	Variation    string `json:"variation,omitempty"` // fwd mode (copy|inplace|bpf_tx|kernel) — tags telemetry
 
 	// Size is the mcast_send payload size in bytes (mirrors `-s`; tool minimum
 	// is 32 = WIRE_APP_HDR_LEN). 0 => runner/tool default (64B). mcast_receive
