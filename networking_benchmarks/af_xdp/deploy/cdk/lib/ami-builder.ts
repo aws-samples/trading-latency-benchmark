@@ -13,6 +13,11 @@ export interface AmiBuilderStackProps extends cdk.StackProps {
   instanceType?: string;
   gitRepo?: string;
   gitRef?: string;
+  /** CIDR allowed to SSH into the builder instance. Omitted: SSH is open to
+   *  0.0.0.0/0 - only rely on that fallback for throwaway/local testing.
+   *  `afxdpctl up` always supplies this (auto-detected caller IP by
+   *  default). */
+  adminCidr?: string;
 }
 
 export class AmiBuilderStack extends cdk.Stack {
@@ -47,7 +52,11 @@ export class AmiBuilderStack extends cdk.Stack {
       description: 'AMI builder: SSH debug + outbound',
       allowAllOutbound: true,
     });
-    sg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), 'SSH debug');
+    if (props.adminCidr) {
+      sg.addIngressRule(ec2.Peer.ipv4(props.adminCidr), ec2.Port.tcp(22), 'SSH debug (admin)');
+    } else {
+      sg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), 'SSH debug');
+    }
 
     // ── IAM Role ─────────────────────────────────────────────────────────────
     const role = new iam.Role(this, 'Role', {

@@ -1,6 +1,0 @@
-[
-  {"az": "a", "type": "m8a.2xlarge", "pgType": "cluster", "pgName": "cpg-a", "role": "source"},
-  {"az": "a", "type": "m8a.2xlarge", "pgType": "cluster", "pgName": "cpg-a", "role": "replicator"},
-  {"az": "a", "type": "m8a.2xlarge", "pgType": "cluster", "pgName": "cpg-a", "role": "destination"},
-  {"az": "a", "type": "m8a.2xlarge", "pgType": "cluster", "pgName": "cpg-a", "role": "destination"}
-]

@@ -115,6 +115,11 @@ export interface FleetStackProps extends cdk.StackProps {
   /** Region where the control-plane publishes /af-xdp/nats-url. Set on
    *  secondary stacks so user-data replicates the params locally. */
   controlPlaneRegion?: string;
+  /** CIDR allowed to SSH into fleet nodes. Omitted: SSH is open to
+   *  0.0.0.0/0 - only rely on that fallback for throwaway/local testing.
+   *  `afxdpctl up` always supplies this (auto-detected caller IP by
+   *  default), so it is unset only when the CDK app is invoked directly. */
+  adminCidr?: string;
 }
 
 /** Resolve an AZ spec ("a" | "us-east-1a" | undefined) to a full AZ name. */
@@ -277,7 +282,11 @@ export class FleetStack extends cdk.Stack {
       allowAllOutbound: true,
     });
     sg.applyRemovalPolicy(RemovalPolicy.DESTROY);
-    sg.addIngressRule(Peer.anyIpv4(), Port.tcp(22), 'SSH');
+    if (props.adminCidr) {
+      sg.addIngressRule(Peer.ipv4(props.adminCidr), Port.tcp(22), 'SSH (admin)');
+    } else {
+      sg.addIngressRule(Peer.anyIpv4(), Port.tcp(22), 'SSH');
+    }
     sg.addIngressRule(sg, Port.allTraffic(), 'All intra-group traffic');
     if (props.peerVpcCidr) {
       // Mirror the intra-group allowance for the peer VPC. An SG self-reference

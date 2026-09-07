@@ -48,6 +48,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <poll.h>
+#include <sched.h>
 
 #include <xdp/xsk.h>
 #include <bpf/libbpf.h>
@@ -114,15 +115,30 @@ static inline uint64_t now_ns()
 	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-static inline void busy_wait_ns(uint64_t ns)
+// Absolute-deadline pace, matching rtt.cpp's wait_until_ns(). Waits until
+// deadline_ns on CLOCK_MONOTONIC, or returns immediately if already past.
+//
+// This replaces per-iteration RELATIVE waits (sleep/spin for interval_ns
+// measured from when the wait itself starts, i.e. AFTER that packet's ring
+// reserve/memcpy/submit/doorbell work). A relative wait adds the loop's own
+// processing time on top of interval_ns every iteration, so actual spacing is
+// interval_ns + processing_time, not interval_ns - live measurement at
+// interval_us=10 (100k pps requested) found only 65-90k pps achieved (10-35%
+// short) across every fwd mode, a consistent shortfall matching this
+// mechanism rather than a fwd-mode-specific cost. Pacing off an absolute
+// deadline computed once per iteration (t0 + seq*interval_ns) absorbs
+// processing time into the interval instead of adding to it.
+//
+// clock_nanosleep(TIMER_ABSTIME) is also not just cheaper than a tight spin:
+// per rtt.cpp's wait_until_ns comment, sleeping (not spinning) is what lets
+// this core run NAPI/softirq TX-completion cleanup between packets - a tight
+// userspace spin never yields, starving that path on a zero-copy TX ring.
+static inline void wait_until_ns(int64_t deadline_ns)
 {
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	uint64_t target = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec + ns;
-	for (;;) {
-		clock_gettime(CLOCK_MONOTONIC, &ts);
-		if ((uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec >= target) break;
-	}
+	struct timespec d;
+	d.tv_sec  = deadline_ns / 1000000000LL;
+	d.tv_nsec = deadline_ns % 1000000000LL;
+	clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &d, nullptr);
 }
 
 /* ── IP checksum ──────────────────────────────────────────────────────── */
@@ -277,6 +293,10 @@ static int run_kernel_send(const char *replicator_ip_s, const char *group, int p
 
 	uint64_t interval_ns = (uint64_t)interval_us * 1000ULL;
 
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	int64_t t0_ns = (int64_t)t0.tv_sec * 1000000000LL + t0.tv_nsec;
+
 	for (int seq = 0; seq < count; seq++) {
 		uint64_t seq_be = htobe64_((uint64_t)seq);
 		memcpy(buf.data() + m2u_len + WIRE_APP_SEQ_OFF, &seq_be, 8);
@@ -298,21 +318,42 @@ static int run_kernel_send(const char *replicator_ip_s, const char *group, int p
 			fflush(stdout);
 		}
 
-		if (interval_us > 0) {
-			if (interval_us < 1000)
-				busy_wait_ns(interval_ns);
-			else {
-				struct timespec sl{};
-				sl.tv_sec  = interval_us / 1000000;
-				sl.tv_nsec = (long)(interval_us % 1000000) * 1000L;
-				nanosleep(&sl, nullptr);
-			}
-		}
+		if (interval_us > 0)
+			wait_until_ns(t0_ns + (int64_t)(seq + 1) * (int64_t)interval_ns);
 	}
 
-	printf("\nDone. Sent %d packets.\n", count);
+	struct timespec t1;
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+	double achieved_pps = elapsed > 0 ? count / elapsed : 0.0;
+	double requested_pps = interval_us > 0 ? 1e6 / interval_us : achieved_pps;
+	printf("\nDone. Sent %d packets in %.3fs (achieved %.0f pps, requested %.0f pps, %.1f%%)  [kernel mode]\n",
+	       count, elapsed, achieved_pps, requested_pps,
+	       requested_pps > 0 ? 100.0 * achieved_pps / requested_pps : 0.0);
 	close(sock);
 	return 0;
+}
+
+/* ── real-time scheduling ────────────────────────────────────────────────
+ * AF_XDP-path-only: matches rtt.cpp's enable_realtime(). SCHED_FIFO removes
+ * scheduler wakeup latency on the TX hot loop (stamp -> submit -> doorbell),
+ * the same class of cost that made hop1 rate-sensitive (see dev/roadmap/fix.md's
+ * hop1 TX-doorbell finding). Not applied in run_kernel_send(): that path is
+ * the deliberately-untuned stock-kernel baseline (dev/roadmap/fix.md item 4) and
+ * must stay that way for the comparison to mean what it claims to. */
+static void enable_realtime()
+{
+	struct sched_param param = {};
+	param.sched_priority = 80;
+	if (sched_setscheduler(0, SCHED_FIFO, &param) == 0)
+		printf("  SCHED_FIFO priority 80 enabled\n");
+	else
+		fprintf(stderr, "  Warning: SCHED_FIFO failed (need root/CAP_SYS_NICE), continuing with SCHED_OTHER\n");
+
+	if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0)
+		printf("  mlockall enabled (no page faults during measurement)\n");
+	else
+		fprintf(stderr, "  Warning: mlockall failed (need root/CAP_IPC_LOCK)\n");
 }
 
 /* ── usage ────────────────────────────────────────────────────────────── */
@@ -466,8 +507,22 @@ int main(int argc, char *argv[])
 	       "payload=%dB  interval=%dus\n\n",
 	       count, replicator_ip_s, group, port, iface, tx_queue, pkt_size, interval_us);
 
+	// SCHED_FIFO + mlockall from here, not from before AF_XDP setup: MAC
+	// resolution, posix_memalign, xsk_umem__create and xsk_socket__create all
+	// make syscalls that can need the kernel to schedule ordinary work on this
+	// core. Running that setup at RT priority with pages already locked risks
+	// starving whatever the kernel needs to finish those calls - measured
+	// live on mcast_receive.cpp's equivalent call site as ~50% of runs losing
+	// 40-70% of packets when placed before setup instead of here. Enabling RT
+	// only around the steady-state hot loop avoids that risk entirely.
+	enable_realtime();
+
 	uint64_t interval_ns = (uint64_t)interval_us * 1000ULL;
 	uint32_t outstanding = 0;
+
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	int64_t t0_ns = (int64_t)t0.tv_sec * 1000000000LL + t0.tv_nsec;
 
 	for (int seq = 0; seq < count; seq++) {
 		/* drain completions */
@@ -515,21 +570,16 @@ int main(int argc, char *argv[])
 		if (xsk_ring_prod__needs_wakeup(&tx_ring))
 			sendto(xsk_fd, nullptr, 0, MSG_DONTWAIT, nullptr, 0);
 
-		if (seq % 100 == 0) {
-			printf("  sent %d/%d\r", seq, count);
-			fflush(stdout);
+		// Every 10000, no fflush - see mcast_receive.cpp's identical fix for
+		// why: fflush's write(2) inside a SCHED_FIFO hot loop on an isolated
+		// core is an uninterruptible stall surface, measured live as
+		// intermittent multi-hundred-ms latency spikes.
+		if (seq % 10000 == 0) {
+			printf("  sent %d/%d\n", seq, count);
 		}
 
-		if (interval_us > 0) {
-			if (interval_us < 1000)
-				busy_wait_ns(interval_ns);
-			else {
-				struct timespec sl{};
-				sl.tv_sec  = interval_us / 1000000;
-				sl.tv_nsec = (long)(interval_us % 1000000) * 1000L;
-				nanosleep(&sl, nullptr);
-			}
-		}
+		if (interval_us > 0)
+			wait_until_ns(t0_ns + (int64_t)(seq + 1) * (int64_t)interval_ns);
 	}
 
 	/* flush outstanding TX */
@@ -542,7 +592,15 @@ int main(int argc, char *argv[])
 		if (outstanding > 0) usleep(1000);
 	}
 
-	printf("\nDone. Sent %d packets.\n", count);
+	struct timespec t1;
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+	double achieved_pps = elapsed > 0 ? count / elapsed : 0.0;
+	double requested_pps = interval_us > 0 ? 1e6 / interval_us : achieved_pps;
+
+	printf("\nDone. Sent %d packets in %.3fs (achieved %.0f pps, requested %.0f pps, %.1f%%)\n",
+	       count, elapsed, achieved_pps, requested_pps,
+	       requested_pps > 0 ? 100.0 * achieved_pps / requested_pps : 0.0);
 	xsk_socket__delete(xsk);
 	xsk_umem__delete(umem);
 	free(umem_buf);

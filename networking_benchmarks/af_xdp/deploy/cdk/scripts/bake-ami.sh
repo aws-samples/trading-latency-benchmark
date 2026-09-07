@@ -137,6 +137,37 @@ net.core.bpf_jit_harden = 0
 net.core.bpf_jit_kallsyms = 1
 EOF
 
+# RT bandwidth throttling: DISABLED.
+#
+# Root cause proven live (see dev/roadmap/fix.md's RT-throttling section):
+# this fleet runs SCHED_FIFO busy-poll threads (mcast_receive, mcast_send,
+# rtt) pinned to isolcpus+nohz_full cores. On a tickless core the scheduler
+# tick that normally charges RT runtime continuously is stopped, so
+# update_curr_rt() is called only at sporadic scheduling events. rt_time is
+# therefore accumulated in large deferred lumps instead of smoothly, blows
+# past the 950ms/1000ms budget (measured on CPU3: rt_time reaching
+# 1704ms vs rt_runtime 950ms, 1.8x over), and the runqueue is then throttled
+# to pay it back - descheduling the busy-poll thread for hundreds of
+# milliseconds. Measured consequence: RX ring backs up, ~3700 packets dropped
+# per affected run, hop2 p99 of 73ms and max of 93ms against a normal p50 of
+# ~18us. Confirmed directly: .rt_throttled flipped to 1 five times during a
+# single failing run, and rt_time was decremented by exactly 950ms at each
+# period boundary.
+#
+# Disabling bandwidth control entirely is the standard configuration for
+# RT + nohz_full setups precisely because the accounting is not reliable on
+# tickless cores. Tightening sched_rt_period_us instead was tried and made it
+# WORSE (more frequent lumpy enforcement) - see fix.md.
+#
+# Tradeoff accepted: this removes the kernel's last-resort protection against
+# a runaway RT thread monopolising a core. Mitigated here by isolcpus (these
+# threads never run on the CPU0 housekeeping core, so the OS/SSH stay
+# responsive), each tool's own idle deadline, and the agent wrapping every
+# measurement in `timeout`.
+cat > /etc/sysctl.d/99-rt-sched.conf <<'EOF'
+kernel.sched_rt_runtime_us = -1
+EOF
+
 # Network tuning (feeder-safe, harmless on other roles)
 cat > /etc/sysctl.d/99-network-bench.conf <<'EOF'
 net.ipv4.conf.all.mc_forwarding = 0
@@ -327,11 +358,44 @@ REPLICATOR_MCAST_GROUP=224.0.31.50
 REPLICATOR_ZEROCOPY=true    # AF_XDP zero-copy (ENA-supported); set false to force copy/DRV mode
 EOF
 
+# Force clock sync before anything latency-sensitive starts. The stock
+# chrony config here relies on `makestep 1.0 3` (steps only during the
+# first 3 updates, and only if the offset exceeds 1s) plus `refclock PHC
+# ... trust` (accepts the PHC's reading outright, no spike-rejection
+# filtering). Neither one guarantees the clock is actually converged by
+# the time other units start: a post-boot PHC offset under 1s falls
+# through to gradual slewing bounded by `maxslewrate 500` (500ppm), so a
+# real offset seen live on this fleet post-reboot (53.7ms slow) would take
+# ~107s to fully correct on its own - long enough to run several
+# benchmark cycles against a still-skewed clock. `chronyc waitsync` blocks
+# until chrony reports converged (or the timeout elapses, so this cannot
+# hang a boot indefinitely on a chrony misconfiguration); `makestep` right
+# after is a fast, explicit step for any residual offset that `waitsync`
+# considered "good enough" but is still non-trivial. See dev/roadmap/fix.md's hop1
+# clock-skew section for the RMS-jitter background this closes the gap on.
+cat > /etc/systemd/system/chrony-force-sync.service <<'EOF'
+[Unit]
+Description=Force clock convergence before latency-sensitive services start
+After=chronyd.service network-online.target
+Wants=chronyd.service network-online.target
+Before=replicator.service afxdp-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/chronyc waitsync 30 0.0001 0 0
+ExecStartPost=/usr/bin/chronyc makestep
+RemainAfterExit=yes
+TimeoutStartSec=35
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 # Replicator systemd service
 cat > /etc/systemd/system/replicator.service <<'EOF'
 [Unit]
 Description=AF_XDP packet replicator
-After=network-online.target ena-xdp-queues.service ena-mtu.service
+After=network-online.target ena-xdp-queues.service ena-mtu.service chrony-force-sync.service
 Wants=network-online.target
 
 [Service]
@@ -412,7 +476,7 @@ EOF
 systemctl daemon-reload
 # Disable irqbalance so it can't migrate NIC IRQs onto the isolated cores.
 systemctl disable --now irqbalance 2>/dev/null || true
-systemctl enable ena-coalescing.service ena-xdp-queues.service ena-mtu.service ena-irq-affinity.service cpu-performance.service ena-rx-lowlat.service replicator.service
+systemctl enable ena-coalescing.service ena-xdp-queues.service ena-mtu.service ena-irq-affinity.service cpu-performance.service ena-rx-lowlat.service chrony-force-sync.service replicator.service
 # Enable the control-plane agent only if it built (best-effort in Step 3b).
 [ -x /opt/af-xdp/afxdp-agent ] && systemctl enable afxdp-agent.service || echo "afxdp-agent not built; unit installed but not enabled"
 

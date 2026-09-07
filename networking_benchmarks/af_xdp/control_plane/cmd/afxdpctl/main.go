@@ -15,9 +15,9 @@
 //   afxdpctl run mcast copy,inplace,xdp_tx -count 10000 -interval-us 200
 //   afxdpctl cancel
 //   afxdpctl report -o run.html
-//   afxdpctl up   --key frankfurt --secondary-key london --scenario all --git-repo <url> --git-ref <branch> --bake
+//   afxdpctl up   --key frankfurt --secondary-key london --scenario all-11 --git-repo <url> --git-ref <branch> --bake
 //   afxdpctl sync --key ~/.ssh/frankfurt.pem --region eu-central-1
-//   afxdpctl down --key frankfurt --scenario all
+//   afxdpctl down --key frankfurt --scenario all-11
 package main
 
 import (
@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -120,6 +121,16 @@ func fmtJob(d map[string]any) string {
 		}
 	case "done":
 		return fmt.Sprintf("done %s", kv)
+	case "mode_done":
+		// RunMcastMatrix's per-(mode,replicator) event: "ok" is false when
+		// every retry attempt failed (including mcastPathologicalTail's
+		// SCHED_FIFO busy-poll stall check in the agent) - surface that
+		// distinctly, or a run that quietly exhausted its retries reads
+		// identically to a clean one in the CLI's live log.
+		if ok, present := d["ok"].(bool); present && !ok {
+			return fmt.Sprintf("%s: FAILED after retries (edge left at its last known value)", kv)
+		}
+		return fmt.Sprintf("%s done", kv)
 	case "cancelled":
 		return fmt.Sprintf("cancelled %s", kv)
 	case "rejected":
@@ -362,20 +373,60 @@ func run(dir, name string, args ...string) error {
 	return c.Run()
 }
 
+// detectCallerIP asks a public echo service for the caller's own IP, for
+// defaulting --admin-cidr. Best-effort: on any failure (offline, DNS,
+// non-200), returns "" and the caller falls back to leaving adminCidr unset
+// (control-plane.ts's own default: 8080 closed, 22 open to 0.0.0.0/0) rather
+// than failing the whole `up` command over a convenience lookup.
+func detectCallerIP() string {
+	resp, err := http.Get("https://checkip.amazonaws.com")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 func cmdUp(args []string) error {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	key := fs.String("key", "", "EC2 key pair name for primary region (required)")
 	secondaryKey := fs.String("secondary-key", "", "EC2 key pair name for secondary region (cross-region deploys)")
-	scenario := fs.String("scenario", "ucast-cpg-3", "fleet scenario")
+	scenario := fs.String("scenario", "ucast-3", "fleet scenario")
 	repo := fs.String("git-repo", "", "git repo for control-plane + AMI bake")
 	ref := fs.String("git-ref", "main", "git ref")
 	bake := fs.Bool("bake", false, "also (re)bake the AMI")
 	instType := fs.String("instance-type", "m8a.2xlarge", "AMI builder instance type")
 	cdkDir := fs.String("cdk-dir", "deploy/cdk", "path to the CDK app")
 	region := fs.String("region", "eu-central-1", "primary AWS region")
+	// Default "auto" resolves to the caller's own public IP/32 via
+	// detectCallerIP, so `up` opens 8080 (web/API) + 22 (SSH) to the caller
+	// without a separate manual `aws ec2 authorize-security-group-ingress` or
+	// hand-rolled `cdk deploy --context adminCidr=...` step - see
+	// control-plane.ts's ControlPlaneStackProps.adminCidr: omitted entirely,
+	// it leaves 8080 closed and 22 open to 0.0.0.0/0. Pass "" explicitly to
+	// keep that fully-closed-8080 default instead (e.g. SSM port-forwarding
+	// only), or a specific CIDR to admit a fixed address/range.
+	adminCidr := fs.String("admin-cidr", "auto", `CIDR allowed to reach 8080+22 ("auto" = detect caller IP, "" = closed/CDK default)`)
 	fs.Parse(args)
 	if *key == "" || *repo == "" {
 		return fmt.Errorf("up requires --key and --git-repo")
+	}
+	resolvedAdminCidr := *adminCidr
+	if resolvedAdminCidr == "auto" {
+		if ip := detectCallerIP(); ip != "" {
+			resolvedAdminCidr = ip + "/32"
+			fmt.Printf("admin-cidr: auto-detected caller IP -> %s\n", resolvedAdminCidr)
+		} else {
+			resolvedAdminCidr = ""
+			fmt.Println("admin-cidr: could not auto-detect caller IP; leaving 8080 closed (CDK default) - pass --admin-cidr explicitly if needed")
+		}
 	}
 	ctx := []string{"--require-approval", "never",
 		"--context", "keyPairName=" + *key,
@@ -384,6 +435,9 @@ func cmdUp(args []string) error {
 		"--context", "region=" + *region}
 	if *secondaryKey != "" {
 		ctx = append(ctx, "--context", "secondaryKeyPairName="+*secondaryKey)
+	}
+	if resolvedAdminCidr != "" {
+		ctx = append(ctx, "--context", "adminCidr="+resolvedAdminCidr)
 	}
 	if err := run(*cdkDir, "npx", append([]string{"cdk", "deploy", "XdpStack-ControlPlane", "--context", "deploymentType=control-plane"}, ctx...)...); err != nil {
 		return err
@@ -433,7 +487,7 @@ func cmdSync(args []string) error {
 func cmdDown(args []string) error {
 	fs := flag.NewFlagSet("down", flag.ExitOnError)
 	key := fs.String("key", "x", "EC2 key pair name (context only)")
-	scenario := fs.String("scenario", "ucast-cpg-3", "scenario context (for fleet synth)")
+	scenario := fs.String("scenario", "ucast-3", "scenario context (for fleet synth)")
 	cdkDir := fs.String("cdk-dir", "deploy/cdk", "path to the CDK app")
 	region := fs.String("region", "eu-central-1", "primary AWS region")
 	fs.Parse(args)
@@ -458,7 +512,7 @@ func usage() {
     report [-o file] [-kind]       write an HTML report (heatmap + all latencies)
 
   Infra (wrap CDK / ansible):
-    up   --key K --git-repo R [--secondary-key K2] [--git-ref B] [--scenario S] [--region R] [--bake]
+    up   --key K --git-repo R [--secondary-key K2] [--git-ref B] [--scenario S] [--region R] [--bake] [--admin-cidr auto|CIDR|""]
     sync --key KEYFILE [--region R] [--profile P]
     down --key K [--scenario S] [--region R]
 

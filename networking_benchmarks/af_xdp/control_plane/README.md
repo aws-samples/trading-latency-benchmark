@@ -135,6 +135,7 @@ Supported commands:
 | `run_rtt` | Execute the C++ `rtt` tool → returns Metrics + publishes Telemetry |
 | `mcast_receive` | Execute `mcast_receive` (blocks until count/timeout) → returns Metrics + publishes Telemetry |
 | `mcast_send` | Execute `mcast_send` burst (non-blocking sender side) |
+| `nic_tuning` | Read this node's NAPI/coalescing/queue-count state (sysfs + `ethtool -c`/`-l`) → `CommandResult.NicTuning` |
 
 On completion of any measurement command (`run_rtt`, `mcast_receive`), the agent
 publishes **both** a `CommandResult` (on `fleet.result.<id>`) and a `Telemetry`
@@ -146,6 +147,40 @@ The agent derives send/receive CPU pins from the intersection of `isolcpus=` and
 the kernel online set - highest two isolated cores (send = highest, recv =
 second-highest). This adapts to instance size without hardcoding and never pins
 to an offline core (which would silently fall back to CPU 0, inflating latency).
+
+### NIC tuning snapshot (`nic_tuning`)
+
+`Runner.NicTuning` reads the NAPI / interrupt-coalescing state that `bake-ami.sh`
+sets (`ena-rx-lowlat.service`, `ena-coalescing.service`) off the node's
+default-route interface and returns it as a flat `map[string]string` carried back
+on `CommandResult.NicTuning`. A run whose tuning drifted from the baked baseline
+(`napi_defer_hard_irqs=2`, `gro_flush_timeout=10000`, `rx-usecs=0`, `tx-usecs=0`,
+adaptive RX off) is not comparable to one that matches it, and nothing in the
+report said which of the two you were reading - capturing it per run replaces a
+manual SSH + sysfs read after the fact.
+
+| Key | Source | Notes |
+|---|---|---|
+| `iface` | default-route interface name | always present; the only key returned when no interface is found |
+| `napi_defer_hard_irqs` | `/sys/class/net/<if>/napi_defer_hard_irqs` | `""` when the kernel/driver doesn't expose it |
+| `gro_flush_timeout` | `/sys/class/net/<if>/gro_flush_timeout` | `""` when unreadable |
+| `rx_usecs`, `tx_usecs` | `ethtool -c` (`rx-usecs:` / `tx-usecs:`) | all four `ethtool -c` keys are absent if that call fails |
+| `adaptive_rx`, `adaptive_tx` | `ethtool -c`'s single `Adaptive RX: off  TX: n/a` line | parsed as a pair off that one line - `Adaptive TX:` never starts a line of its own |
+| `rx_queues_current`, `tx_queues_current`, `combined_queues_current` | `ethtool -l`, SECOND occurrence of each label (Current hardware settings, not Pre-set maximums) | ENA reports the queue count only under `Combined:`, so rx/tx read `n/a` by design, not by parse failure |
+
+Best-effort throughout: an unreadable value comes back as `""` (or its key
+absent) rather than failing the command - this is diagnostic metadata, not a gate
+on the run.
+
+**When it runs, and where it lands.** `RunMcastMatrix` dispatches `nic_tuning`
+once per `(replicator, mode)`, concurrently, to three nodes only - the source,
+that replicator, and the first destination of that mode - enough to catch a node
+that drifted from the baseline without fanning out across a large destination
+set. Each node's keys are prefixed with its role (`nic_src_*`, `nic_repl_*`,
+`nic_dst_*`) so they don't collide, and merged into the `params` map of that
+mode's `runs` row, right next to the replicator identity. A node that doesn't
+answer (busy agent, older agent build predating the command) simply contributes
+no keys and the run proceeds.
 
 ---
 
@@ -159,13 +194,26 @@ Package layout: `hub/`, `registry/`, `collector/`, `store/`, `pairs/`,
 A SQLite database (WAL mode) persists every measurement and campaign run.
 Schema: `runs` (id, started/ended, kind, variation, scope, target_ids, params,
 pair counts) and `measurements` (run_id FK, timestamps, kind, variation, src/dst,
-percentiles, loss). For mcast, each `(replicator, mode)` combination the
+percentiles, loss, hop split, plus the per-measurement rate columns
+`achieved_pps` / `requested_pps` / `rate_shortfall` - see
+[Achieved vs requested rate](#achieved-vs-requested-rate)). Columns added after
+the initial release are backfilled on an existing DB by `migrateAddColumn`
+(`CREATE TABLE IF NOT EXISTS` only shapes a fresh one).
+
+For mcast, each `(replicator, mode)` combination the
 orchestrator sweeps gets its own `runs` row, with the replicator's
 `instance_id`/`private_ip`/`placement_group`/`az` recorded in `params` - this is
 what lets `LatestMcastReplicatorResults` (backing `GET /api/mcast-replicators`)
 attribute every measurement to the replicator path that produced it, even
-though the wire `Telemetry` message itself only carries src/dst IPs. The store
-is also consumed read-only by the MCP server (`control_plane/mcp/`).
+though the wire `Telemetry` message itself only carries src/dst IPs. That same
+mcast `params` map also records the run's tool knobs - `group`, `count`,
+`interval_us`, `size` (mcast_send payload bytes), `tx_queue`, `rx_queue` - and the
+`nic_src_*`/`nic_repl_*`/`nic_dst_*` tuning keys, so a percentile set can be read
+back against both the load it was asked for and the NIC state it ran on.
+`LatestMeasurements` surfaces `size` per row by `json_extract`ing it from the
+owning run (`0` for ucast and for mcast runs made before it was recorded), which
+is why no schema change was needed to add it. The store is also consumed
+read-only by the MCP server (`control_plane/mcp/`).
 
 ### pairs/ - pair expansion
 
@@ -260,7 +308,7 @@ incremental deltas flow:
 | `snapshot` | `{nodes:[], edges:[]}` | Once, on client connect |
 | `node` | single Node object | Registration or material heartbeat change |
 | `edge` | single Edge object | New measurement telemetry applied |
-| `job` | campaign progress object | Orchestrator lifecycle events (running/progress/done/cancelled/error/rejected) |
+| `job` | campaign progress object | Orchestrator lifecycle events (running/progress/mode_done/replicator_done/done/cancelled/error/rejected) |
 
 Keepalive comments (`: keepalive\n\n`) are sent every 20 s to prevent proxy
 timeouts from closing the connection.
@@ -307,6 +355,12 @@ The `kind` field selects the campaign type; remaining fields are campaign-specif
   three AF_XDP fwd modes - `kernel` is a plain-socket, no-AF_XDP baseline and
   is **opt-in only**, never implied by an empty/omitted `modes` list or the
   web UI's "all" button).
+- `size` (optional): `mcast_send` payload bytes, mirrors the tool's `-s` and
+  `afxdpctl run mcast -size`. `0` = tool default (64 B; tool minimum is 32 B).
+  Recorded into each mode's `runs.params` and returned per measurement row by
+  `GET /api/measurements`, so a payload sweep stays attributable after the fact.
+- `tx_queue` / `rx_queue` (optional): AF_XDP queue indices for `mcast_send` /
+  `mcast_receive` (`0` = tool default). Also persisted into `runs.params`.
 
 Runs against **every online replicator** automatically (see
 [Multi-replicator mcast campaigns](#multi-replicator-mcast-campaigns)); there is
@@ -551,6 +605,52 @@ XDP/PHC ingress stamp on the destination, gated on clock convergence.
 
 ---
 
+## Achieved vs requested rate
+
+Every measurement carries the load it actually sustained, so its percentiles can
+be read against the offered rate instead of assumed to have run at it. Four
+fields on `Metrics` (`proto/messages.go`):
+
+| Field | Filled in by | Meaning |
+|---|---|---|
+| `elapsed_s` | the receiver's own measurement (`mcast_receive`'s `elapsed_s`) | receive-loop wall time |
+| `achieved_pps` | the receiver | packets/s over the **active window** (first packet → last packet) |
+| `requested_pps` | the CALLER, in the agent (`RunMcastReceive` / `RunRTT` in `runner.go`) | `1e6/interval_us` for mcast, `rate` for rtt - taken from params the caller already holds, because the receiver has no way to know what was asked for |
+| `rate_shortfall` | `applyRateExpectation` in `runner.go` | `achieved_pps < 0.9 * requested_pps` - the run was saturated, so its percentiles may reflect queueing rather than the per-packet cost under test |
+
+`applyRateExpectation` leaves `requested_pps` and `rate_shortfall` at their zero
+values whenever `requested_pps <= 0` (unpaced/unbounded run) or
+`achieved_pps <= 0` (nothing received, or a tool build that doesn't report it),
+rather than publishing a nonsensical 0/0 ratio.
+
+**Read `rate_shortfall` only next to `requested_pps`.** `false` means both "the
+rate was met" and "nothing was computed" (both values 0), so it is a trustworthy
+"load was met" signal only when `requested_pps > 0`.
+
+**`achieved_pps` is measured over the active window, not loop-elapsed.**
+`mcast_receive` computes it from `first_rx_ns → last_rx_ns` (its own `active_s`),
+not from `elapsed_s`. The receive loop starts before the orchestrator has even
+dispatched `mcast_send`, so loop-elapsed folds in the sender's start-up dead time
+- NATS round trip, `sudo`/`taskset` exec, ARP/MAC resolution, UMEM alloc, socket
+create with a possible native→SKB retry - measured live at 0.10-0.38 s depending
+on mode. Dividing by loop-elapsed deflated the reported rate to 72-91% of
+requested and produced a phantom shortfall while `mcast_send` self-reported 99.9%.
+Measured over the active window, all modes report ~100,000 pps against a
+100,000 pps request.
+
+**Persistence.** `measurements` gained `achieved_pps REAL`,
+`requested_pps REAL`, `rate_shortfall INTEGER`; `LatestMeasurements` (and so
+`GET /api/measurements`) returns all three per row, nullable rather than 0 so
+"not computed" stays distinguishable from "0 pps". `elapsed_s` is telemetry-only
+and has no column. The dedicated `GET /api/mcast-replicators` rows do not carry
+the rate fields - use `/api/measurements` for those.
+
+For mcast the orchestrator forwards `interval_us` on the `mcast_receive` command
+even though `mcast_receive`'s own CLI does not consume it, purely so the agent can
+derive `requested_pps`; without it the field stays permanently unset.
+
+---
+
 ## afxdpctl CLI (cmd/afxdpctl)
 
 A single-binary CLI that wraps the backend HTTP/SSE API and CDK/ansible for the
@@ -571,10 +671,27 @@ afxdpctl report -kind mcast          # filter report to mcast edges only
 `afxdpctl run` opens an SSE stream and prints each `job` event until a terminal
 status (`done`/`cancelled`/`error`/`rejected`), then prints the edge matrix.
 
+`fmtJob` also renders `mode_done`, which `RunMcastMatrix` emits once per
+`(mode, replicator)`. When that event's `ok` field is `false` every retry attempt
+failed, and the CLI prints it explicitly:
+
+```
+mcast/inplace: FAILED after retries (edge left at its last known value)
+```
+
+Otherwise it prints `mcast/<mode> done`. Without the distinction a run that
+quietly exhausted its retries read identically to a clean one in the live log.
+The retry path being reported on is the full send+receive cycle (two attempts),
+and it includes the agent's abnormal-tail check - a `mcast_receive` result whose
+tail sits orders of magnitude above its own p50 is returned as an error
+specifically so it routes into that retry loop, which is what the SCHED_FIFO
+busy-poll stall needs (re-synchronizing both sides, not re-reading a stuck
+socket).
+
 ### Infrastructure commands
 
 ```bash
-afxdpctl up   --key virginia --git-repo <url> --git-ref main --scenario ucast-az-cpg-3 [--bake]
+afxdpctl up   --key virginia --git-repo <url> --git-ref main --scenario ucast-az-cpg-3 [--bake] [--admin-cidr auto|CIDR|""]
 afxdpctl sync --key ~/.ssh/virginia.pem --region us-east-1
 afxdpctl down --key virginia --scenario ucast-az-cpg-3
 ```
@@ -584,6 +701,23 @@ afxdpctl down --key virginia --scenario ucast-az-cpg-3
 | `up` | Deploys control-plane stack + (optionally) AMI builder + fleet via CDK |
 | `sync` | Hot-deploys code to running instances via ansible (dev iteration) |
 | `down` | Destroys stacks in reverse dependency order |
+
+#### `up --admin-cidr` (default `auto`)
+
+Controls the CIDR allowed to reach the control plane's SSH (22) and HTTP/API
+(8080) ports, passed through as the `adminCidr` CDK context value.
+
+| Value | Behavior |
+|---|---|
+| `auto` (default) | Resolve the caller's own public IP via `https://checkip.amazonaws.com` and pass `<ip>/32`, locking both ports to the caller |
+| `""` (empty) | Pass nothing - keep the CDK default explicitly (8080 closed, 22 open to `0.0.0.0/0`) |
+| an explicit CIDR | Admit that fixed address/range |
+
+`auto` is best-effort: on any failure (offline, DNS, non-200) the CLI prints a
+notice and passes no `adminCidr` at all, falling back to the CDK default rather
+than failing the deploy over a convenience lookup. It replaces a manual
+`aws ec2 authorize-security-group-ingress` or hand-rolled
+`cdk deploy --context adminCidr=…` step.
 
 ---
 
@@ -598,6 +732,9 @@ afxdpctl down --key virginia --scenario ucast-az-cpg-3
 - The `ControlPlaneStack` generates the token, writes `nats.conf`, and publishes
   the endpoint + token to SSM (`/af-xdp/nats-url`, `/af-xdp/nats-token`); baked
   agents fetch both at boot.
+- **Admin ingress**: the control plane's SSH + 8080 exposure is the `adminCidr`
+  context value, which `afxdpctl up` defaults to the caller's own `/32` (see
+  [`up --admin-cidr`](#up---admin-cidr-default-auto)).
 - **Known gap (lab-grade):** the token is a String SSM param (IAM-scoped to
   `af-xdp/*`), not `SecureString`; `clientCidr` defaults to `0.0.0.0/0`. Tighten
   both for anything beyond a lab (`-c clientCidr=…`, SecureString + KMS).

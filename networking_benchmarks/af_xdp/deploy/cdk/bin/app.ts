@@ -115,6 +115,7 @@ switch (deploymentType) {
       instanceType,
       gitRepo,
       gitRef,
+      adminCidr: app.node.tryGetContext('adminCidr') || undefined,
     });
     break;
   }
@@ -151,6 +152,7 @@ switch (deploymentType) {
     const primaryCidr = vpcCidr || '10.61.0.0/16';
     const secondaryCidr = secondaryVpcCidr || '10.62.0.0/16';
     const parsedDataPort = dataPort ? parseInt(dataPort, 10) : undefined;
+    const adminCidr = app.node.tryGetContext('adminCidr') || undefined;
 
     // Primary region stack (baked AMI via SSM).
     const primary = new FleetStack(app, stackName, {
@@ -164,6 +166,7 @@ switch (deploymentType) {
       regionName: region,
       peerVpcCidr: crossRegion ? secondaryCidr : undefined,
       ssmAmi: true,
+      adminCidr,
     });
 
     // Cross-region: a second stack in the secondary region + VPC peering.
@@ -182,6 +185,7 @@ switch (deploymentType) {
         peerVpcCidr: primaryCidr,
         ssmAmi: true,
         controlPlaneRegion: region,
+        adminCidr,
       });
       connectRegions(primary, secondary, { secondaryRegion });
     }

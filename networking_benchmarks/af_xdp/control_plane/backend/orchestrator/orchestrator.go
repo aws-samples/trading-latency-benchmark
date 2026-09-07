@@ -712,7 +712,40 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 			"replicator_pg": replicator.PlacementGroup, "replicator_az": replicator.AZ,
 			"replicator_vpc": replicator.VpcID,
 			"group": p.Group, "count": p.Count, "interval_us": p.IntervalUs,
+			"size": p.Size, "tx_queue": p.TxQueue, "rx_queue": p.RxQueue,
 		}
+		// NIC tuning state (dev/roadmap/fix.md's "Record the NIC tuning state in run
+		// metadata" item): read from source/replicator/first destination -
+		// enough to catch a fleet node that drifted from the baked baseline
+		// (napi_defer_hard_irqs=2, gro_flush_timeout=10000, rx/tx-usecs=0)
+		// without dispatching to every destination in a large fan-out. Prefix
+		// each node's keys with its role so all three show up distinctly in
+		// one flat params map instead of colliding. Best-effort: a node that
+		// doesn't answer (agent busy, older agent build predating
+		// CmdNicTuning) simply contributes no keys rather than failing the
+		// run - this is diagnostic metadata, not something to gate on.
+		tuningNodes := map[string]registry.Node{"src": source, "repl": replicator}
+		if len(modeDests) > 0 {
+			tuningNodes["dst"] = modeDests[0]
+		}
+		var tuningWG sync.WaitGroup
+		var tuningMu sync.Mutex
+		for role, n := range tuningNodes {
+			tuningWG.Add(1)
+			go func(role string, n registry.Node) {
+				defer tuningWG.Done()
+				res, err := o.DispatchAgent(n.InstanceID, proto.Command{Type: proto.CmdNicTuning}, runSetup)
+				if err != nil || !res.OK || res.NicTuning == nil {
+					return
+				}
+				tuningMu.Lock()
+				for k, v := range res.NicTuning {
+					params["nic_"+role+"_"+k] = v
+				}
+				tuningMu.Unlock()
+			}(role, n)
+		}
+		tuningWG.Wait()
 		runID, rErr := o.store.InsertRun("mcast", mode, "", "", len(modeDests), params)
 		if rErr != nil {
 			log.Printf("store: could not open run row for mcast/%s replicator=%s: %v", mode, replicator.PrivateIP, rErr)
@@ -834,6 +867,15 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 					defer wg.Done()
 					res, err := o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdMcastReceive,
 						Mcast: &proto.McastParams{Group: p.Group, DataPort: p.DataPort, Count: p.Count,
+							// IntervalUs is the sender's pacing, not consumed by
+							// mcast_receive's own CLI flags - it is forwarded here
+							// purely so RunMcastReceive can compute RequestedPps
+							// (dev/roadmap/fix.md's "Report achieved vs requested rate"
+							// item). Omitting it left RequestedPps/RateShortfall
+							// permanently unset for every mcast run - caught live
+							// when a real run showed achieved_pps populated but
+							// requested_pps/rate_shortfall always nil.
+							IntervalUs: p.IntervalUs,
 							TimeoutSec: p.TimeoutSec, ReplicatorIP: replicator.PrivateIP, SourceIP: source.PrivateIP,
 							Variation: mode, RxQueue: p.RxQueue}}, recvT)
 					results[i] = rr{d.PrivateIP, res, err}

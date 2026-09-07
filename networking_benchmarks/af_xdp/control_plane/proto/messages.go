@@ -80,6 +80,7 @@ const (
 	CmdStopStream   CmdType = "stop_stream"    // stop the stream
 	CmdReregister   CmdType = "reregister"     // re-send Registration (backend restart recovery)
 	CmdPing         CmdType = "ping"           // liveness/echo
+	CmdNicTuning    CmdType = "nic_tuning"     // read napi_defer_hard_irqs/gro_flush_timeout/ethtool coalescing state
 )
 
 // Command is addressed to an agent (via SubjectCmdAgent/Role/All). The agent
@@ -201,6 +202,11 @@ type CommandResult struct {
 	Err        string   `json:"err,omitempty"`
 	Metrics    *Metrics `json:"metrics,omitempty"`
 	Text       string   `json:"text,omitempty"`
+	// NicTuning carries CmdNicTuning's result: napi_defer_hard_irqs,
+	// gro_flush_timeout, rx_usecs, tx_usecs, adaptive_rx, adaptive_tx,
+	// rx/tx/combined_queues_current, iface. See Runner.NicTuning in
+	// control_plane/agent/runner.go for exactly what's read and why.
+	NicTuning map[string]string `json:"nic_tuning,omitempty"`
 }
 
 // SetErr marks the result failed if err is non-nil.
@@ -254,6 +260,26 @@ type Metrics struct {
 	// replicator timestamp (mcast_receive.cpp's has_replicator_ts).
 	Hop1 *HopPct `json:"hop1_us,omitempty"`
 	Hop2 *HopPct `json:"hop2_us,omitempty"`
+
+	// ElapsedS/AchievedPps/RequestedPps report the offered vs. actually
+	// sustained load for this run (dev/roadmap/fix.md's "Report achieved vs
+	// requested rate per run" item). ElapsedS/AchievedPps come from the
+	// receiver's own wall-clock measurement (mcast_receive.cpp's
+	// elapsed_s/achieved_pps, or rtt's equivalent); RequestedPps is filled in
+	// by the caller (RunMcastReceive/RunRTT in runner.go) from the params it
+	// already has (interval_us or rate), since the receiver itself does not
+	// know what was requested. 0/omitted on any result these were not
+	// computed for.
+	ElapsedS     float64 `json:"elapsed_s,omitempty"`
+	AchievedPps  float64 `json:"achieved_pps,omitempty"`
+	RequestedPps float64 `json:"requested_pps,omitempty"`
+	// RateShortfall is true when AchievedPps fell below ~90% of
+	// RequestedPps - the run was saturated/under-rate and its percentiles
+	// may reflect queueing rather than the per-packet cost under test (see
+	// dev/roadmap/fix.md's Error 3). False (the zero value) when both are 0 (not
+	// computed) as well as when the rate was actually met, so this can only
+	// be trusted as a genuine "load was met" signal when RequestedPps > 0.
+	RateShortfall bool `json:"rate_shortfall,omitempty"`
 }
 
 // ErrorEvent is published proactively by an agent when a command fails or an

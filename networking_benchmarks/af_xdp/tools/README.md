@@ -117,8 +117,14 @@ loss itself.
   `Eth|IPv4(proto 17)|UDP|m2u{magic "M2CU"=0x4D324355, group}|AppHdr` as a
   **plain unicast** frame to the replicator's private IP (`-D`); the multicast
   group lives only in the m2u tag (ENA has no L2 multicast).
-- **[M2] Pacing** - `clock_nanosleep(TIMER_ABSTIME)` for intervals ≥1 ms;
-  busy-wait (`clock_gettime` spin) for sub-ms intervals.
+- **[M2] Pacing** - a single `wait_until_ns(t0_ns + (seq+1) * interval_ns)` used
+  for **every** interval, on both the AF_XDP and `-k` kernel TX loops. It sleeps
+  to an absolute deadline via `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)`.
+  A relative sleep or a spin accrues cumulative drift, because each iteration's
+  own overhead is added to the gap and the actual interval is always longer than
+  requested; a deadline derived from a fixed `t0_ns` self-corrects, so one late
+  packet does not push every subsequent packet later. Sleeping rather than
+  spinning is also what lets AF_XDP TX completions drain.
 - **[M3] Stamp + TX** - `ts_ns = CLOCK_REALTIME` stamped in place just before
   AF_XDP TX submit (zero-copy). `sfence` ensures store-ordering before NIC DMA.
   Dst MAC ARP-resolved at startup.
@@ -252,8 +258,24 @@ driver rejects native. All headers are built once per UMEM frame; the hot path
 overwrites only `seq` (8B) and `ts_ns` (8B) per packet. Timestamps
 `CLOCK_REALTIME` immediately before `xsk_ring_prod__submit` with an `sfence`.
 
-**Pacing:** Sub-1ms intervals use a `clock_gettime` busy-wait; ≥1ms uses
-`nanosleep`.
+**Pacing:** every interval, sub-ms included, is paced by
+`wait_until_ns(t0_ns + (seq+1) * interval_ns)`, which sleeps to an absolute
+deadline with `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)`. Both the AF_XDP
+and the `-k` kernel TX loop use it. An absolute deadline computed from a fixed
+`t0_ns` self-corrects: a relative sleep or spin folds each iteration's own
+overhead into the gap, so the realised interval is always longer than requested
+and the error compounds, whereas here a late packet does not shift the deadline
+of the packets after it. Sleeping instead of spinning also yields the CPU, which
+is what allows AF_XDP TX completions to drain.
+
+**Real-time priority:** `enable_realtime()` raises the TX thread to
+`SCHED_FIFO` priority 80 and calls `mlockall`. It runs on the **AF_XDP path
+only**, and deliberately sits immediately before the hot TX loop rather than
+before AF_XDP setup - placing it earlier caused roughly 50% packet loss, because
+MAC/ARP resolution and ring setup do blocking work that must not run at RT
+priority. If `SCHED_FIFO` cannot be set (no root / `CAP_SYS_NICE`) the tool
+warns and continues at `SCHED_OTHER`. The `-k` kernel path stays `SCHED_OTHER`
+on purpose so it remains an untuned stock-socket baseline.
 
 **Tradeoffs & limitations:**
 - Requires `CAP_NET_ADMIN` / root for AF_XDP.
@@ -317,10 +339,29 @@ included) - only frame acquisition and header-offset math differ.
    `SO_BUSY_POLL_BUDGET=64`).
 6. Polls RX ring in batches of 64; stamps `rx_ns = CLOCK_REALTIME` at each
    dequeue.
+7. **Busy-poll watchdog:** after `WATCHDOG_EMPTY_POLLS = 200000` consecutive
+   empty `poll()` calls the RX loop issues a short `nanosleep` and resets the
+   counter. Under `SO_BUSY_POLL` a `poll()` calls `sk_busy_loop()` and never
+   truly blocks, so a `SCHED_FIFO` 80 thread on an isolated core can spin
+   without ever yielding; the `nanosleep` forces a real block and lets
+   lower-priority work run. This is defence-in-depth, not the fix for the RT
+   bandwidth stall described below (an earlier claim that it improved a 0-of-30
+   failure rate was withdrawn as unreliable, since that failure rate is
+   time-variable).
 
 **Output:** Per-hop latencies (hop1, hop2, total, proc, leg2), min/mean/p50/p90/
 p95/p99/p99.9/max. Counts out-of-order, lost, and negative-hop2 (clock skew)
 samples. Optional `-j` JSON output.
+
+**Achieved rate:** the `-j` JSON carries three timing fields. `elapsed_s` is the
+receive loop's own wall time, kept for context only. `active_s` spans the first
+packet received to the last packet received, and `achieved_pps` is
+`(received - 1) / active_s`. Measuring over the active window fixes a real
+under-reporting bug: dividing by the loop's elapsed time folded in sender
+start-up dead time (measured at 0.10-0.38 s), which produced a phantom
+"shortfall" against the requested rate even though the sender's own self-report
+was 99.9% the whole time. All modes now measure ~100,000 pps against a 100,000
+pps request. `rtt` likewise writes `elapsed_s` and `achieved_pps` into its JSON.
 
 **Tradeoffs & limitations:**
 - Requires `CAP_NET_ADMIN` + `CAP_NET_RAW` / root.
@@ -330,6 +371,31 @@ samples. Optional `-j` JSON output.
 - Negative hop values indicate clock skew; ensure all hosts sync to the same
   Nitro PHC (`/dev/ptp0`) via chrony with `refclock PHC` for ≤1 µs accuracy.
 - XDP program is detached on exit (SIGINT/SIGTERM/atexit).
+
+#### RT bandwidth throttling on tickless cores
+
+These tools run `SCHED_FIFO` busy-poll threads pinned to `isolcpus` +
+`nohz_full` cores. On a tickless core the scheduler tick that normally charges RT
+runtime is stopped, so `update_curr_rt()` runs only at sporadic scheduling events
+and `rt_time` accumulates in large deferred lumps instead of smoothly. It then
+overshoots the default 950 ms / 1000 ms budget, and the kernel throttles the
+runqueue to pay the overshoot back - descheduling the busy-poll thread for
+hundreds of milliseconds. Measured live: `rt_time` reached 1704 ms against an
+`rt_runtime` of 950 ms, `.rt_throttled` flipped to 1 five times in a single
+failing run, about 3700 packets were dropped on an affected run, and hop2 showed
+a p99 of 73 ms and a max of 93 ms against a normal p50 near 18 µs.
+
+The baked AMI therefore sets `kernel.sched_rt_runtime_us = -1` in
+`/etc/sysctl.d/99-rt-sched.conf`, disabling RT bandwidth control entirely. That
+is the standard configuration for RT + `nohz_full`, because the accounting is not
+reliable on tickless cores. Tightening `sched_rt_period_us` instead was tried and
+made things worse - enforcement simply became more frequently lumpy. See
+`dev/roadmap/fix.md` for the full investigation.
+
+Accepted tradeoff: this removes the kernel's last-resort protection against a
+runaway RT thread. It is mitigated by `isolcpus` keeping these threads off the
+CPU0 housekeeping core, by each tool's own idle deadline, and by the agent
+wrapping every measurement in `timeout`.
 
 ---
 

@@ -751,6 +751,143 @@ func TestStoreRecordMeasurementPersistsHopSplit(t *testing.T) {
 	}
 }
 
+// A mcast run's params.size (mcast_send payload bytes, set by
+// RunMcastMatrix) must round-trip through both LatestMeasurements and
+// LatestMcastReplicatorResults, the same way replicator_id/pg/az/vpc already
+// do - size is stored in the same params JSON blob via json_extract, not a
+// dedicated column.
+func TestStoreRecordMeasurementPersistsSize(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+
+	runID, _ := s.InsertRun("mcast", "copy", "", "", 1, map[string]any{
+		"replicator_id": "i-repl", "replicator_ip": "10.0.9.9", "size": 512,
+	})
+	RecordMeasurement(s, proto.Telemetry{
+		Kind: "mcast", Variation: "copy", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", Unix: time.Now().Unix(),
+		Metrics: proto.Metrics{ServiceRTT: proto.Pct{P50: 41}},
+	}, runID)
+	s.Flush()
+
+	measResults, err := s.LatestMeasurements("mcast", 0, 0)
+	if err != nil {
+		t.Fatalf("LatestMeasurements: %v", err)
+	}
+	if len(measResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(measResults))
+	}
+	if measResults[0].Size != 512 {
+		t.Fatalf("LatestMeasurements did not surface size: got %d, want 512", measResults[0].Size)
+	}
+
+	replResults, err := s.LatestMcastReplicatorResults(0, 0)
+	if err != nil {
+		t.Fatalf("LatestMcastReplicatorResults: %v", err)
+	}
+	if len(replResults) != 1 {
+		t.Fatalf("expected 1 replicator result, got %d", len(replResults))
+	}
+	if replResults[0].Size != 512 {
+		t.Fatalf("LatestMcastReplicatorResults did not surface size: got %d, want 512", replResults[0].Size)
+	}
+}
+
+// A run whose params carry no size (ucast, or a mcast run predating this
+// field) must read back as 0, not error - 0 also means "tool default" on the
+// write side, so the two cases are indistinguishable by design (see
+// McastMatrixParams.Size).
+func TestStoreRecordMeasurementMissingSizeReadsAsZero(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+
+	runID, _ := s.InsertRun("mcast", "copy", "", "", 1, map[string]any{
+		"replicator_id": "i-repl", "replicator_ip": "10.0.9.9",
+	})
+	RecordMeasurement(s, proto.Telemetry{
+		Kind: "mcast", Variation: "copy", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", Unix: time.Now().Unix(),
+		Metrics: proto.Metrics{ServiceRTT: proto.Pct{P50: 41}},
+	}, runID)
+	s.Flush()
+
+	measResults, err := s.LatestMeasurements("mcast", 0, 0)
+	if err != nil {
+		t.Fatalf("LatestMeasurements: %v", err)
+	}
+	if len(measResults) != 1 || measResults[0].Size != 0 {
+		t.Fatalf("expected size=0 for a run with no size param, got %+v", measResults)
+	}
+}
+
+// AchievedPps/RequestedPps/RateShortfall must round-trip through
+// LatestMeasurements when the Telemetry carries them (dev/roadmap/fix.md's "Report
+// achieved vs requested rate" item), and RateShortfall specifically must
+// distinguish "computed false" from "not computed" - both look like a zero
+// value on the wire, but only the NULL/nil case should read back as nil.
+func TestStoreRecordMeasurementPersistsRateFields(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+
+	runID, _ := s.InsertRun("mcast", "copy", "", "", 1, map[string]any{
+		"replicator_id": "i-repl", "replicator_ip": "10.0.9.9",
+	})
+	RecordMeasurement(s, proto.Telemetry{
+		Kind: "mcast", Variation: "copy", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", Unix: time.Now().Unix(),
+		Metrics: proto.Metrics{
+			ServiceRTT: proto.Pct{P50: 41},
+			// A shortfall case: 50k achieved of 100k requested.
+			AchievedPps: 50000, RequestedPps: 100000, RateShortfall: true,
+		},
+	}, runID)
+	s.Flush()
+
+	measResults, err := s.LatestMeasurements("mcast", 0, 0)
+	if err != nil {
+		t.Fatalf("LatestMeasurements: %v", err)
+	}
+	if len(measResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(measResults))
+	}
+	r := measResults[0]
+	if r.AchievedPps == nil || *r.AchievedPps != 50000 {
+		t.Fatalf("AchievedPps not persisted correctly: %+v", r.AchievedPps)
+	}
+	if r.RequestedPps == nil || *r.RequestedPps != 100000 {
+		t.Fatalf("RequestedPps not persisted correctly: %+v", r.RequestedPps)
+	}
+	if r.RateShortfall == nil || !*r.RateShortfall {
+		t.Fatalf("RateShortfall not persisted correctly (want true): %+v", r.RateShortfall)
+	}
+}
+
+// A run with no rate-expectation data at all (unbounded-rate run, or a
+// measurement predating this field) must read back as nil for all three
+// fields, not a misleading computed zero.
+func TestStoreRecordMeasurementMissingRateFieldsReadAsNil(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+
+	runID, _ := s.InsertRun("mcast", "copy", "", "", 1, map[string]any{
+		"replicator_id": "i-repl", "replicator_ip": "10.0.9.9",
+	})
+	RecordMeasurement(s, proto.Telemetry{
+		Kind: "mcast", Variation: "copy", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", Unix: time.Now().Unix(),
+		Metrics: proto.Metrics{ServiceRTT: proto.Pct{P50: 41}},
+	}, runID)
+	s.Flush()
+
+	measResults, err := s.LatestMeasurements("mcast", 0, 0)
+	if err != nil {
+		t.Fatalf("LatestMeasurements: %v", err)
+	}
+	if len(measResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(measResults))
+	}
+	r := measResults[0]
+	if r.AchievedPps != nil || r.RequestedPps != nil || r.RateShortfall != nil {
+		t.Fatalf("expected all rate fields nil when not computed, got %+v", r)
+	}
+}
+
 // A ucast measurement (no Hop1/Hop2 on the Telemetry) must persist NULL hop
 // columns, not zeroes - zero is a valid latency value and would be
 // indistinguishable from "measured 0us", which ucast never has.

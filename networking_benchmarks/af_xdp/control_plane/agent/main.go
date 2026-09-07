@@ -236,6 +236,8 @@ func (a *agent) handleCommand(c proto.Command) {
 		} else {
 			res.SetErr(a.run.RunMcastSend(*c.Mcast))
 		}
+	case proto.CmdNicTuning:
+		res.NicTuning = a.run.NicTuning()
 	default:
 		res.Fail("unknown command type: " + string(c.Type))
 	}

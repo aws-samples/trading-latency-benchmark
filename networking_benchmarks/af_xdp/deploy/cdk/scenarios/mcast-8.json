@@ -6,5 +6,5 @@
   {"az": "b", "role": "replicator"},
   {"az": "a", "role": "destination"},
   {"az": "c", "role": "destination"},
-  {"region":"eu-west-2", "az": "a", "role": "destination"}
+  {"region":"eu-west-1", "az": "a", "role": "destination"}
 ]

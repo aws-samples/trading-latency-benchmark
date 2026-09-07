@@ -93,7 +93,7 @@
   <!-- Empty path -->
   <text x="42" y="363" font-size="9" fill="#713f12" font-weight="600">empty →</text>
   <rect x="90" y="348" width="290" height="22" rx="3" fill="#fef9c3" stroke="#eab308"/>
-  <text x="235" y="363" text-anchor="middle" font-size="9" fill="#713f12">__builtin_ia32_pause() + NAPI busy-poll via recvfrom</text>
+  <text x="235" y="363" text-anchor="middle" font-size="9" fill="#713f12">__builtin_ia32_pause() + NAPI busy-poll via poll()</text>
 
   <!-- Per-frame -->
   <rect x="265" y="300" width="230" height="42" rx="4" fill="#fff" stroke="#60a5fa"/>
@@ -200,7 +200,7 @@
   <rect x="700" y="726" width="12" height="12" fill="#fefce8" stroke="#facc15"/>
   <text x="718" y="737" font-size="9" fill="#334155">Startup / initialization (once)</text>
 
-  <text x="40" y="754" font-size="9" fill="#9a3412" font-weight="600">Note: REPLICATOR_FWD_MODE=bpf_tx (in-kernel XDP_TX, mcast-only, 0 copies) forks at the XDP hook — it never reaches this fan-out; see datapaths.svg.</text>
+  <text x="40" y="754" font-size="9" fill="#9a3412" font-weight="600">Note: bpf_tx forks at the XDP hook; kernel skips AF_XDP startup and runs its own processMcastKernelRx thread. Neither reaches this fan-out. Both mcast-only; see datapaths.svg.</text>
 
   <text x="40" y="770" font-size="9" fill="#64748b">Threads: packet-processor (isolated CPU, busy-poll, never sleeps) · control (unpinned, 1s SO_RCVTIMEO) · upstream-ctrl (optional) · stats (10s sleep)</text>
 </svg>

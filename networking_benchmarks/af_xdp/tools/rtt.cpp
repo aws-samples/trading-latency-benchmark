@@ -1189,6 +1189,17 @@ int main(int argc, char* argv[]) {
         fprintf(jf, "  \"messages\": %lu,\n", measured);
         fprintf(jf, "  \"warmup\": %lu,\n", warmup);
         fprintf(jf, "  \"rate_mps\": %lu,\n", rate_per_sec);
+        // Achieved vs requested rate (dev/roadmap/fix.md's "Report achieved vs
+        // requested rate per run"): elapsed_s/achieved_pps mirror what was
+        // already computed for the stdout "Rate achieved:" line above -
+        // written here too so the control-plane can read it back
+        // programmatically instead of only a human reading the log.
+        {
+            double secs = (double)(send_loop_end_ns - send_loop_start_ns) / 1e9;
+            double achieved = secs > 0 ? (double)slot_count / secs : 0.0;
+            fprintf(jf, "  \"elapsed_s\": %.6f,\n", secs);
+            fprintf(jf, "  \"achieved_pps\": %.1f,\n", achieved);
+        }
         fprintf(jf, "  \"lost\": %lu,\n", lost);
         fprintf(jf, "  \"loss_pct\": %.4f,\n", 100.0 * lost / measured);
         fprintf(jf, "  \"timestamp_rx\": \"%s\",\n",

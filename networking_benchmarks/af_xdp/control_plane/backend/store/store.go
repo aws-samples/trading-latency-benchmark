@@ -44,6 +44,15 @@ type measurementRow struct {
 	Hop2P50 *int64
 	Hop2P99 *int64
 	Hop2P999 *int64
+	// AchievedPps/RequestedPps/RateShortfall: offered vs. sustained load for
+	// this run (dev/roadmap/fix.md's "Report achieved vs requested rate" item). 0/nil
+	// when not computed (e.g. unbounded-rate run, or a result predating this
+	// field) - RateShortfall is a *bool (not bool) so "not computed" is
+	// distinguishable from "computed false", the same NULL-vs-zero distinction
+	// migrateAddHopColumns' own comment calls out for hop1/hop2.
+	AchievedPps    *float64
+	RequestedPps   *float64
+	RateShortfall  *bool
 }
 
 // Store provides SQLite persistence for measurement history.
@@ -178,7 +187,8 @@ func createSchema(db *sql.DB) error {
 		messages  INTEGER, lost INTEGER, loss_pct REAL,
 		cmd_id    TEXT,
 		hop1_p50  INTEGER, hop1_p99 INTEGER, hop1_p999 INTEGER,
-		hop2_p50  INTEGER, hop2_p99 INTEGER, hop2_p999 INTEGER
+		hop2_p50  INTEGER, hop2_p99 INTEGER, hop2_p999 INTEGER,
+		achieved_pps  REAL, requested_pps REAL, rate_shortfall INTEGER
 	);
 
 	CREATE TABLE IF NOT EXISTS nodes (
@@ -221,7 +231,21 @@ func createSchema(db *sql.DB) error {
 	if err := migrateAddHopColumns(db); err != nil {
 		return err
 	}
-	return migrateAddColumn(db, "nodes", "tenancy", "TEXT")
+	if err := migrateAddColumn(db, "nodes", "tenancy", "TEXT"); err != nil {
+		return err
+	}
+	// Achieved-vs-requested rate columns (dev/roadmap/fix.md's "Report achieved vs
+	// requested rate per run" item). Same migration need as hop1/hop2: a
+	// pre-existing measurements table on a long-running deployment needs an
+	// explicit ALTER, CREATE TABLE IF NOT EXISTS only shapes a fresh DB.
+	for _, c := range []struct{ col, sqlType string }{
+		{"achieved_pps", "REAL"}, {"requested_pps", "REAL"}, {"rate_shortfall", "INTEGER"},
+	} {
+		if err := migrateAddColumn(db, "measurements", c.col, c.sqlType); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrateAddColumn adds a single column to an existing table if it's not
@@ -394,6 +418,9 @@ type McastReplicatorResult struct {
 	ReplicatorPG  string  `json:"replicator_pg"`
 	ReplicatorAZ  string  `json:"replicator_az"`
 	ReplicatorVPC string  `json:"replicator_vpc"`
+	// Size is the mcast_send payload size in bytes for this run (0 => tool
+	// default was used; see McastMatrixParams.Size).
+	Size          int     `json:"size,omitempty"`
 	SrcIP         string  `json:"src_ip"`
 	DstIP         string  `json:"dst_ip"`
 	P50           int64   `json:"p50"`
@@ -486,6 +513,10 @@ func (s *Store) LatestMcastReplicatorResults(sinceRunID int64, limit int) ([]Mca
 				if v, ok := params["replicator_vpc"].(string); ok {
 					res.ReplicatorVPC = v
 				}
+				// JSON numbers decode as float64 via map[string]any.
+				if v, ok := params["size"].(float64); ok {
+					res.Size = int(v)
+				}
 			}
 		}
 		out = append(out, res)
@@ -527,6 +558,10 @@ type MeasurementRow struct {
 	ReplicatorPG  string `json:"replicator_pg,omitempty"`
 	ReplicatorAZ  string `json:"replicator_az,omitempty"`
 	ReplicatorVPC string `json:"replicator_vpc,omitempty"`
+	// Size is the mcast_send payload size in bytes, decoded from the owning
+	// run's params JSON. 0/absent for ucast runs and for mcast runs made
+	// before this field was recorded.
+	Size int `json:"size,omitempty"`
 	// Endpoint topology, joined from the nodes table. Best-effort: a node no
 	// longer registered under this IP simply leaves these blank rather than
 	// failing the row — the measurement itself is still valid.
@@ -551,6 +586,16 @@ type MeasurementRow struct {
 	Hop2P50 *int64 `json:"hop2_p50,omitempty"`
 	Hop2P99 *int64 `json:"hop2_p99,omitempty"`
 	Hop2P999 *int64 `json:"hop2_p999,omitempty"`
+	// AchievedPps/RequestedPps/RateShortfall: offered vs. sustained load for
+	// this run (dev/roadmap/fix.md's "Report achieved vs requested rate" item), read
+	// straight from the measurements table's own columns (unlike Size, this
+	// is not derived from the run's params JSON - it is a per-measurement
+	// fact, not a per-run one, since a single mode run can fan out to
+	// multiple destinations that each achieved a different rate). nil when
+	// not computed for this row.
+	AchievedPps   *float64 `json:"achieved_pps,omitempty"`
+	RequestedPps  *float64 `json:"requested_pps,omitempty"`
+	RateShortfall *bool    `json:"rate_shortfall,omitempty"`
 }
 
 // LatestMeasurements returns the most recent measurement per distinct edge,
@@ -591,7 +636,9 @@ func (s *Store) LatestMeasurements(kind string, sinceUnix int64, limit int) ([]M
 		       COALESCE(json_extract(r.params, '$.replicator_pg'), '') AS replicator_pg,
 		       COALESCE(json_extract(r.params, '$.replicator_az'), '') AS replicator_az,
 		       COALESCE(json_extract(r.params, '$.replicator_vpc'), '') AS replicator_vpc,
-		       m.hop1_p50, m.hop1_p99, m.hop1_p999, m.hop2_p50, m.hop2_p99, m.hop2_p999
+		       COALESCE(json_extract(r.params, '$.size'), 0) AS size,
+		       m.hop1_p50, m.hop1_p99, m.hop1_p999, m.hop2_p50, m.hop2_p99, m.hop2_p999,
+		       m.achieved_pps, m.requested_pps, m.rate_shortfall
 		FROM measurements m
 		JOIN runs r ON r.id = m.run_id
 		` + where + `
@@ -607,15 +654,20 @@ func (s *Store) LatestMeasurements(kind string, sinceUnix int64, limit int) ([]M
 	out := make([]MeasurementRow, 0, limit)
 	for rows.Next() {
 		var r MeasurementRow
-		var p90, p99, p999, max, min, messages sql.NullInt64
+		var p90, p99, p999, max, min, messages, size sql.NullInt64
 		var hop1p50, hop1p99, hop1p999, hop2p50, hop2p99, hop2p999 sql.NullInt64
+		var achievedPps, requestedPps sql.NullFloat64
+		var rateShortfall sql.NullInt64
 		if err := rows.Scan(&r.RunID, &r.Unix, &r.Kind, &r.Variation, &r.SrcIP, &r.DstIP,
 			&r.P50, &p90, &p99, &p999, &max, &min, &r.LossPct, &messages,
 			&r.ReplicatorID, &r.ReplicatorIP, &r.ReplicatorPG, &r.ReplicatorAZ, &r.ReplicatorVPC,
-			&hop1p50, &hop1p99, &hop1p999, &hop2p50, &hop2p99, &hop2p999); err != nil {
+			&size,
+			&hop1p50, &hop1p99, &hop1p999, &hop2p50, &hop2p99, &hop2p999,
+			&achievedPps, &requestedPps, &rateShortfall); err != nil {
 			return nil, err
 		}
 		r.P90, r.P99, r.P999, r.Max, r.Min, r.Messages = p90.Int64, p99.Int64, p999.Int64, max.Int64, min.Int64, messages.Int64
+		r.Size = int(size.Int64)
 		if hop1p50.Valid {
 			r.Hop1P50 = &hop1p50.Int64
 		}
@@ -633,6 +685,16 @@ func (s *Store) LatestMeasurements(kind string, sinceUnix int64, limit int) ([]M
 		}
 		if hop2p999.Valid {
 			r.Hop2P999 = &hop2p999.Int64
+		}
+		if achievedPps.Valid {
+			r.AchievedPps = &achievedPps.Float64
+		}
+		if requestedPps.Valid {
+			r.RequestedPps = &requestedPps.Float64
+		}
+		if rateShortfall.Valid {
+			v := rateShortfall.Int64 != 0
+			r.RateShortfall = &v
 		}
 		key := r.Variation + "|" + r.SrcIP + "|" + r.DstIP + "|" + r.ReplicatorIP
 		if seen[key] {
@@ -726,8 +788,9 @@ func (s *Store) writer() {
 		stmt, err := tx.Prepare(
 			`INSERT INTO measurements (run_id, unix, kind, variation, src_ip, dst_ip, tx_mode,
 			  p50, p90, p99, p999, max, min, mean, messages, lost, loss_pct, cmd_id,
-			  hop1_p50, hop1_p99, hop1_p999, hop2_p50, hop2_p99, hop2_p999)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+			  hop1_p50, hop1_p99, hop1_p999, hop2_p50, hop2_p99, hop2_p999,
+			  achieved_pps, requested_pps, rate_shortfall)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 		if err != nil {
 			tx.Rollback()
 			log.Printf("store: prepare: %v", err)
@@ -745,11 +808,28 @@ func (s *Store) writer() {
 				}
 				return sql.NullInt64{Int64: *p, Valid: true}
 			}
+			nullFloat := func(p *float64) sql.NullFloat64 {
+				if p == nil {
+					return sql.NullFloat64{}
+				}
+				return sql.NullFloat64{Float64: *p, Valid: true}
+			}
+			nullBool := func(p *bool) sql.NullInt64 {
+				if p == nil {
+					return sql.NullInt64{}
+				}
+				v := int64(0)
+				if *p {
+					v = 1
+				}
+				return sql.NullInt64{Int64: v, Valid: true}
+			}
 			stmt.Exec(runID, r.Unix, r.Kind, r.Variation, r.SrcIP, r.DstIP, r.TxMode,
 				r.P50, r.P90, r.P99, r.P999, r.Max, r.Min, r.Mean,
 				r.Messages, r.Lost, r.LossPct, r.CmdID,
 				nullOf(r.Hop1P50), nullOf(r.Hop1P99), nullOf(r.Hop1P999),
-				nullOf(r.Hop2P50), nullOf(r.Hop2P99), nullOf(r.Hop2P999))
+				nullOf(r.Hop2P50), nullOf(r.Hop2P99), nullOf(r.Hop2P999),
+				nullFloat(r.AchievedPps), nullFloat(r.RequestedPps), nullBool(r.RateShortfall))
 		}
 		stmt.Close()
 		if err := tx.Commit(); err != nil {
@@ -859,6 +939,16 @@ func RecordMeasurement(s *Store, t proto.Telemetry, runID int64) {
 	}
 	if t.Metrics.Hop2 != nil {
 		row.Hop2P50, row.Hop2P99, row.Hop2P999 = &t.Metrics.Hop2.P50, &t.Metrics.Hop2.P99, &t.Metrics.Hop2.P999
+	}
+	if t.Metrics.AchievedPps > 0 {
+		ap := t.Metrics.AchievedPps
+		row.AchievedPps = &ap
+	}
+	if t.Metrics.RequestedPps > 0 {
+		rp := t.Metrics.RequestedPps
+		row.RequestedPps = &rp
+		rs := t.Metrics.RateShortfall
+		row.RateShortfall = &rs
 	}
 	select {
 	case s.ch <- row:

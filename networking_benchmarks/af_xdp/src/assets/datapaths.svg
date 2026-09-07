@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 620" font-family="system-ui, -apple-system, sans-serif" font-size="12">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1256 672" font-family="system-ui, -apple-system, sans-serif" font-size="12">
   <defs>
     <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
       <path d="M0,0 L8,3 L0,6 Z" fill="#334155"/>
@@ -15,157 +15,149 @@
     <marker id="arrow-red" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
       <path d="M0,0 L8,3 L0,6 Z" fill="#dc2626"/>
     </marker>
+    <marker id="arrow-slate" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+    </marker>
   </defs>
 
-  <!-- Background -->
-  <rect width="960" height="620" fill="#f8fafc" rx="8"/>
-
-  <!-- Title -->
-  <text x="480" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="#1e293b">AF_XDP Replicator — Datapath Variants</text>
-
-  <!-- Common ingress path -->
-  <rect x="30" y="50" width="900" height="90" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
-  <text x="480" y="70" text-anchor="middle" font-size="11" font-weight="bold" fill="#475569">COMMON INGRESS (all AF_XDP modes)</text>
-
+  <rect width="1256" height="672" fill="#f8fafc" rx="8"/>
+  <text x="628" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="#1e293b">AF_XDP Replicator &#8212; Datapath Variants (REPLICATOR_FWD_MODE)</text>
+  <rect x="30" y="50" width="890" height="90" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text x="475" y="70" text-anchor="middle" font-size="11" font-weight="bold" fill="#475569">COMMON INGRESS &#8212; AF_XDP modes only (bpf_tx / copy / inplace)</text>
   <rect x="60" y="82" width="130" height="40" rx="4" fill="#fff" stroke="#64748b"/>
   <text x="125" y="100" text-anchor="middle" font-size="10" fill="#334155">NIC RX (ENA)</text>
-  <text x="125" y="113" text-anchor="middle" font-size="9" fill="#64748b">DMA → descriptor</text>
-
+  <text x="125" y="113" text-anchor="middle" font-size="9" fill="#64748b">DMA &#8594; descriptor</text>
   <line x1="190" y1="102" x2="230" y2="102" stroke="#334155" marker-end="url(#arrow)"/>
-
   <rect x="230" y="82" width="150" height="40" rx="4" fill="#fff" stroke="#64748b"/>
   <text x="305" y="100" text-anchor="middle" font-size="10" fill="#334155">XDP Hook (DRV)</text>
   <text x="305" y="113" text-anchor="middle" font-size="9" fill="#64748b">ucast.o / mcast.o</text>
-
   <line x1="380" y1="102" x2="420" y2="102" stroke="#334155" marker-end="url(#arrow)"/>
-
   <rect x="420" y="82" width="170" height="40" rx="4" fill="#fff" stroke="#64748b"/>
   <text x="505" y="100" text-anchor="middle" font-size="10" fill="#334155">config_map scan</text>
   <text x="505" y="113" text-anchor="middle" font-size="9" fill="#64748b">{ip|group, port} match?</text>
-
-  <!-- No match -->
   <line x1="590" y1="102" x2="640" y2="102" stroke="#94a3b8" stroke-dasharray="4"/>
   <rect x="640" y="86" width="100" height="30" rx="4" fill="#fef3c7" stroke="#d97706"/>
   <text x="690" y="105" text-anchor="middle" font-size="10" fill="#92400e">XDP_PASS</text>
-  <text x="790" y="105" font-size="9" fill="#78716c">→ kernel stack</text>
+  <text x="750" y="105" font-size="9" fill="#78716c">&#8594; kernel stack</text>
+  <text x="475" y="158" text-anchor="middle" font-size="11" font-weight="bold" fill="#475569">MATCH &#8594; fork by REPLICATOR_FWD_MODE</text>
+  <text x="1085" y="70" text-anchor="middle" font-size="11" font-weight="bold" fill="#7c3aed">NO XDP INGRESS</text>
+  <text x="1085" y="88" text-anchor="middle" font-size="9" fill="#6d28d9">kernel mode is parsed before any</text>
+  <text x="1085" y="101" text-anchor="middle" font-size="9" fill="#6d28d9">AF_XDP setup and returns early:</text>
+  <text x="1085" y="114" text-anchor="middle" font-size="9" fill="#6d28d9">no program load, no UMEM, no maps</text>
+  <line x1="1085" y1="122" x2="1085" y2="152" stroke="#7c3aed" stroke-dasharray="4" marker-end="url(#arrow-slate)"/>
 
-  <!-- Fork point -->
-  <text x="505" y="155" text-anchor="middle" font-size="11" font-weight="bold" fill="#475569">MATCH → fork by REPLICATOR_FWD_MODE</text>
-
-  <!-- Three columns -->
-  <!-- Column 1: bpf_tx (XDP_TX) -->
-  <rect x="30" y="170" width="280" height="420" rx="6" fill="#fef2f2" stroke="#fca5a5"/>
+  <rect x="30" y="170" width="280" height="460" rx="6" fill="#fef2f2" stroke="#fca5a5"/>
   <text x="170" y="192" text-anchor="middle" font-size="12" font-weight="bold" fill="#dc2626">bpf_tx (XDP_TX)</text>
   <text x="170" y="208" text-anchor="middle" font-size="9" fill="#991b1b">REPLICATOR_FWD_MODE=bpf_tx</text>
-  <text x="170" y="222" text-anchor="middle" font-size="9" fill="#7f1d1d">mcast only • 1 dest/group</text>
-
+  <text x="170" y="222" text-anchor="middle" font-size="9" fill="#7f1d1d">mcast only &#8226; 1 dest/group</text>
   <rect x="50" y="238" width="240" height="36" rx="4" fill="#fff" stroke="#f87171"/>
   <text x="170" y="254" text-anchor="middle" font-size="10" fill="#334155">mcast.o reads fwd_map[slot]</text>
-  <text x="170" y="266" text-anchor="middle" font-size="9" fill="#64748b">struct fwd_target {dmac,smac,dip,sip,dport,sport}</text>
-
+  <text x="170" y="267" text-anchor="middle" font-size="9" fill="#64748b">struct fwd_target {dmac,smac,dip,sip,dport,sport}</text>
   <line x1="170" y1="274" x2="170" y2="296" stroke="#dc2626" marker-end="url(#arrow-red)"/>
-
   <rect x="50" y="296" width="240" height="36" rx="4" fill="#fff" stroke="#f87171"/>
   <text x="170" y="312" text-anchor="middle" font-size="10" fill="#334155">Rewrite L2/L3/L4 in-place</text>
-  <text x="170" y="324" text-anchor="middle" font-size="9" fill="#64748b">Eth MACs + IP src/dst + UDP ports + IP csum</text>
-
+  <text x="170" y="325" text-anchor="middle" font-size="9" fill="#64748b">Eth MACs + IP src/dst + UDP ports + IP csum</text>
   <line x1="170" y1="332" x2="170" y2="354" stroke="#dc2626" marker-end="url(#arrow-red)"/>
-
   <rect x="50" y="354" width="240" height="28" rx="4" fill="#fecaca" stroke="#dc2626"/>
-  <text x="170" y="373" text-anchor="middle" font-size="11" font-weight="bold" fill="#7f1d1d">XDP_TX → NIC re-transmit</text>
-
-  <text x="170" y="405" text-anchor="middle" font-size="10" fill="#334155">✓ Lowest tail latency</text>
-  <text x="170" y="420" text-anchor="middle" font-size="10" fill="#334155">✓ 0 payload copies</text>
-  <text x="170" y="435" text-anchor="middle" font-size="10" fill="#334155">✓ Userspace bypassed</text>
-  <text x="170" y="455" text-anchor="middle" font-size="10" fill="#991b1b">✗ 1 destination per group only</text>
-  <text x="170" y="470" text-anchor="middle" font-size="10" fill="#991b1b">✗ No replicator_ns (BPF has</text>
-  <text x="170" y="483" text-anchor="middle" font-size="10" fill="#991b1b">   no CLOCK_REALTIME)</text>
-  <text x="170" y="498" text-anchor="middle" font-size="10" fill="#991b1b">✗ mcast mode only (needs fwd_map)</text>
-
+  <text x="170" y="372" text-anchor="middle" font-size="11" fill="#7f1d1d" font-weight="bold">XDP_TX &#8594; NIC re-transmit</text>
+  <text x="170" y="405" text-anchor="middle" font-size="10" fill="#334155">&#10003; Lowest tail latency</text>
+  <text x="170" y="420" text-anchor="middle" font-size="10" fill="#334155">&#10003; 0 payload copies</text>
+  <text x="170" y="435" text-anchor="middle" font-size="10" fill="#334155">&#10003; Userspace bypassed</text>
+  <text x="170" y="455" text-anchor="middle" font-size="10" fill="#991b1b">&#10007; 1 destination per group only</text>
+  <text x="170" y="470" text-anchor="middle" font-size="10" fill="#991b1b">&#10007; No replicator_ns (BPF has</text>
+  <text x="170" y="483" text-anchor="middle" font-size="10" fill="#991b1b">&#160;&#160; no CLOCK_REALTIME)</text>
+  <text x="170" y="498" text-anchor="middle" font-size="10" fill="#991b1b">&#10007; mcast mode only (needs fwd_map)</text>
   <rect x="55" y="520" width="230" height="55" rx="4" fill="#fff7ed" stroke="#f59e0b"/>
   <text x="170" y="538" text-anchor="middle" font-size="10" font-weight="bold" fill="#92400e">Best for:</text>
-  <text x="170" y="553" text-anchor="middle" font-size="10" fill="#78350f">1→1 relay / point forwarding</text>
+  <text x="170" y="553" text-anchor="middle" font-size="10" fill="#78350f">1&#8594;1 relay / point forwarding</text>
   <text x="170" y="568" text-anchor="middle" font-size="10" fill="#78350f">where tail latency is paramount</text>
 
-  <!-- Column 2: copy (default) -->
-  <rect x="340" y="170" width="280" height="420" rx="6" fill="#eff6ff" stroke="#93c5fd"/>
-  <text x="480" y="192" text-anchor="middle" font-size="12" font-weight="bold" fill="#2563eb">copy (DEFAULT)</text>
-  <text x="480" y="208" text-anchor="middle" font-size="9" fill="#1e40af">REPLICATOR_FWD_MODE=copy (or unset)</text>
-  <text x="480" y="222" text-anchor="middle" font-size="9" fill="#1e3a8a">any K • most robust</text>
+  <rect x="335" y="170" width="280" height="460" rx="6" fill="#eff6ff" stroke="#93c5fd"/>
+  <text x="475" y="192" text-anchor="middle" font-size="12" font-weight="bold" fill="#2563eb">copy (DEFAULT)</text>
+  <text x="475" y="208" text-anchor="middle" font-size="9" fill="#1e40af">REPLICATOR_FWD_MODE=copy (or unset)</text>
+  <text x="475" y="222" text-anchor="middle" font-size="9" fill="#1e3a8a">any K &#8226; most robust</text>
+  <rect x="355" y="238" width="240" height="28" rx="4" fill="#fff" stroke="#60a5fa"/>
+  <text x="475" y="256" text-anchor="middle" font-size="10" fill="#334155">bpf_redirect_map &#8594; AF_XDP RX ring</text>
+  <line x1="475" y1="266" x2="475" y2="284" stroke="#2563eb" marker-end="url(#arrow-blue)"/>
+  <rect x="355" y="284" width="240" height="28" rx="4" fill="#fff" stroke="#60a5fa"/>
+  <text x="475" y="302" text-anchor="middle" font-size="10" fill="#334155">Userspace RX drain (NAPI busy-poll)</text>
+  <line x1="475" y1="312" x2="475" y2="330" stroke="#2563eb" marker-end="url(#arrow-blue)"/>
+  <rect x="355" y="330" width="240" height="28" rx="4" fill="#fff" stroke="#60a5fa"/>
+  <text x="475" y="348" text-anchor="middle" font-size="10" fill="#334155">Parse + stamp replicator_ns</text>
+  <line x1="475" y1="358" x2="475" y2="376" stroke="#2563eb" marker-end="url(#arrow-blue)"/>
+  <rect x="355" y="376" width="240" height="36" rx="4" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="475" y="392" text-anchor="middle" font-size="10" fill="#1e3a8a" font-weight="bold">Per dest: createUdpPacket()</text>
+  <text x="475" y="405" text-anchor="middle" font-size="9" fill="#1e40af">memcpy payload &#8594; TX frame 0..2047</text>
+  <line x1="475" y1="412" x2="475" y2="430" stroke="#2563eb" marker-end="url(#arrow-blue)"/>
+  <rect x="355" y="430" width="240" height="28" rx="4" fill="#fff" stroke="#60a5fa"/>
+  <text x="475" y="448" text-anchor="middle" font-size="10" fill="#334155">submitTxRing &#8594; requestDriverPoll</text>
+  <text x="475" y="478" text-anchor="middle" font-size="10" fill="#334155">&#10003; Works for any K (fan-out)</text>
+  <text x="475" y="493" text-anchor="middle" font-size="10" fill="#334155">&#10003; Best p50 at K=1</text>
+  <text x="475" y="508" text-anchor="middle" font-size="10" fill="#1e40af">&#10007; K payload copies per RX packet</text>
+  <rect x="360" y="520" width="230" height="55" rx="4" fill="#fff7ed" stroke="#f59e0b"/>
+  <text x="475" y="538" text-anchor="middle" font-size="10" font-weight="bold" fill="#92400e">Best for:</text>
+  <text x="475" y="553" text-anchor="middle" font-size="10" fill="#78350f">K=1, small payloads, simplicity,</text>
+  <text x="475" y="568" text-anchor="middle" font-size="10" fill="#78350f">or whenever robustness matters most</text>
 
-  <rect x="360" y="238" width="240" height="28" rx="4" fill="#fff" stroke="#60a5fa"/>
-  <text x="480" y="256" text-anchor="middle" font-size="10" fill="#334155">bpf_redirect_map → AF_XDP RX ring</text>
+  <rect x="640" y="170" width="280" height="460" rx="6" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="780" y="192" text-anchor="middle" font-size="12" font-weight="bold" fill="#16a34a">inplace (zero-copy)</text>
+  <text x="780" y="208" text-anchor="middle" font-size="9" fill="#166534">REPLICATOR_FWD_MODE=inplace</text>
+  <text x="780" y="222" text-anchor="middle" font-size="9" fill="#14532d">any K &#8226; saves K&#8722;1 copies</text>
+  <rect x="660" y="238" width="240" height="28" rx="4" fill="#fff" stroke="#4ade80"/>
+  <text x="780" y="256" text-anchor="middle" font-size="10" fill="#334155">bpf_redirect_map &#8594; AF_XDP RX ring</text>
+  <line x1="780" y1="266" x2="780" y2="284" stroke="#16a34a" marker-end="url(#arrow-green)"/>
+  <rect x="660" y="284" width="240" height="28" rx="4" fill="#fff" stroke="#4ade80"/>
+  <text x="780" y="302" text-anchor="middle" font-size="10" fill="#334155">Userspace RX drain (NAPI busy-poll)</text>
+  <line x1="780" y1="312" x2="780" y2="330" stroke="#16a34a" marker-end="url(#arrow-green)"/>
+  <rect x="660" y="330" width="240" height="28" rx="4" fill="#fff" stroke="#4ade80"/>
+  <text x="780" y="348" text-anchor="middle" font-size="10" fill="#334155">Parse + stamp replicator_ns</text>
+  <line x1="780" y1="358" x2="780" y2="376" stroke="#16a34a" marker-end="url(#arrow-green)"/>
+  <rect x="660" y="376" width="240" height="50" rx="4" fill="#dcfce7" stroke="#16a34a"/>
+  <text x="780" y="392" text-anchor="middle" font-size="10" fill="#14532d" font-weight="bold">Last dest: patchHeadersInPlace()</text>
+  <text x="780" y="405" text-anchor="middle" font-size="9" fill="#166534">Rewrite RX frame L2/L3/L4 in UMEM</text>
+  <text x="780" y="418" text-anchor="middle" font-size="9" fill="#166534">forwardFrameInPlace &#8594; TX (0 copy)</text>
+  <line x1="780" y1="426" x2="780" y2="442" stroke="#16a34a" marker-end="url(#arrow-green)"/>
+  <rect x="660" y="442" width="240" height="28" rx="4" fill="#fff" stroke="#4ade80"/>
+  <text x="780" y="460" text-anchor="middle" font-size="10" fill="#334155">Other K&#8722;1 dests: copy path</text>
+  <text x="780" y="488" text-anchor="middle" font-size="10" fill="#334155">&#10003; Saves K&#8722;1 payload memcpys</text>
+  <text x="780" y="503" text-anchor="middle" font-size="10" fill="#334155">&#10003; Scales with K and payload size</text>
+  <text x="780" y="518" text-anchor="middle" font-size="10" fill="#166534">&#10007; At K=1: adds bookkeeping, no gain</text>
+  <rect x="665" y="530" width="230" height="55" rx="4" fill="#fff7ed" stroke="#f59e0b"/>
+  <text x="780" y="548" text-anchor="middle" font-size="10" font-weight="bold" fill="#92400e">Best for:</text>
+  <text x="780" y="563" text-anchor="middle" font-size="10" fill="#78350f">Large K and/or large payloads</text>
+  <text x="780" y="578" text-anchor="middle" font-size="10" fill="#78350f">where CPU/bandwidth is the limit</text>
 
-  <line x1="480" y1="266" x2="480" y2="284" stroke="#2563eb" marker-end="url(#arrow-blue)"/>
+  <rect x="945" y="170" width="280" height="460" rx="6" fill="#faf5ff" stroke="#d8b4fe"/>
+  <text x="1085" y="192" text-anchor="middle" font-size="12" font-weight="bold" fill="#7c3aed">kernel (stock baseline)</text>
+  <text x="1085" y="208" text-anchor="middle" font-size="9" fill="#6d28d9">REPLICATOR_FWD_MODE=kernel</text>
+  <text x="1085" y="222" text-anchor="middle" font-size="9" fill="#581c87">mcast only &#8226; no AF_XDP / no eBPF</text>
+  <rect x="965" y="238" width="240" height="36" rx="4" fill="#fff" stroke="#c084fc"/>
+  <text x="1085" y="254" text-anchor="middle" font-size="10" fill="#334155">NIC RX &#8594; full kernel UDP stack</text>
+  <text x="1085" y="267" text-anchor="middle" font-size="9" fill="#64748b">plain socket bound 0.0.0.0:port</text>
+  <line x1="1085" y1="274" x2="1085" y2="294" stroke="#7c3aed" marker-end="url(#arrow-slate)"/>
+  <rect x="965" y="294" width="240" height="36" rx="4" fill="#fff" stroke="#c084fc"/>
+  <text x="1085" y="310" text-anchor="middle" font-size="10" fill="#334155">poll(500 ms) + recvfrom()</text>
+  <text x="1085" y="323" text-anchor="middle" font-size="9" fill="#64748b">buffer already starts at m2u hdr</text>
+  <line x1="1085" y1="330" x2="1085" y2="350" stroke="#7c3aed" marker-end="url(#arrow-slate)"/>
+  <rect x="965" y="350" width="240" height="36" rx="4" fill="#fff" stroke="#c084fc"/>
+  <text x="1085" y="366" text-anchor="middle" font-size="10" fill="#334155">processMcastFrame()</text>
+  <text x="1085" y="379" text-anchor="middle" font-size="9" fill="#64748b">stamp replicator_ns (shared code)</text>
+  <line x1="1085" y1="386" x2="1085" y2="406" stroke="#7c3aed" marker-end="url(#arrow-slate)"/>
+  <rect x="965" y="406" width="240" height="36" rx="4" fill="#f3e8ff" stroke="#7c3aed"/>
+  <text x="1085" y="422" text-anchor="middle" font-size="10" fill="#581c87" font-weight="bold">Per dest: sendToDestinationFallback()</text>
+  <text x="1085" y="435" text-anchor="middle" font-size="9" fill="#6d28d9">plain sendto(), group filter in userspace</text>
+  <rect x="965" y="452" width="240" height="32" rx="4" fill="#fff" stroke="#c084fc"/>
+  <text x="1085" y="468" text-anchor="middle" font-size="9" fill="#64748b">RX socket: SO_BUSY_POLL (+BUDGET),</text>
+  <text x="1085" y="481" text-anchor="middle" font-size="9" fill="#64748b">SO_RCVBUF, SO_TIMESTAMPING</text>
+  <text x="1085" y="502" text-anchor="middle" font-size="10" fill="#334155">&#10003; No XDP program / UMEM / maps</text>
+  <text x="1085" y="516" text-anchor="middle" font-size="10" fill="#334155">&#10003; Single thread, simplest path</text>
+  <text x="1085" y="530" text-anchor="middle" font-size="10" fill="#6d28d9">&#10007; Full kernel RX+TX stack in path</text>
+  <text x="1085" y="548" text-anchor="middle" font-size="10" fill="#6d28d9">&#10007; No per-queue RSS scaling</text>
+  <text x="1085" y="562" text-anchor="middle" font-size="10" fill="#6d28d9">&#10007; Under unicast: ignored &#8594; copy</text>
+  <rect x="970" y="572" width="230" height="55" rx="4" fill="#fff7ed" stroke="#f59e0b"/>
+  <text x="1085" y="590" text-anchor="middle" font-size="10" font-weight="bold" fill="#92400e">Best for:</text>
+  <text x="1085" y="605" text-anchor="middle" font-size="10" fill="#78350f">The &#8220;no kernel bypass&#8221; control that</text>
+  <text x="1085" y="620" text-anchor="middle" font-size="10" fill="#78350f">every AF_XDP mode is measured against</text>
 
-  <rect x="360" y="284" width="240" height="28" rx="4" fill="#fff" stroke="#60a5fa"/>
-  <text x="480" y="302" text-anchor="middle" font-size="10" fill="#334155">Userspace RX drain (NAPI busy-poll)</text>
-
-  <line x1="480" y1="312" x2="480" y2="330" stroke="#2563eb" marker-end="url(#arrow-blue)"/>
-
-  <rect x="360" y="330" width="240" height="28" rx="4" fill="#fff" stroke="#60a5fa"/>
-  <text x="480" y="348" text-anchor="middle" font-size="10" fill="#334155">Parse + stamp replicator_ns</text>
-
-  <line x1="480" y1="358" x2="480" y2="376" stroke="#2563eb" marker-end="url(#arrow-blue)"/>
-
-  <rect x="360" y="376" width="240" height="36" rx="4" fill="#dbeafe" stroke="#2563eb"/>
-  <text x="480" y="392" text-anchor="middle" font-size="10" font-weight="bold" fill="#1e3a8a">Per dest: createUdpPacket()</text>
-  <text x="480" y="406" text-anchor="middle" font-size="9" fill="#1e40af">memcpy payload → TX frame 0..2047</text>
-
-  <line x1="480" y1="412" x2="480" y2="430" stroke="#2563eb" marker-end="url(#arrow-blue)"/>
-
-  <rect x="360" y="430" width="240" height="28" rx="4" fill="#fff" stroke="#60a5fa"/>
-  <text x="480" y="448" text-anchor="middle" font-size="10" fill="#334155">submitTxRing → requestDriverPoll</text>
-
-  <text x="480" y="478" text-anchor="middle" font-size="10" fill="#334155">✓ Works for any K (fan-out)</text>
-  <text x="480" y="493" text-anchor="middle" font-size="10" fill="#334155">✓ Best p50 at K=1</text>
-  <text x="480" y="508" text-anchor="middle" font-size="10" fill="#1e40af">✗ K payload copies per RX packet</text>
-
-  <rect x="365" y="520" width="230" height="55" rx="4" fill="#fff7ed" stroke="#f59e0b"/>
-  <text x="480" y="538" text-anchor="middle" font-size="10" font-weight="bold" fill="#92400e">Best for:</text>
-  <text x="480" y="553" text-anchor="middle" font-size="10" fill="#78350f">K=1, small payloads, simplicity,</text>
-  <text x="480" y="568" text-anchor="middle" font-size="10" fill="#78350f">or whenever robustness matters most</text>
-
-  <!-- Column 3: inplace (zero-copy) -->
-  <rect x="650" y="170" width="280" height="420" rx="6" fill="#f0fdf4" stroke="#86efac"/>
-  <text x="790" y="192" text-anchor="middle" font-size="12" font-weight="bold" fill="#16a34a">inplace (zero-copy)</text>
-  <text x="790" y="208" text-anchor="middle" font-size="9" fill="#166534">REPLICATOR_FWD_MODE=inplace</text>
-  <text x="790" y="222" text-anchor="middle" font-size="9" fill="#14532d">any K • saves K−1 copies</text>
-
-  <rect x="670" y="238" width="240" height="28" rx="4" fill="#fff" stroke="#4ade80"/>
-  <text x="790" y="256" text-anchor="middle" font-size="10" fill="#334155">bpf_redirect_map → AF_XDP RX ring</text>
-
-  <line x1="790" y1="266" x2="790" y2="284" stroke="#16a34a" marker-end="url(#arrow-green)"/>
-
-  <rect x="670" y="284" width="240" height="28" rx="4" fill="#fff" stroke="#4ade80"/>
-  <text x="790" y="302" text-anchor="middle" font-size="10" fill="#334155">Userspace RX drain (NAPI busy-poll)</text>
-
-  <line x1="790" y1="312" x2="790" y2="330" stroke="#16a34a" marker-end="url(#arrow-green)"/>
-
-  <rect x="670" y="330" width="240" height="28" rx="4" fill="#fff" stroke="#4ade80"/>
-  <text x="790" y="348" text-anchor="middle" font-size="10" fill="#334155">Parse + stamp replicator_ns</text>
-
-  <line x1="790" y1="358" x2="790" y2="376" stroke="#16a34a" marker-end="url(#arrow-green)"/>
-
-  <rect x="670" y="376" width="240" height="50" rx="4" fill="#dcfce7" stroke="#16a34a"/>
-  <text x="790" y="393" text-anchor="middle" font-size="10" font-weight="bold" fill="#14532d">Last dest: patchHeadersInPlace()</text>
-  <text x="790" y="406" text-anchor="middle" font-size="9" fill="#166534">Rewrite RX frame L2/L3/L4 in UMEM</text>
-  <text x="790" y="419" text-anchor="middle" font-size="9" fill="#166534">forwardFrameInPlace → TX (0 copy)</text>
-
-  <line x1="790" y1="426" x2="790" y2="442" stroke="#16a34a" marker-end="url(#arrow-green)"/>
-
-  <rect x="670" y="442" width="240" height="28" rx="4" fill="#fff" stroke="#4ade80"/>
-  <text x="790" y="460" text-anchor="middle" font-size="10" fill="#334155">Other K−1 dests: copy path</text>
-
-  <text x="790" y="488" text-anchor="middle" font-size="10" fill="#334155">✓ Saves K−1 payload memcpys</text>
-  <text x="790" y="503" text-anchor="middle" font-size="10" fill="#334155">✓ Scales with K and payload size</text>
-  <text x="790" y="518" text-anchor="middle" font-size="10" fill="#166534">✗ At K=1: adds bookkeeping, no gain</text>
-
-  <rect x="675" y="530" width="230" height="55" rx="4" fill="#fff7ed" stroke="#f59e0b"/>
-  <text x="790" y="548" text-anchor="middle" font-size="10" font-weight="bold" fill="#92400e">Best for:</text>
-  <text x="790" y="563" text-anchor="middle" font-size="10" fill="#78350f">Large K and/or large payloads</text>
-  <text x="790" y="578" text-anchor="middle" font-size="10" fill="#78350f">where CPU/bandwidth is the limit</text>
-
-  <!-- Footer legend -->
-  <text x="480" y="608" text-anchor="middle" font-size="10" fill="#64748b">Socket zero-copy (XDP_FLAGS_ZERO_COPY, CLI arg, default true) is orthogonal — it controls NIC↔UMEM transfer, not how the fan-out copies the payload.</text>
+  <text x="628" y="652" text-anchor="middle" font-size="10" fill="#64748b">Socket zero-copy (XDP_FLAGS_ZERO_COPY, CLI arg, default true) is orthogonal &#8212; it controls NIC&#8596;UMEM transfer, not how the fan-out copies the payload. It does not apply to kernel mode.</text>
 </svg>

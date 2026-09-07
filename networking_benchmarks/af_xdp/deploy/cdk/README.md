@@ -38,28 +38,34 @@ Three mutually exclusive `deploymentType` values:
 npm install
 
 # ── Option A: afxdpctl (recommended) ──────────────────────────────────────
+# --admin-cidr defaults to "auto": the caller's public IP is detected and
+# security groups are locked to it, no manual authorize-security-group-ingress.
 afxdpctl up --key virginia --git-repo <repo-url> --git-ref main \
-            --scenario u-cpg-3 --bake
+            --scenario ucast-3 --bake
 
 # ── Option B: manual CDK commands ─────────────────────────────────────────
 
-# 1. Bake AMI (one-time, ~9 min)
+# 1. Bake AMI (one-time, ~9 min). Re-bake after AMI-level changes - the RT
+#    sysctl and chrony-force-sync.service only exist in AMIs baked with them.
 npx cdk deploy --context deploymentType=ami-builder \
                --context keyPairName=virginia \
-               --context gitRepo=<repo-url> --context gitRef=main
+               --context gitRepo=<repo-url> --context gitRef=main \
+               --context adminCidr=$(curl -s https://checkip.amazonaws.com)/32
 
 # 2. Deploy control plane
 npx cdk deploy --context deploymentType=control-plane \
                --context keyPairName=virginia \
-               --context gitRepo=<repo-url> --context gitRef=main
+               --context gitRepo=<repo-url> --context gitRef=main \
+               --context adminCidr=$(curl -s https://checkip.amazonaws.com)/32
 
 # 3. Deploy fleet (instant readiness - baked AMI resolved from SSM)
 npx cdk deploy --context keyPairName=virginia \
-               --context scenario=u-cpg-3
+               --context scenario=ucast-3 \
+               --context adminCidr=$(curl -s https://checkip.amazonaws.com)/32
 
 # 4. Deploy fleet with stock AMI (needs provisioning via ansible)
 npx cdk deploy --context keyPairName=virginia \
-               --context scenario=u-cpg-3 \
+               --context scenario=ucast-3 \
                --context amiId=ami-xxxxxx
 ```
 
@@ -68,7 +74,7 @@ npx cdk deploy --context keyPairName=virginia \
 JSON array of `FleetEntry` objects - all fields optional with sensible defaults:
 
 ```json
-[{"count": 3, "type": "c7i.4xlarge", "pgType": "cluster", "pgName": "cpg-a"}]
+[{"count": 3, "type": "m8a.2xlarge", "pgType": "cluster", "pgName": "cpg-a"}]
 ```
 
 ### FleetEntry Schema
@@ -96,7 +102,7 @@ gives hardware isolation with no visibility into or control over placement.
 
 ```bash
 # From a scenarios/ file (recommended):
---context scenario=u-cpg-3
+--context scenario=ucast-3
 
 # From any JSON file:
 --context fleet=@path/to/file.json
@@ -113,8 +119,8 @@ Entries whose `region` differs from the primary region create a **second** Fleet
 
 ```json
 [
-  {"count": 2, "type": "c7i.4xlarge", "pgType": "cluster", "pgName": "us-cpg"},
-  {"count": 2, "type": "c7i.4xlarge", "pgType": "cluster", "pgName": "eu-cpg", "region": "eu-west-2"}
+  {"count": 2, "type": "m8a.2xlarge", "pgType": "cluster", "pgName": "us-cpg"},
+  {"count": 2, "type": "m8a.2xlarge", "pgType": "cluster", "pgName": "eu-cpg", "region": "eu-west-1"}
 ]
 ```
 
@@ -128,12 +134,35 @@ Entries whose `region` differs from the primary region create a **second** Fleet
 | `deploymentType` | `fleet` | One of: `fleet`, `ami-builder`, `control-plane` |
 | `region` | `us-east-1` | Primary AWS region |
 | `stackName` | `XdpStack` | CloudFormation stack name prefix |
+| `adminCidr` | - | CIDR allowed administrative ingress. Applies to the fleet stacks (primary + secondary), the AMI builder, and the control plane - see below |
+
+### `adminCidr` (security group lockdown)
+
+`adminCidr` narrows administrative ingress instead of leaving SSH open to the internet. What it controls per stack:
+
+| Stack | `adminCidr` set | `adminCidr` omitted |
+|-------|-----------------|---------------------|
+| fleet (primary + secondary) | TCP 22 from that CIDR only | TCP 22 from `0.0.0.0/0` |
+| ami-builder | TCP 22 from that CIDR only | TCP 22 from `0.0.0.0/0` |
+| control-plane | TCP 22 **and** TCP 8080 (web + API) from that CIDR only | TCP 22 from `0.0.0.0/0`; 8080 gets **no ingress rule at all** and is reached over SSM port forwarding |
+
+Note that `adminCidr` is the only thing that opens 8080 - `clientCidr` governs NATS (4222) only.
+
+`afxdpctl up` supplies this automatically via `--admin-cidr`, which defaults to the literal string `auto`:
+
+| `--admin-cidr` value | Behaviour |
+|----------------------|-----------|
+| `auto` (default) | Resolves the caller's public IP via `https://checkip.amazonaws.com` and passes `<ip>/32`. If detection fails it prints a notice and passes nothing, falling back to the CDK default rather than failing the deploy |
+| `""` (empty string) | Passes nothing - keeps the CDK default explicitly (8080 closed, SSM port forwarding only) |
+| a CIDR | Admits that fixed address or range |
+
+This replaces the previously-manual `aws ec2 authorize-security-group-ingress` step after deployment.
 
 ### Fleet-specific (`deploymentType=fleet`)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `scenario` | - | Scenario path (e.g. `u-cpg-3`) - from `scenarios/` |
+| `scenario` | - | Scenario path (e.g. `ucast-3`) - from `scenarios/` |
 | `fleet` | - | Inline JSON array or `@file.json` path |
 | `amiId` | SSM-resolved | Custom/baked AMI for the primary region |
 | `secondaryAmiId` | SSM-resolved | AMI for the secondary region (synth fails if unresolvable) |
@@ -154,10 +183,10 @@ Entries whose `region` differs from the primary region create a **second** Fleet
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `instanceType` | `t3.small` | Control-plane instance type |
+| `instanceType` | `t3.medium` | Control-plane instance type |
 | `gitRepo` | `https://github.com/aws-samples/trading-latency-benchmark.git` | Source repo to clone |
 | `gitRef` | `main` | Git ref/branch to build from |
-| `clientCidr` | `0.0.0.0/0` | CIDR allowed to reach NATS (4222) + web (8080) |
+| `clientCidr` | `0.0.0.0/0` | CIDR allowed to reach NATS (4222) - agents dial in from every region the fleet spans |
 | `hostedZoneId` | - | Route53 hosted zone ID (for DNS A record) |
 | `zoneName` | - | Route53 zone name (e.g. `example.com`) |
 | `recordName` | - | DNS record name (e.g. `bench.example.com`) |
@@ -169,24 +198,24 @@ Entries whose `region` differs from the primary region create a **second** Fleet
 Deploy multiple independent fleets by varying `stackName`:
 
 ```bash
-npx cdk deploy --context scenario=u-cpg-3 --context stackName=cpg-bench \
+npx cdk deploy --context scenario=ucast-3 --context stackName=cpg-bench \
                --context keyPairName=virginia
-npx cdk deploy --context scenario=u-xaz-xcpg-10 --context stackName=xcpg-bench \
+npx cdk deploy --context scenario=all-11 --context stackName=xcpg-bench \
                --context keyPairName=virginia
 
 # Destroy one:
 npx cdk destroy --context stackName=cpg-bench --context keyPairName=virginia \
-                --context scenario=u-cpg-3
+                --context scenario=ucast-3
 ```
 
 ## Cleanup
 
 ```bash
 # Single fleet:
-npx cdk destroy --context keyPairName=virginia --context scenario=u-cpg-3
+npx cdk destroy --context keyPairName=virginia --context scenario=ucast-3
 
 # All stacks (via afxdpctl):
-afxdpctl down --key virginia --scenario u-cpg-3
+afxdpctl down --key virginia --scenario ucast-3
 ```
 
 All resources use `RemovalPolicy.DESTROY` - no manual cleanup needed.

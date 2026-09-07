@@ -32,6 +32,8 @@
 #include <signal.h>
 #include <poll.h>
 #include <sys/resource.h>
+#include <sched.h>
+#include <sys/mman.h>
 
 #include <xdp/xsk.h>
 #include <bpf/libbpf.h>
@@ -110,7 +112,7 @@ static uint64_t pct(std::vector<uint64_t> &sorted, int p)
 }
 
 /* ── shared stats accumulation + reporting ────────────────────────────────
- * Factored out of main()'s RX loop so the AF_XDP path and the -k (kernel
+ * Factored out so the AF_XDP path and the -k (kernel
  * socket) path share identical hop1/hop2/total math, percentile aggregation,
  * and -j JSON output — both consume the same parsed pkt_hdr fields
  * regardless of how the frame arrived (ring peek vs recvfrom). */
@@ -124,6 +126,16 @@ struct RxStats {
 	int      lost          = 0;
 	int      ooo           = 0;
 	int64_t  last_seq      = -1;
+	// RX wall-clock of the first and last packet actually received. Used for
+	// achieved_pps instead of the loop's own elapsed time: the loop starts
+	// before the orchestrator has even dispatched mcast_send, so loop-elapsed
+	// includes the sender's dispatch + startup (NATS round trip, sudo/taskset
+	// exec, ARP/MAC resolution, 1MB UMEM alloc, xsk_socket__create with a
+	// possible native->SKB retry). Measured live at 0.10-0.38s of dead time
+	// depending on mode, which deflated the reported rate to 72-91% of
+	// requested while mcast_send's own self-measured rate was 99.9%
+	uint64_t first_rx_ns   = 0;
+	uint64_t last_rx_ns    = 0;
 	uint64_t min_lat       = UINT64_MAX;
 	uint64_t max_lat       = 0;
 	uint64_t sum_lat       = 0;
@@ -163,6 +175,8 @@ static void record_sample(RxStats &st, const pkt_hdr *hdr, uint64_t rx_ns, int c
 	st.latencies.push_back(ulat);
 	st.sum_lat += ulat;
 	st.received++;
+	if (st.first_rx_ns == 0) st.first_rx_ns = rx_ns;
+	st.last_rx_ns = rx_ns;
 	if (ulat < st.min_lat) st.min_lat = ulat;
 	if (ulat > st.max_lat) st.max_lat = ulat;
 
@@ -199,16 +213,31 @@ static void record_sample(RxStats &st, const pkt_hdr *hdr, uint64_t rx_ns, int c
 	}
 	if (iseq > st.last_seq) st.last_seq = iseq;
 
-	if (st.received % 100 == 0) {
+	// Progress print: every 10000 (not 100), matching rtt.cpp's sender-side
+	// cadence, no fflush. Under SCHED_FIFO on an isolated core, printf's
+	// write(2) is a syscall the RT thread cannot be preempted during; an
+	// fflush every 100 packets (1000x over a 100k-packet run) measured live
+	// as the cause of intermittent multi-hundred-ms stalls (occasional runs
+	// losing tens of thousands of packets with a multi-hundred-ms p99) once
+	// enable_realtime() was correctly moved onto this loop. Printing less
+	// often, and letting libc's normal buffered write happen off the RT
+	// thread's critical timing (it still shows up before the final report,
+	// just not synchronously flushed every line), removes that stall
+	// surface while keeping progress visible in the log.
+	// Progress print: every 10000 (not 100), matching rtt.cpp's sender-side
+	// cadence, and no fflush per line (avoids one known stall surface: an
+	// fflush every 100 packets under SCHED_FIFO on an isolated core measured
+	// as amplifying stalls, though it was not the only cause - see the
+	// SCHED_FIFO note above enable_realtime()'s call site).
+	if (st.received % 10000 == 0) {
 		uint64_t avg100 = 0;
 		int start = (int)st.latencies.size() - 100;
 		if (start < 0) start = 0;
 		for (size_t j = (size_t)start; j < st.latencies.size(); j++)
 			avg100 += st.latencies[j];
 		avg100 /= (st.latencies.size() - (size_t)start);
-		printf("  [%d/%d] last=%.1fus avg(100)=%.1fus\r",
+		printf("  [%d/%d] last=%.1fus avg(100)=%.1fus\n",
 		       st.received, count, ulat / 1000.0, avg100 / 1000.0);
-		fflush(stdout);
 	}
 }
 
@@ -305,6 +334,25 @@ static void emit_report(RxStats &st, const char *iface_or_desc, const char *queu
 			fprintf(jf, "  \"clock_skew_samples\": %d,\n", st.n_neg_total);
 			fprintf(jf, "  \"timestamp_rx\": \"%s\",\n", is_kernel ? "kernel_recvfrom" : "xdp_afxdp");
 			fprintf(jf, "  \"timestamp_tx\": \"clock_realtime\",\n");
+			// Achieved vs requested rate (dev/roadmap: "report achieved vs
+			// requested rate per run"). Requested rate is not known to
+			// mcast_receive (it has no -i flag - that's mcast_send's), so this
+			// reports elapsed_s and the DESTINATION's own achieved pps
+			// (received / elapsed); the caller (control_plane/agent/runner.go)
+			// combines this with the sender's requested interval_us to compute
+			// the achieved/requested ratio and flag under-rate runs, since only
+			// the orchestrator knows what was actually requested for this run.
+			// elapsed_s is the loop's own wall time (kept for context);
+			// active_s spans first->last packet received, and achieved_pps is
+			// computed over THAT so the sender's startup/dispatch dead time
+			// before the first packet does not deflate the rate. See
+			// RxStats::first_rx_ns for the measured magnitude of that gap.
+			double active_s = (st.last_rx_ns > st.first_rx_ns)
+			                ? (double)(st.last_rx_ns - st.first_rx_ns) / 1e9 : 0.0;
+			fprintf(jf, "  \"elapsed_s\": %.6f,\n", elapsed);
+			fprintf(jf, "  \"active_s\": %.6f,\n", active_s);
+			fprintf(jf, "  \"achieved_pps\": %.1f,\n",
+			        active_s > 0 ? (st.received - 1) / active_s : 0.0);
 			fprintf(jf, "  \"service_rtt_us\": {\n");
 			fprintf(jf, "    \"min\": %" PRIu64 ",\n", st.min_lat / 1000);
 			fprintf(jf, "    \"mean\": %" PRIu64 ",\n", avg_lat / 1000);
@@ -359,6 +407,12 @@ static int run_kernel_receive(const char *group, int port, int count, int timeou
 
 	int reuse = 1;
 	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+	/* Intentionally untuned: no SO_BUSY_POLL/SO_PREFER_BUSY_POLL/
+	 * SO_BUSY_POLL_BUDGET/SO_RCVBUF, unlike the AF_XDP path below. This arm is
+	 * the stock Linux datagram stack, the reference the optimised route is
+	 * measured against. Adding the AF_XDP tuning here would compare AF_XDP to a
+	 * hand-tuned kernel socket instead, losing that baseline. See dev/roadmap/fix.md. */
 
 	struct sockaddr_in bind_addr{};
 	bind_addr.sin_family      = AF_INET;
@@ -442,6 +496,27 @@ static void usage(const char *prog)
 	       "  -h           this help\n"
 	       "\nRequires root (XDP attach + AF_XDP), except with -k.\n",
 	       prog, DEF_PORT, DEF_COUNT, DEF_TIMEOUT, DEF_QUEUE);
+}
+
+/* ── real-time scheduling ────────────────────────────────────────────────
+ * AF_XDP-path-only: matches rtt.cpp's enable_realtime() and mcast_send.cpp's
+ * copy of it. SCHED_FIFO removes scheduler wakeup latency from the RX hot
+ * loop (ring peek -> poll() busy-poll -> record_sample). Not applied in
+ * run_kernel_receive(): that path is the deliberately-untuned stock-kernel
+ * baseline (dev/roadmap/fix.md item 4) and must stay that way. */
+static void enable_realtime()
+{
+	struct sched_param param = {};
+	param.sched_priority = 80;
+	if (sched_setscheduler(0, SCHED_FIFO, &param) == 0)
+		printf("  SCHED_FIFO priority 80 enabled\n");
+	else
+		fprintf(stderr, "  Warning: SCHED_FIFO failed (need root/CAP_SYS_NICE), continuing with SCHED_OTHER\n");
+
+	if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0)
+		printf("  mlockall enabled (no page faults during measurement)\n");
+	else
+		fprintf(stderr, "  Warning: mlockall failed (need root/CAP_IPC_LOCK)\n");
 }
 
 int main(int argc, char *argv[])
@@ -691,6 +766,17 @@ int main(int argc, char *argv[])
 	// starts the source send only once every receiver has reported it.
 	fflush(stdout);
 
+	// SCHED_FIFO + mlockall from here, not from main() entry: everything above
+	// (posix_memalign, xsk_umem__create, xsk_socket__create, the BPF map
+	// updates, XDP program attach) makes syscalls that can need the kernel to
+	// schedule ordinary work on this core. Running that setup at RT priority
+	// with pages already locked risks starving whatever the kernel needs to
+	// finish those calls - measured live as ~50 % of runs losing 40-70 % of
+	// packets when the call sat before setup instead of here. Enabling RT
+	// only around the steady-state hot loop (ring peek -> poll() -> record)
+	// avoids that risk entirely.
+	enable_realtime();
+
 	struct timespec t0;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 
@@ -705,6 +791,32 @@ int main(int argc, char *argv[])
 	clock_gettime(CLOCK_MONOTONIC, &t_idle);
 
 	/* ── RX loop ──────────────────────────────────────────────────────── */
+	// SCHED_FIFO busy-poll watchdog: force this thread to voluntarily block
+	// every WATCHDOG_EMPTY_POLLS empty poll() calls, capping how long it can
+	// go without giving the scheduler a chance to run other work on this
+	// core. Root cause (see dev/roadmap/fix.md): poll()'s sk_busy_loop()/
+	// napi_busy_poll() can occasionally spin far longer than its
+	// SO_BUSY_POLL budget - arXiv:2402.10513 independently observed the same
+	// pathology ("enabling polling on the receiver always led to worse
+	// results... latencies similar to the inter-batch interval"). Measured
+	// live on this fleet via perf sched as single scheduling slots of
+	// 1.1-2.5s with zero context switches, on isolcpus+nohz_full+rcu_nocbs
+	// cores: with no periodic tick and nothing lower-priority able to
+	// preempt SCHED_FIFO, nothing but this thread choosing to yield can end
+	// the spin. sched_yield() does NOT work here - measured live as not
+	// reducing the failure rate at all, because it only cedes to runnable
+	// tasks at >= this thread's own priority, of which there are none at
+	// SCHED_FIFO 80. nanosleep() forces a real block, which does let lower
+	// -priority tasks (softirqs, kworkers - confirmed via the same perf
+	// trace as what was actually starved) run in the gap. This reduces but
+	// does not eliminate the failure rate on its own; the control-plane's
+	// mcastAbnormalTail() (control_plane/agent/runner.go) is the
+	// authoritative defense - it detects and retries the full send+receive
+	// cycle on the rare stall this does not catch.
+	static constexpr int WATCHDOG_EMPTY_POLLS = 200000;
+	uint64_t empty_polls = 0;
+	static const struct timespec WATCHDOG_YIELD_NS = { 0, 1000 }; /* 1us */
+
 	while (st.received < count && !g_stop) {
 		uint32_t idx_rx = 0;
 		uint32_t rcvd   = xsk_ring_cons__peek(&rx, BATCH, &idx_rx);
@@ -725,6 +837,22 @@ int main(int argc, char *argv[])
 			/* Fill-ring wakeup only when the driver asks for it. */
 			if (xsk_ring_prod__needs_wakeup(&fq))
 				recvfrom(xsk_fd, NULL, 0, MSG_DONTWAIT, NULL, NULL);
+
+			if (++empty_polls >= WATCHDOG_EMPTY_POLLS) {
+				// sched_yield() does not work here: it only cedes to
+				// runnable tasks at >= this thread's priority, and at
+				// SCHED_FIFO 80 there normally are none, so it is a no-op
+				// and measured live as not reducing the stall rate at all.
+				// nanosleep() makes this thread voluntarily BLOCK, which is
+				// the one thing that actually lets the scheduler run lower
+				// -priority/non-RT work (softirqs, kworkers) on this core in
+				// the gap - confirmed by the same perf sched trace that
+				// found the stall: the starved tasks were ksoftirqd/kworker,
+				// strictly below SCHED_FIFO priority.
+				nanosleep(&WATCHDOG_YIELD_NS, nullptr);
+				empty_polls = 0;
+			}
+
 			{
 				struct timespec tn;
 				clock_gettime(CLOCK_MONOTONIC, &tn);
@@ -736,6 +864,7 @@ int main(int argc, char *argv[])
 			}
 			continue;
 		}
+		empty_polls = 0;
 		clock_gettime(CLOCK_MONOTONIC, &t_idle);   /* progress: reset idle deadline */
 
 		for (uint32_t i = 0; i < rcvd && st.received < count; i++) {

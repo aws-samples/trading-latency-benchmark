@@ -49,7 +49,7 @@ The `afxdpctl` CLI (at `control_plane/cmd/afxdpctl`) is the recommended single e
 ```bash
 # 1. Deploy everything (control-plane + optional AMI bake + fleet)
 afxdpctl up --key virginia --git-repo <repo-url> --git-ref main \
-            --scenario u-cpg-3 --bake
+            --scenario ucast-3 --bake
 
 # 2. Hot-deploy local code changes
 afxdpctl sync --key ~/.ssh/virginia.pem --region us-east-1
@@ -62,7 +62,7 @@ afxdpctl run mcast copy,inplace,bpf_tx,kernel
 afxdpctl report -o results.html
 
 # 5. Tear down
-afxdpctl down --key virginia --scenario u-cpg-3
+afxdpctl down --key virginia --scenario ucast-3
 ```
 
 ## Manual Deployment Flow
@@ -84,7 +84,7 @@ npx cdk deploy --context deploymentType=control-plane \
 
 # 3. Deploy fleet (instant readiness - AMI resolved from SSM)
 npx cdk deploy --context keyPairName=virginia \
-               --context scenario=u-cpg-3
+               --context scenario=ucast-3
 
 # 4. Run benchmarks
 ansible-playbook -i ../ansible/inventory.aws_ec2.yml ../ansible/run_ucast.yaml
@@ -95,7 +95,7 @@ ansible-playbook -i ../ansible/inventory.aws_ec2.yml ../ansible/run_ucast.yaml
 ```bash
 # 1. Deploy fleet (stock AMI - skips SSM; needs ansible provisioning)
 npx cdk deploy --context keyPairName=virginia \
-               --context scenario=u-cpg-3 \
+               --context scenario=ucast-3 \
                --context amiId=resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 
 # 2. Provision instances (~8 min)
