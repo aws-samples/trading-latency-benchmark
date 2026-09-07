@@ -1,0 +1,311 @@
+---
+# Provision playbook — installs all dependencies and builds binaries from source.
+#
+# Use this on stock AL2023 instances (NOT baked AMI) for development iteration.
+# Baked AMI instances already have everything pre-installed — skip this playbook.
+#
+# Usage:
+#   ansible-playbook -i inventory.aws_ec2.yml provision.yaml
+#   ansible-playbook -i inventory.aws_ec2.yml provision.yaml -e rebuild=true  # rebuild only
+
+- name: Provision AF_XDP benchmark (dev — stock AL2023)
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+    # ── Build dependencies ─────────────────────────────────────────────────
+    - name: Install build dependencies
+      ansible.builtin.dnf:
+        name:
+          - git
+          - clang
+          - llvm
+          - libbpf-devel
+          - elfutils-libelf-devel
+          - kernel-headers
+          - kernel-devel
+          - iproute
+          - ethtool
+          - make
+          - gcc
+          - gcc-c++
+          - pkgconfig
+          - m4
+          - libpcap-devel
+          - rsync
+          - python3
+          - python3-pip
+        state: present
+      when: not (rebuild | default(false) | bool)
+
+    # ── xdp-tools ─────────────────────────────────────────────────────────
+    - name: Check if libxdp is already installed
+      ansible.builtin.stat:
+        path: /usr/local/lib/libxdp.so
+      register: libxdp_stat
+
+    - name: Clone xdp-tools
+      ansible.builtin.git:
+        repo: https://github.com/xdp-project/xdp-tools.git
+        dest: /opt/xdp-tools
+        depth: 1
+        version: HEAD
+      when: not libxdp_stat.stat.exists and not (rebuild | default(false) | bool)
+
+    - name: Build and install xdp-tools
+      ansible.builtin.shell: |
+        set -e
+        cd /opt/xdp-tools
+        grep -rlZ --include='*.c' --include='*.h' \
+            -e '\bbool\b' -e '\btrue\b' -e '\bfalse\b' lib headers 2>/dev/null \
+          | while IFS= read -r -d '' f; do
+              grep -q 'stdbool.h' "$f" || sed -i '1i #include <stdbool.h>' "$f"
+            done
+        ./configure
+        echo 'CFLAGS += -Wno-error' >> config.mk
+        make -j$(nproc)
+        make install > /dev/null
+        ldconfig
+        mkdir -p /usr/lib64/bpf
+        cp -f lib/libxdp/xdp-dispatcher.o /usr/lib64/bpf/ 2>/dev/null || true
+      when: not libxdp_stat.stat.exists and not (rebuild | default(false) | bool)
+
+    # ── Sync + build benchmark ─────────────────────────────────────────────
+    - name: Sync af_xdp source to instance
+      become: false
+      ansible.builtin.synchronize:
+        src: "{{ playbook_dir }}/../../"
+        dest: /home/ec2-user/af_xdp/
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=node_modules"
+          # Do not ship host build artifacts (see sync.yaml): a stale .o compiled
+          # with -DECHO_MODE_ONLY would be relinked into a kernel-only binary.
+          - "--exclude=*.o"
+          - "--exclude=*.d"
+          - "--exclude=/replicator"
+          - "--exclude=/rtt"
+          - "--exclude=/mcast_send"
+          - "--exclude=/mcast_receive"
+          - "--exclude=/replicator_ctl"
+          - "--exclude=/udp_send"
+          - "--checksum"
+
+    - name: Build benchmark binaries
+      ansible.builtin.shell: |
+        set -e
+        cd /home/ec2-user/af_xdp
+        make full
+        # Install to /opt/af-xdp for consistent path with baked AMI
+        mkdir -p /opt/af-xdp/xdp
+        cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/
+        cp -f src/xdp/*.o /opt/af-xdp/xdp/
+        chown -R ec2-user:ec2-user /home/ec2-user/af_xdp
+
+    # ── System configs (same as bake-ami.sh) ───────────────────────────────
+    - name: Write ENA PHC modprobe config
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/ena-phc.conf
+        content: "options ena enable_llq=1 phc_enable=1\n"
+      when: not (rebuild | default(false) | bool)
+
+    - name: Ensure chrony includes drop-in directory
+      ansible.builtin.lineinfile:
+        path: /etc/chrony.conf
+        line: "include /etc/chrony.d/*.conf"
+        state: present
+      when: not (rebuild | default(false) | bool)
+
+    - name: Comment out default NTP server
+      ansible.builtin.replace:
+        path: /etc/chrony.conf
+        regexp: '^(server 169\.254\.169\.123.*)$'
+        replace: '# \1'
+      when: not (rebuild | default(false) | bool)
+
+    - name: Write chrony NTP fallback config
+      ansible.builtin.copy:
+        dest: /etc/chrony.d/aws-ptp.conf
+        content: |
+          server 169.254.169.123 prefer iburst minpoll 2 maxpoll 2 xleave polltarget 16
+          maxslewrate 500
+          rtcsync
+      when: not (rebuild | default(false) | bool)
+
+    - name: Write chrony refclock PHC config
+      ansible.builtin.copy:
+        dest: /etc/chrony.d/aws-phc.conf
+        content: |
+          refclock PHC /dev/ptp0 poll 0 dpoll -2 trust prefer
+      when: not (rebuild | default(false) | bool)
+
+    - name: Write BPF JIT sysctl
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-bpf-xdp.conf
+        content: |
+          net.core.bpf_jit_enable = 1
+          net.core.bpf_jit_harden = 0
+          net.core.bpf_jit_kallsyms = 1
+      when: not (rebuild | default(false) | bool)
+
+    - name: Write network tuning sysctl
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-network-bench.conf
+        content: |
+          net.ipv4.conf.all.mc_forwarding = 0
+          net.ipv4.conf.default.mc_forwarding = 0
+          net.ipv4.igmp_qrv = 1
+          net.ipv4.conf.all.rp_filter = 0
+          net.ipv4.conf.default.rp_filter = 0
+          net.core.netdev_max_backlog = 10000
+          # rtt requests SO_RCVBUF=4MB; kernel clamps to rmem_max (AL2023
+          # default 208KB) -> ~0.6% UDP RcvbufErrors. Raise the ceiling.
+          net.core.rmem_max = 16777216
+          net.core.wmem_max = 16777216
+      when: not (rebuild | default(false) | bool)
+
+    - name: Apply sysctl
+      ansible.builtin.command: sysctl --system
+      when: not (rebuild | default(false) | bool)
+
+    - name: Write LIBXDP_OBJECT_PATH env
+      ansible.builtin.copy:
+        dest: /etc/profile.d/af-xdp.sh
+        content: |
+          export LIBXDP_OBJECT_PATH=/usr/lib64/bpf
+          export PATH=/opt/af-xdp:$PATH
+      when: not (rebuild | default(false) | bool)
+
+    - name: Disable interrupt coalescing
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ethtool -C "${IFACE:-eth0}" adaptive-rx off || true
+        ethtool -C "${IFACE:-eth0}" rx-usecs 0 tx-usecs 0 || true
+
+    - name: Set RSS indirection to queue 0 (all traffic to AF_XDP socket)
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ethtool -X "${IFACE:-eth0}" equal 1
+
+    # Two independent, idempotent appends. Each fires only when its own sentinel
+    # token is absent, so a pre-baked AMI that already carries isolcpus still gets
+    # the C-state/hugepage tokens (the previous single (?!.*isolcpus) guard skipped
+    # them). \1 captures the existing cmdline up to the closing quote.
+    - name: Enable CPU isolation (grub cmdline) if absent
+      ansible.builtin.replace:
+        path: /etc/default/grub
+        regexp: '^(GRUB_CMDLINE_LINUX_DEFAULT="(?!.*isolcpus=).*)"$'
+        replace: '\1 isolcpus=1-4 nohz_full=1-4 rcu_nocbs=1-4 nosmt"'
+      register: grub_isol
+      when: not (rebuild | default(false) | bool)
+
+    # Converge an EXISTING isolation range to 1-4 (e.g. a pre-baked AMI carrying
+    # isolcpus=1-3). Idempotent: no change when already 1-4. This is what lets the
+    # playbook *update* the config on running instances instead of only seeding it.
+    - name: Converge CPU-isolation range to 1-4 (update pre-baked 1-3 etc.)
+      ansible.builtin.replace:
+        path: /etc/default/grub
+        regexp: 'isolcpus=[0-9,\-]+ nohz_full=[0-9,\-]+ rcu_nocbs=[0-9,\-]+'
+        replace: 'isolcpus=1-4 nohz_full=1-4 rcu_nocbs=1-4'
+      register: grub_isol_upd
+      when: not (rebuild | default(false) | bool)
+
+    - name: Enable low-latency cmdline (C-states + reserved hugepages) if absent
+      ansible.builtin.replace:
+        path: /etc/default/grub
+        regexp: '^(GRUB_CMDLINE_LINUX_DEFAULT="(?!.*hugepages=).*)"$'
+        replace: '\1 intel_idle.max_cstate=0 processor.max_cstate=1 default_hugepagesz=2M hugepagesz=2M hugepages=512"'
+      register: grub_lowlat
+      when: not (rebuild | default(false) | bool)
+
+    - name: Regenerate grub config
+      ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
+      when: not (rebuild | default(false) | bool) and (grub_isol.changed or grub_isol_upd.changed or grub_lowlat.changed)
+
+    # Kernel cmdline (isolcpus/nohz_full/...) only takes effect after a reboot.
+    # Gated on an actual grub change so re-runs are no-ops. Set grub_reboot=false
+    # to defer (e.g. batch the reboot yourself). ansible.builtin.reboot waits for
+    # SSH to return before continuing.
+    - name: Reboot to apply new kernel cmdline (isolcpus)
+      ansible.builtin.reboot:
+        reboot_timeout: 300
+        post_reboot_delay: 15
+      when:
+        - not (rebuild | default(false) | bool)
+        - (grub_isol.changed or grub_isol_upd.changed or grub_lowlat.changed)
+        - (grub_reboot | default(true) | bool)
+
+    - name: Disable irqbalance (keep IRQs off isolated cores)
+      ansible.builtin.systemd:
+        name: irqbalance
+        enabled: false
+        state: stopped
+      failed_when: false
+      when: not (rebuild | default(false) | bool)
+
+    - name: Install cpu-performance.service (governor=performance)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/cpu-performance.service
+        content: |
+          [Unit]
+          Description=Pin CPU scaling governor to performance for low latency
+          After=multi-user.target
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/bash -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$g" 2>/dev/null || true; done'
+          [Install]
+          WantedBy=multi-user.target
+      when: not (rebuild | default(false) | bool)
+
+    - name: Install ena-rx-lowlat.service (deferred-IRQ + small gro backstop for AF_XDP busy-poll RX)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ena-rx-lowlat.service
+        content: |
+          [Unit]
+          Description=Low-latency NAPI for AF_XDP busy-poll RX (defer hard IRQs + 10us gro backstop)
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          # Deferred-IRQ + busy-poll regime: napi_defer_hard_irqs hands NAPI to the
+          # app's busy-poll; gro_flush_timeout is the backstop for busy-poll gaps.
+          # 10us — NOT 0 (strands packets in gaps -> multi-second bursts) and NOT the
+          # old 200us (dominates hop latency -> ~200us/hop). See dev/roadmap.md.
+          ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | grep -oP "dev \K\S+" | head -1); echo 2 > /sys/class/net/${IFACE:-eth0}/napi_defer_hard_irqs 2>/dev/null || true; echo 10000 > /sys/class/net/${IFACE:-eth0}/gro_flush_timeout 2>/dev/null || true'
+          [Install]
+          WantedBy=multi-user.target
+      when: not (rebuild | default(false) | bool)
+
+    - name: Enable low-latency services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        daemon_reload: true
+      loop:
+        - cpu-performance.service
+        - ena-rx-lowlat.service
+      when: not (rebuild | default(false) | bool)
+
+    - name: Reboot to activate PHC
+      ansible.builtin.reboot:
+        reboot_timeout: 300
+      when: not (rebuild | default(false) | bool)
+
+    - name: Verify PHC active after reboot
+      ansible.builtin.shell: cat /sys/module/ena/parameters/phc_enable
+      register: phc_check
+      changed_when: false
+      failed_when: phc_check.stdout | trim != "1"
+      when: not (rebuild | default(false) | bool)
+
+    - name: Display provisioning summary
+      ansible.builtin.debug:
+        msg:
+          - "=== Provisioning complete ==="
+          - "Binaries: /opt/af-xdp/"
+          - "PHC: {{ phc_check.stdout | default('skipped') }}"
+          - "Mode: {{ 'rebuild-only' if (rebuild | default(false) | bool) else 'full' }}"

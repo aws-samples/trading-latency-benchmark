@@ -12,7 +12,7 @@ The CDK code supports multiple deployment architectures:
 4. **AMI Builder Stack**: Builds a pre-tuned Amazon Machine Image with OS-level optimisations baked in
 5. **Latency Hunting Stack**: Deploys instances for network placement optimisation and latency hunting
 
-> **GRE feed-handler topology** (mock exchange + feeder + subscribers) is deployed by a separate CDK app in [`deployment/mcast_gre/cdk/`](../mcast_gre/README.md) using the `deploy.sh` script.
+> **GRE feed-handler topology** (mock exchange + feeder + subscribers) is deployed by a separate CDK app in [`deployment/af_xdp/cdk/`](../af_xdp/README.md) using the `deploy.sh` script.
 
 ## Prerequisites
 

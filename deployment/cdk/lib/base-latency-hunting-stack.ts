@@ -787,7 +787,7 @@ echo "EC2 Hunting setup completed at $(date)"
      * 
      * CUSTOM AMI CONFIGURATION:
      * You can specify custom tuned AMIs per instance. Build AMIs using:
-     *   cd deployment && ./build-tuned-ami.sh --instance-type <type> --ami-name <name>
+     *   cd deployment && ./build_tuned_ami.sh --instance-type <type> --ami-name <name>
      * 
      * AMI SIZE CLASS MAPPING (based on vCPU count and CPU isolation):
      *   - Small (4-8 vCPU):    c7i.xlarge, c7i.2xlarge

@@ -1,0 +1,278 @@
+---
+# Dev iteration playbook: rsync code to EC2s, rebuild, reset NIC, restart replicator.
+#
+# Use after local code changes to deploy + test on running fleet instances.
+# Handles the full lifecycle: rsync → build → XDP cleanup → service restart.
+#
+# Fleet nodes (source/replicator/destination) and the control-plane host are
+# BOTH covered by `hosts: all`, but need different build/restart steps: fleet
+# nodes rebuild the C++ tools + reset the NIC + restart replicator.service;
+# the control-plane host has no C++ toolchain at all (it's a plain t3.small
+# running only the Go backend + nats-server, per deploy/cdk/lib/control-plane.ts)
+# and instead rebuilds afxdp-backend + the web dist and restarts
+# cp-backend.service. Every fleet-only task below is gated on
+# `'control_plane' not in group_names` (the group inventory.aws_ec2.yml
+# defines from the host's CFN stack-name tag), and the control-plane tasks are
+# gated the opposite way, so one playbook run correctly handles a mixed
+# inventory without trying to `make` on a host that has no compiler.
+#
+# Usage (run from af_xdp/dev/ansible/):
+#   ansible-playbook -i inventory.aws_ec2.yml sync.yaml
+#   ansible-playbook -i inventory.aws_ec2.yml sync.yaml --limit replicator
+#   ansible-playbook -i inventory.aws_ec2.yml sync.yaml --limit control_plane
+
+- name: Dev — rsync, build, restart
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    # dev/ansible/ → af_xdp root is two levels up.
+    src_root: "{{ playbook_dir }}/../.."
+    remote_path: /home/ec2-user/af_xdp
+    af_xdp_path: "{{ remote_path }}"
+    is_control_plane: "{{ 'control_plane' in group_names }}"
+
+  tasks:
+
+    - name: Sync source from local repo
+      become: false
+      ansible.builtin.synchronize:
+        src: "{{ src_root }}/"
+        dest: "{{ remote_path }}/"
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=node_modules"
+          - "--exclude=cdk.out"
+          # Never ship host build artifacts: a stale .o/.d (e.g. one compiled
+          # with -DECHO_MODE_ONLY) would be seen as up-to-date by make and
+          # relinked into the binary, silently producing a echo-mode-only
+          # build that rejects ucast/AF_XDP mode.
+          - "--exclude=*.o"
+          - "--exclude=*.d"
+          - "--exclude=/replicator"
+          - "--exclude=/rtt"
+          - "--exclude=/mcast_send"
+          - "--exclude=/mcast_receive"
+          - "--exclude=/replicator_ctl"
+          - "--exclude=/udp_send"
+          - "--checksum"
+
+    # ── Control-plane path: no C++ toolchain on this host at all - rebuild the
+    #    Go backend + web dist and restart cp-backend.service. Everything
+    #    below this block is `when: not is_control_plane` and does not apply
+    #    to this host.
+    - name: "[control-plane] Build backend (Go)"
+      ansible.builtin.shell: |
+        set -e
+        CP={{ af_xdp_path }}/control_plane
+        [ -x /usr/local/go/bin/go ] || { echo "no Go toolchain — skip backend build" >&2; exit 1; }
+        cd "$CP"
+        GOFLAGS=-mod=mod GOCACHE=/tmp/gocache GOPATH=/tmp/go PATH=/usr/local/go/bin:$PATH \
+          go build -o /opt/af-xdp-cp/afxdp-backend ./backend
+        echo "backend built"
+      args:
+        executable: /bin/bash
+      when: is_control_plane
+      register: cp_backend_build
+
+    - name: "[control-plane] Build web dist (npm)"
+      ansible.builtin.shell: |
+        set -e
+        cd {{ af_xdp_path }}/control_plane/web
+        npm install
+        npm run build
+        rm -rf /opt/af-xdp-cp/web-dist
+        cp -r dist /opt/af-xdp-cp/web-dist
+        echo "web dist built"
+      args:
+        executable: /bin/bash
+      when: is_control_plane
+      register: cp_web_build
+
+    # npm run build above runs under become:yes, so dist/ lands root-owned.
+    # The next "Sync source" task's rsync runs unprivileged (become:false) and
+    # cannot overwrite root-owned files - hand the synced source tree's own
+    # dist/ back to the sync user so a later sync isn't blocked by this run's
+    # build output.
+    - name: "[control-plane] Fix web dist ownership for next sync"
+      ansible.builtin.file:
+        path: "{{ af_xdp_path }}/control_plane/web/dist"
+        owner: ec2-user
+        group: ec2-user
+        recurse: yes
+      when: is_control_plane
+
+    - name: "[control-plane] Restart cp-backend.service"
+      ansible.builtin.systemd:
+        name: cp-backend.service
+        state: restarted
+        daemon_reload: yes
+      when: is_control_plane
+
+    - name: "[control-plane] Wait for startup"
+      ansible.builtin.pause:
+        seconds: 3
+      when: is_control_plane
+
+    - name: "[control-plane] Verify cp-backend is active"
+      ansible.builtin.command: systemctl is-active cp-backend.service
+      register: cp_svc_status
+      changed_when: false
+      ignore_errors: yes
+      when: is_control_plane
+
+    - name: "[control-plane] Show status"
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: cp-backend {{ cp_svc_status.stdout | default('unknown') }}"
+      when: is_control_plane
+
+    - name: "[control-plane] Show journal on failure"
+      ansible.builtin.shell: journalctl -u cp-backend -n 20 --no-pager
+      register: cp_journal
+      when: is_control_plane and cp_svc_status.stdout != 'active'
+
+    - name: "[control-plane] Report failure"
+      ansible.builtin.debug:
+        msg: "{{ cp_journal.stdout_lines }}"
+      when: is_control_plane and cp_svc_status.stdout != 'active'
+
+    # ── Fleet path (source/replicator/destination): C++ tools + NIC reset +
+    #    replicator.service. Every task below is skipped on the control-plane
+    #    host, which has none of this.
+
+    # Clean AFTER sync (a pre-sync clean is useless once rsync brings artifacts
+    # back). Fail loudly on build errors — do not pipe to tail, which masks the
+    # non-zero make exit code.
+    - name: Build binaries (clean rebuild)
+      ansible.builtin.shell: |
+        set -o pipefail
+        cd {{ af_xdp_path }}
+        make clean
+        make full 2>&1 | tail -40
+      args:
+        executable: /bin/bash
+      register: build_result
+      when: not is_control_plane
+
+    - name: Verify replicator binary supports AF_XDP (not echo-mode-only)
+      ansible.builtin.shell: |
+        cd {{ af_xdp_path }}
+        if strings replicator | grep -q "echo-mode-only configuration"; then
+          echo "ERROR: built replicator is ECHO_MODE_ONLY; ucast/mcast will fail" >&2
+          exit 1
+        fi
+      changed_when: false
+      when: not is_control_plane
+
+    - name: Install binaries to /opt/af-xdp
+      ansible.builtin.shell: |
+        cd {{ af_xdp_path }}
+        cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/
+        cp -f src/xdp/*.o /opt/af-xdp/xdp/
+      when: not is_control_plane
+
+    # Build + (re)start the control-plane Go agent from the synced source, so a
+    # dev iteration yields a working agent without re-baking the AMI. Uses the
+    # Go toolchain baked at /usr/local/go; skips cleanly if absent. This is
+    # the FLEET node's agent (the per-node sidecar), not the control-plane's
+    # own backend built above - different binary, different host role.
+    - name: Build control-plane agent (Go)
+      ansible.builtin.shell: |
+        set -e
+        CP={{ af_xdp_path }}/control_plane
+        [ -d "$CP/agent" ] || { echo "no control_plane/agent — skip"; exit 0; }
+        [ -x /usr/local/go/bin/go ] || { echo "no Go toolchain — skip agent build"; exit 0; }
+        cd "$CP"
+        GOFLAGS=-mod=mod GOCACHE=/tmp/gocache GOPATH=/tmp/go PATH=/usr/local/go/bin:$PATH \
+          go build -o /opt/af-xdp/afxdp-agent ./agent
+        echo "agent built"
+      args:
+        executable: /bin/bash
+      register: agent_build
+      when: not is_control_plane
+
+    # Same root-ownership hazard as the control-plane path above: `make clean
+    # && make full` and the Go agent build both ran under become:yes and can
+    # leave root-owned files/dirs inside the synced source tree (build
+    # intermediates, the agent binary output path) - anything not covered by
+    # the rsync excludes above. The next sync's rsync runs unprivileged
+    # (become:false) and would fail to overwrite those. Hand the whole tree
+    # back before this play ends.
+    - name: Fix source tree ownership for next sync
+      ansible.builtin.file:
+        path: "{{ af_xdp_path }}"
+        owner: ec2-user
+        group: ec2-user
+        recurse: yes
+      when: not is_control_plane
+
+    - name: Restart control-plane agent (if built)
+      ansible.builtin.shell: |
+        if [ -x /opt/af-xdp/afxdp-agent ]; then
+          systemctl enable afxdp-agent 2>/dev/null || true
+          systemctl restart afxdp-agent 2>/dev/null || true
+          echo "afxdp-agent: $(systemctl is-active afxdp-agent 2>/dev/null || echo inactive)"
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: not is_control_plane
+
+    - name: Detach stale XDP programs
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ip link set $IFACE xdp off 2>/dev/null || true
+        ip link set $IFACE xdpgeneric off 2>/dev/null || true
+        ip link set $IFACE xdpdrv off 2>/dev/null || true
+        xdp-loader unload $IFACE --all 2>/dev/null || true
+      when: not is_control_plane
+
+    - name: Reset interface
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ip link set $IFACE down
+        sleep 1
+        ip link set $IFACE up
+        sleep 2
+      when: not is_control_plane
+
+    - name: Set RSS indirection to queue 0
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ethtool -X "${IFACE:-eth0}" equal 1
+      when: not is_control_plane
+
+    - name: Restart replicator service
+      ansible.builtin.systemd:
+        name: replicator.service
+        state: restarted
+        daemon_reload: yes
+      when: not is_control_plane
+
+    - name: Wait for startup
+      ansible.builtin.pause:
+        seconds: 6
+      when: not is_control_plane
+
+    - name: Verify replicator is active
+      ansible.builtin.command: systemctl is-active replicator.service
+      register: svc_status
+      changed_when: false
+      ignore_errors: yes
+      when: not is_control_plane
+
+    - name: Show status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ svc_status.stdout | default('unknown') }}"
+      when: not is_control_plane
+
+    - name: Show journal on failure
+      ansible.builtin.shell: journalctl -u replicator -n 5 --no-pager
+      register: journal
+      when: not is_control_plane and svc_status.stdout != 'active'
+
+    - name: Report failure
+      ansible.builtin.debug:
+        msg: "{{ journal.stdout_lines }}"
+      when: not is_control_plane and svc_status.stdout != 'active'

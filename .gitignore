@@ -442,6 +442,7 @@ Cargo.lock
 
 # Fortran module files
 *.mod
+!**/go.mod
 *.smod
 
 # Compiled Static libraries

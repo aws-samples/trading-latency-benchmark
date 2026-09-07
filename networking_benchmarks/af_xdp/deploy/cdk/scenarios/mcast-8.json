@@ -1,0 +1,10 @@
+[
+  {"az": "a", "pgType": "cluster", "pgName": "cpg-a", "role": "source"},
+  {"az": "a", "pgType": "cluster", "pgName": "cpg-a", "role": "replicator"},
+  {"az": "a", "pgType": "cluster", "pgName": "cpg-a", "role": "destination"},
+  {"az": "a", "role": "replicator"},
+  {"az": "b", "role": "replicator"},
+  {"az": "a", "role": "destination"},
+  {"az": "c", "role": "destination"},
+  {"region":"eu-west-1", "az": "a", "role": "destination"}
+]

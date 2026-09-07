@@ -1,0 +1,221 @@
+# AF_XDP Benchmark - CDK Deployment
+
+Fleet-driven CDK infrastructure for the AF_XDP latency benchmark. Deploys EC2 instances with configurable placement, multi-AZ, and cross-region topologies from JSON scenario files. Includes an AMI builder for pre-baked instances and a control-plane stack for centralized orchestration.
+
+## Architecture
+
+![Deployment Topology](../assets/deployment-topology.svg)
+
+## Structure
+
+| Directory | Description | Details |
+|-----------|-------------|---------|
+| [`lib/`](lib/README.md) | CDK stack constructs (FleetStack, AmiBuilderStack, ControlPlaneStack) | Placement validation, cross-region peering |
+| [`scenarios/`](scenarios/README.md) | Pre-built fleet topologies (u-*, m-*, all) | 7 scenarios, cost estimates, custom format |
+| [`scripts/`](scripts/README.md) | AMI bake script and configs applied | Binaries, sysctl, chrony, systemd units, Go agent |
+| `bin/` | CDK app entry point | Fleet resolution, deployment type routing |
+
+## Prerequisites
+
+- AWS CDK CLI (`npm install -g aws-cdk`)
+- AWS credentials configured (account bootstrapped with `cdk bootstrap`)
+- An EC2 key pair in the target region
+- Node.js 18+
+
+## Deployment Types
+
+Three mutually exclusive `deploymentType` values:
+
+| Type | Context value | Description |
+|------|---------------|-------------|
+| **`fleet`** (default) | `--context scenario=...` or `--context fleet=...` | Deploy EC2 fleet from scenario |
+| **`ami-builder`** | `--context deploymentType=ami-builder` | Build pre-baked AMI (~9 min) |
+| **`control-plane`** | `--context deploymentType=control-plane` | Central NATS + backend + web dashboard |
+
+## Quick Start
+
+```bash
+npm install
+
+# ── Option A: afxdpctl (recommended) ──────────────────────────────────────
+# --admin-cidr defaults to "auto": the caller's public IP is detected and
+# security groups are locked to it, no manual authorize-security-group-ingress.
+afxdpctl up --key virginia --git-repo <repo-url> --git-ref main \
+            --scenario ucast-3 --bake
+
+# ── Option B: manual CDK commands ─────────────────────────────────────────
+
+# 1. Bake AMI (one-time, ~9 min). Re-bake after AMI-level changes - the RT
+#    sysctl and chrony-force-sync.service only exist in AMIs baked with them.
+npx cdk deploy --context deploymentType=ami-builder \
+               --context keyPairName=virginia \
+               --context gitRepo=<repo-url> --context gitRef=main \
+               --context adminCidr=$(curl -s https://checkip.amazonaws.com)/32
+
+# 2. Deploy control plane
+npx cdk deploy --context deploymentType=control-plane \
+               --context keyPairName=virginia \
+               --context gitRepo=<repo-url> --context gitRef=main \
+               --context adminCidr=$(curl -s https://checkip.amazonaws.com)/32
+
+# 3. Deploy fleet (instant readiness - baked AMI resolved from SSM)
+npx cdk deploy --context keyPairName=virginia \
+               --context scenario=ucast-3 \
+               --context adminCidr=$(curl -s https://checkip.amazonaws.com)/32
+
+# 4. Deploy fleet with stock AMI (needs provisioning via ansible)
+npx cdk deploy --context keyPairName=virginia \
+               --context scenario=ucast-3 \
+               --context amiId=ami-xxxxxx
+```
+
+## Fleet Spec
+
+JSON array of `FleetEntry` objects - all fields optional with sensible defaults:
+
+```json
+[{"count": 3, "type": "m8a.2xlarge", "pgType": "cluster", "pgName": "cpg-a"}]
+```
+
+### FleetEntry Schema
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | string | `m8a.2xlarge` | EC2 instance type |
+| `count` | number | `1` | Number of instances to create |
+| `role` | string | `destination` | Logical role: `source`, `replicator`, or `destination` |
+| `az` | string | `a` | AZ suffix (e.g. `"a"`) or full name (e.g. `"us-east-1a"`) |
+| `pgType` | string | none | Placement strategy: `cluster`, `spread`, or `partition` |
+| `pgName` | string | auto | Group label - entries with the same name share a placement group |
+| `region` | string | stack region | AWS region - entries with a different region trigger cross-region peering |
+| `tenancy` | string | `shared` | EC2 tenancy: `shared` (default multi-tenant host), `instance` (Dedicated Instance - single-tenant hardware, no placement control), or `host` (Dedicated Host - see below) |
+| `hostId` | string | none | Only with `tenancy:"host"`. A real AWS host ID (`h-...`, 17 hex chars) targets that exact pre-existing host (no `CfnHost` created); any other string is a logical alias - every entry sharing the alias gets ONE newly-allocated host, even without a real ID. Omit to auto-allocate one host per `(type, AZ)` combination instead. |
+
+`tenancy:"instance"` is compatible with `cluster`/`partition` placement groups,
+not `spread` (AWS restricts spread PGs to default tenancy). `tenancy:"host"`
+has the same restriction. A host-tenancy entry pins its instance(s) to a
+specific physical server via `affinity=host` + `hostId` - the only tenancy
+option with real placement control, as opposed to `instance` tenancy, which
+gives hardware isolation with no visibility into or control over placement.
+
+### Loading a fleet spec
+
+```bash
+# From a scenarios/ file (recommended):
+--context scenario=ucast-3
+
+# From any JSON file:
+--context fleet=@path/to/file.json
+
+# Inline JSON:
+--context fleet='[{"count":2,"pgType":"cluster"}]'
+```
+
+Priority: `fleet` > `scenario`. If neither is provided, CDK errors with a list of available scenarios.
+
+### Cross-region
+
+Entries whose `region` differs from the primary region create a **second** FleetStack in that region, connected via automatic VPC peering. Only **one** secondary region is supported per deployment.
+
+```json
+[
+  {"count": 2, "type": "m8a.2xlarge", "pgType": "cluster", "pgName": "us-cpg"},
+  {"count": 2, "type": "m8a.2xlarge", "pgType": "cluster", "pgName": "eu-cpg", "region": "eu-west-1"}
+]
+```
+
+## Context Parameters (complete reference)
+
+### All deployment types
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `keyPairName` | **(required)** | SSH key pair name (must exist in the target region) |
+| `deploymentType` | `fleet` | One of: `fleet`, `ami-builder`, `control-plane` |
+| `region` | `us-east-1` | Primary AWS region |
+| `stackName` | `XdpStack` | CloudFormation stack name prefix |
+| `adminCidr` | - | CIDR allowed administrative ingress. Applies to the fleet stacks (primary + secondary), the AMI builder, and the control plane - see below |
+
+### `adminCidr` (security group lockdown)
+
+`adminCidr` narrows administrative ingress instead of leaving SSH open to the internet. What it controls per stack:
+
+| Stack | `adminCidr` set | `adminCidr` omitted |
+|-------|-----------------|---------------------|
+| fleet (primary + secondary) | TCP 22 from that CIDR only | TCP 22 from `0.0.0.0/0` |
+| ami-builder | TCP 22 from that CIDR only | TCP 22 from `0.0.0.0/0` |
+| control-plane | TCP 22 **and** TCP 8080 (web + API) from that CIDR only | TCP 22 from `0.0.0.0/0`; 8080 gets **no ingress rule at all** and is reached over SSM port forwarding |
+
+Note that `adminCidr` is the only thing that opens 8080 - `clientCidr` governs NATS (4222) only.
+
+`afxdpctl up` supplies this automatically via `--admin-cidr`, which defaults to the literal string `auto`:
+
+| `--admin-cidr` value | Behaviour |
+|----------------------|-----------|
+| `auto` (default) | Resolves the caller's public IP via `https://checkip.amazonaws.com` and passes `<ip>/32`. If detection fails it prints a notice and passes nothing, falling back to the CDK default rather than failing the deploy |
+| `""` (empty string) | Passes nothing - keeps the CDK default explicitly (8080 closed, SSM port forwarding only) |
+| a CIDR | Admits that fixed address or range |
+
+This replaces the previously-manual `aws ec2 authorize-security-group-ingress` step after deployment.
+
+### Fleet-specific (`deploymentType=fleet`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `scenario` | - | Scenario path (e.g. `ucast-3`) - from `scenarios/` |
+| `fleet` | - | Inline JSON array or `@file.json` path |
+| `amiId` | SSM-resolved | Custom/baked AMI for the primary region |
+| `secondaryAmiId` | SSM-resolved | AMI for the secondary region (synth fails if unresolvable) |
+| `secondaryKeyPairName` | same as `keyPairName` | Key pair in the secondary region |
+| `vpcCidr` | `10.61.0.0/16` | Primary VPC CIDR |
+| `secondaryVpcCidr` | `10.62.0.0/16` | Secondary VPC CIDR |
+| `dataPort` | `5000` | UDP data port for security group rules |
+
+### AMI-builder-specific (`deploymentType=ami-builder`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `instanceType` | `m8a.2xlarge` | Builder instance type |
+| `gitRepo` | `https://github.com/aws-samples/trading-latency-benchmark.git` | Source repo to clone |
+| `gitRef` | `main` | Git ref/branch to build from |
+
+### Control-plane-specific (`deploymentType=control-plane`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `instanceType` | `t3.medium` | Control-plane instance type |
+| `gitRepo` | `https://github.com/aws-samples/trading-latency-benchmark.git` | Source repo to clone |
+| `gitRef` | `main` | Git ref/branch to build from |
+| `clientCidr` | `0.0.0.0/0` | CIDR allowed to reach NATS (4222) - agents dial in from every region the fleet spans |
+| `hostedZoneId` | - | Route53 hosted zone ID (for DNS A record) |
+| `zoneName` | - | Route53 zone name (e.g. `example.com`) |
+| `recordName` | - | DNS record name (e.g. `bench.example.com`) |
+| `natsToken` | auto-generated | NATS auth token (generated on host if omitted) |
+| `natsTls` | `false` | Enable TLS on NATS (self-signed cert; agents skip-verify) |
+
+## Multiple Stacks
+
+Deploy multiple independent fleets by varying `stackName`:
+
+```bash
+npx cdk deploy --context scenario=ucast-3 --context stackName=cpg-bench \
+               --context keyPairName=virginia
+npx cdk deploy --context scenario=all-11 --context stackName=xcpg-bench \
+               --context keyPairName=virginia
+
+# Destroy one:
+npx cdk destroy --context stackName=cpg-bench --context keyPairName=virginia \
+                --context scenario=ucast-3
+```
+
+## Cleanup
+
+```bash
+# Single fleet:
+npx cdk destroy --context keyPairName=virginia --context scenario=ucast-3
+
+# All stacks (via afxdpctl):
+afxdpctl down --key virginia --scenario ucast-3
+```
+
+All resources use `RemovalPolicy.DESTROY` - no manual cleanup needed.

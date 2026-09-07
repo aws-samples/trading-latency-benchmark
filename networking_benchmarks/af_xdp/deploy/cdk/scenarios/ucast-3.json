@@ -1,0 +1,3 @@
+[
+  {"count": 3, "type": "c7i.4xlarge", "pgType": "cluster", "pgName": "cpg-a"}
+]

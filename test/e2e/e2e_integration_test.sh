@@ -306,7 +306,7 @@ else
 
     AMI_BUILD_LOG="${LOG_DIR}/ami_build.log"
 
-    "${DEPLOYMENT_DIR}/build-tuned-ami.sh" \
+    "${DEPLOYMENT_DIR}/scripts/build_tuned_ami.sh" \
         --instance-type "$CLIENT_INSTANCE_TYPE" \
         --key-file "$SSH_KEY_FILE" \
         --region "$REGION" \

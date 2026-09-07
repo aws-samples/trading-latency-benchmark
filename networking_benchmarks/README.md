@@ -8,7 +8,7 @@ A collection of low-latency networking tools for measuring and optimizing packet
 |---------|----------|----------|---------|----------|
 | [ec2_timestamping_programs](#ec2-timestamping-programs) | Kernel sockets + HW timestamps | C | Baseline | Per-hop latency decomposition with Nitro PHC |
 | [open_onload](#open_onload) | OpenOnload kernel bypass | C | — | Feed relay receiver with ENA AF_XDP integration |
-| [af_xdp_zero_copy_perf_benchmark](#af_xdp-zero-copy-performance-benchmark) | AF_XDP + eBPF XDP filters | C++ | Sub-microsecond forwarding | Market data fan-out / packet replicator |
+| [af_xdp](#af_xdp) | AF_XDP + eBPF XDP filters | C++ | Sub-microsecond forwarding | Market data fan-out / packet replicator |
 | [mcast2ucast](#mcast2ucast) | DPDK poll-mode driver | C | ~25 us RTT (metal) | Transparent multicast-over-unicast for AWS VPC |
 | [transit-gateway](#transit-gateway) | AWS TGW multicast (native) | Python / CDK | ~150-200 us OWD | One-way latency benchmark for TGW multicast |
 | [phc_probe](#phc_probe) | SO_TIMESTAMPING + PHC | Python | — | HW vs SW timestamp diagnostic with live graph |
@@ -24,7 +24,7 @@ Exchange / Market Data Source
 +--------------------------------------------------+
 |              Ingress / Feeder Host                |
 |                                                   |
-|  af_xdp_zero_copy  -- eBPF XDP at NIC driver     |
+|  af_xdp  -- eBPF XDP at NIC driver     |
 |  open_onload       -- OpenOnload kernel bypass    |
 |  mcast2ucast       -- DPDK ENA PMD bypass         |
 |  ec2_timestamping  -- kernel sockets (baseline)   |
@@ -140,7 +140,7 @@ PTP hardware timestamping does not work with OpenOnload in `EF_AF_XDP_ZEROCOPY=1
 
 ## af_xdp Zero-Copy Performance Benchmark
 
-**Path:** `af_xdp_zero_copy_perf_benchmark/`
+**Path:** `af_xdp/`
 
 A high-performance UDP packet replicator (fan-out engine) using AF_XDP kernel bypass with eBPF XDP filters. Intercepts market data at the NIC driver level and fans out unicast copies to registered subscribers with sub-microsecond forwarding latency.
 
@@ -156,7 +156,7 @@ A high-performance UDP packet replicator (fan-out engine) using AF_XDP kernel by
 
 ### Quick Start
 ```bash
-cd af_xdp_zero_copy_perf_benchmark && make all
+cd af_xdp && make all
 
 # Start replicator (unicast mode)
 sudo ./packet_replicator eth0 10.0.1.20 5000
