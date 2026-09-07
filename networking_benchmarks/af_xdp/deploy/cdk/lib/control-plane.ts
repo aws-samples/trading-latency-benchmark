@@ -39,7 +39,12 @@ export class ControlPlaneStack extends cdk.Stack {
   constructor(scope: cdk.App, id: string, props: ControlPlaneStackProps) {
     super(scope, id, props);
 
-    const instanceType = props.instanceType ?? 't3.small';
+    // t3.small (2GB RAM) starves under the git-clone + Go build + npm/vite
+    // build that runs once at boot - CPUCreditBalance drops to 0 and the box
+    // throttles to baseline, which can leave SSH/SSM unreachable for many
+    // minutes on a cold boot. t3.medium doubles both RAM and the baseline
+    // CPU credit allocation, which is enough headroom for the one-time build.
+    const instanceType = props.instanceType ?? 't3.medium';
     const gitRepo = props.gitRepo ?? 'https://github.com/aws-samples/trading-latency-benchmark.git';
     const gitRef = props.gitRef ?? 'main';
     const clientCidr = props.clientCidr ?? '0.0.0.0/0';

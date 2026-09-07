@@ -865,7 +865,7 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 			atomic.AddInt64(&msMSettle, time.Since(tSettle).Milliseconds())
 			sres, serr := o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdMcastSend,
 				Mcast: &proto.McastParams{Group: p.Group, DataPort: p.DataPort, ReplicatorIP: replicator.PrivateIP,
-					Count: p.Count, IntervalUs: p.IntervalUs, Size: p.Size, TxQueue: p.TxQueue}}, recvT)
+					Count: p.Count, IntervalUs: p.IntervalUs, Size: p.Size, TxQueue: p.TxQueue, Variation: mode}}, recvT)
 			wg.Wait()
 			atomic.AddInt64(&msMRun, time.Since(tRun).Milliseconds())
 			close(stopWatch)
