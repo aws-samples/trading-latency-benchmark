@@ -594,10 +594,12 @@ int main(int argc, char *argv[])
 
 	/* ── NAPI busy-poll ───────────────────────────────────────────────
 	 * Drive RX in-app so drain latency does not depend on the NIC's
-	 * gro_flush_timeout. With these set, the poll() in the RX loop busy-polls
-	 * the NAPI for up to busy_us and pulls frames the instant they land,
-	 * instead of waiting for the deferred-NAPI timer. Best paired with a small
-	 * gro_flush_timeout (~20µs) as a safety net. Guards mirror XdpSocket. */
+	 * gro_flush_timeout. These options only take effect inside a socket
+	 * syscall, so the RX loop issues recvfrom(MSG_DONTWAIT) on every empty
+	 * ring peek — see the loop below. Without that syscall these setsockopts
+	 * are inert and delivery falls back to the deferred-NAPI timer (~10µs per
+	 * packet). Best paired with a small gro_flush_timeout as a safety net.
+	 * Guards mirror XdpSocket. */
 #ifndef SO_BUSY_POLL
 #define SO_BUSY_POLL 46
 #endif
@@ -683,16 +685,51 @@ int main(int argc, char *argv[])
 
 	struct pollfd pfd = { xsk_fd, POLLIN, 0 };
 
+	/* Idle deadline. The RX loop now busy-polls instead of parking in a
+	 * poll(timeout*1000), so it no longer self-throttles when nothing is
+	 * arriving — without an explicit deadline a stalled run would spin an
+	 * isolated core at 100% until the external `timeout` killed it. Reset on
+	 * every drained batch, so this fires only after `timeout` seconds of no
+	 * progress, matching the give-up semantics the long poll() used to provide. */
+	struct timespec t_idle;
+	clock_gettime(CLOCK_MONOTONIC, &t_idle);
+
 	/* ── RX loop ──────────────────────────────────────────────────────── */
 	while (st.received < count && !g_stop) {
 		uint32_t idx_rx = 0;
 		uint32_t rcvd   = xsk_ring_cons__peek(&rx, BATCH, &idx_rx);
 
 		if (rcvd == 0) {
+			/* App-driven busy-poll, mirroring XdpSocket::receive().
+			 * xsk_ring_cons__peek is a pure userspace ring read, so without
+			 * a socket syscall here SO_BUSY_POLL never engages and frame
+			 * delivery falls back to the gro_flush_timeout deferral timer —
+			 * a fixed ~10us per-packet penalty paid by the AF_XDP RX path
+			 * but NOT by a busy-polled kernel recvfrom(), which silently
+			 * cancelled AF_XDP's advantage in the mcast comparison.
+			 * This recvfrom spins the NAPI poll in this pinned thread for up
+			 * to SO_BUSY_POLL us and also wakes the fill ring when needed.
+			 * Issued on EVERY empty peek (not gated on needs_wakeup) so NAPI
+			 * is driven regardless of fill-ring state. EAGAIN is expected and
+			 * ignored: entering the kernel is the point, not the return value. */
+			recvfrom(xsk_fd, NULL, 0, MSG_DONTWAIT, NULL, NULL);
+			/* Short poll only as a fill-ring wakeup backstop. It must not use
+			 * the run timeout: parking for seconds here would stall the loop
+			 * while frames are arriving, now that the peek no longer blocks. */
 			if (xsk_ring_prod__needs_wakeup(&fq))
-				poll(&pfd, 1, timeout * 1000);
+				poll(&pfd, 1, 1);
+			{
+				struct timespec tn;
+				clock_gettime(CLOCK_MONOTONIC, &tn);
+				if (tn.tv_sec - t_idle.tv_sec >= timeout) {
+					printf("\n[!] no packets for %ds — giving up (received %d/%d)\n",
+					       timeout, st.received, count);
+					break;
+				}
+			}
 			continue;
 		}
+		clock_gettime(CLOCK_MONOTONIC, &t_idle);   /* progress: reset idle deadline */
 
 		for (uint32_t i = 0; i < rcvd && st.received < count; i++) {
 			const struct xdp_desc *desc =
