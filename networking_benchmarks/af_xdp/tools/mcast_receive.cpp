@@ -611,9 +611,23 @@ int main(int argc, char *argv[])
 #endif
 	{
 		int on = 1, busy_us = 50, budget = 64;
-		setsockopt(xsk_fd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &on, sizeof(on));
-		setsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL, &busy_us, sizeof(busy_us));
-		setsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
+		/* Report each result. These were previously set and their return values
+		 * discarded, which hid whether busy-poll was active at all - and an
+		 * inert SO_BUSY_POLL is indistinguishable from a working one except by
+		 * a ~10us per-packet latency difference. Print it so a run's tuning
+		 * state is visible in the log instead of being inferred. */
+		int r_pref = setsockopt(xsk_fd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &on, sizeof(on));
+		int r_busy = setsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL, &busy_us, sizeof(busy_us));
+		int r_budg = setsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
+		printf("busy-poll: SO_PREFER_BUSY_POLL=%s SO_BUSY_POLL(%dus)=%s SO_BUSY_POLL_BUDGET(%d)=%s\n",
+		       r_pref == 0 ? "ok" : strerror(errno),
+		       busy_us, r_busy == 0 ? "ok" : strerror(errno),
+		       budget, r_budg == 0 ? "ok" : strerror(errno));
+		/* Read back what the kernel actually retained. */
+		int rb = 0; socklen_t rl = sizeof(rb);
+		if (getsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL, &rb, &rl) == 0)
+			printf("busy-poll: SO_BUSY_POLL readback=%dus\n", rb);
+		fflush(stdout);
 	}
 
 	if (bpf_map_update_elem(map_fd, &queue, &xsk_fd, BPF_ANY) < 0) {
@@ -700,24 +714,23 @@ int main(int argc, char *argv[])
 		uint32_t rcvd   = xsk_ring_cons__peek(&rx, BATCH, &idx_rx);
 
 		if (rcvd == 0) {
-			/* App-driven busy-poll, mirroring XdpSocket::receive().
-			 * xsk_ring_cons__peek is a pure userspace ring read, so without
-			 * a socket syscall here SO_BUSY_POLL never engages and frame
-			 * delivery falls back to the gro_flush_timeout deferral timer —
-			 * a fixed ~10us per-packet penalty paid by the AF_XDP RX path
-			 * but NOT by a busy-polled kernel recvfrom(), which silently
-			 * cancelled AF_XDP's advantage in the mcast comparison.
-			 * This recvfrom spins the NAPI poll in this pinned thread for up
-			 * to SO_BUSY_POLL us and also wakes the fill ring when needed.
-			 * Issued on EVERY empty peek (not gated on needs_wakeup) so NAPI
-			 * is driven regardless of fill-ring state. EAGAIN is expected and
-			 * ignored: entering the kernel is the point, not the return value. */
-			recvfrom(xsk_fd, NULL, 0, MSG_DONTWAIT, NULL, NULL);
-			/* Short poll only as a fill-ring wakeup backstop. It must not use
-			 * the run timeout: parking for seconds here would stall the loop
-			 * while frames are arriving, now that the peek no longer blocks. */
+			/* App-driven busy-poll. xsk_ring_cons__peek is a pure userspace
+			 * ring read, so without a socket syscall here SO_BUSY_POLL never
+			 * engages and frame delivery falls back to the gro_flush_timeout
+			 * deferral timer - a fixed ~10us per-packet penalty paid by the
+			 * AF_XDP RX path but NOT by a busy-polled kernel recvfrom().
+			 *
+			 * poll() (not recvfrom) is the canonical AF_XDP busy-poll entry
+			 * point: xsk_poll() calls sk_busy_loop() when SO_BUSY_POLL is
+			 * active, running NAPI in this pinned thread. A zero timeout makes
+			 * it one non-blocking pass, so the loop keeps spinning the ring.
+			 * An earlier revision drove this with recvfrom(MSG_DONTWAIT)
+			 * instead and measurably did NOT remove the deferral penalty
+			 * (hop2 stayed ~22-24us vs ~11us with deferral disabled). */
+			poll(&pfd, 1, 0);
+			/* Fill-ring wakeup only when the driver asks for it. */
 			if (xsk_ring_prod__needs_wakeup(&fq))
-				poll(&pfd, 1, 1);
+				recvfrom(xsk_fd, NULL, 0, MSG_DONTWAIT, NULL, NULL);
 			{
 				struct timespec tn;
 				clock_gettime(CLOCK_MONOTONIC, &tn);
