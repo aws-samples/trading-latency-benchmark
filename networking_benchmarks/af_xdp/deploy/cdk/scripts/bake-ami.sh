@@ -71,7 +71,7 @@ else
   cd /tmp/build-src/networking_benchmarks/af_xdp
   make full
   mkdir -p /opt/af-xdp/xdp
-  cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/ 2>/dev/null || true
+  cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send phcsample /opt/af-xdp/ 2>/dev/null || true
   cp -f src/xdp/*.o /opt/af-xdp/xdp/ 2>/dev/null || true
 fi
 
@@ -105,9 +105,18 @@ cat > /etc/modprobe.d/ena-phc.conf <<'EOF'
 options ena enable_llq=1 phc_enable=1
 EOF
 
-# chrony: ensure include directive exists (AL2023 default omits it)
-grep -qE '^include /etc/chrony\.d/\*\.conf' /etc/chrony.conf 2>/dev/null || \
-  echo 'include /etc/chrony.d/*.conf' >> /etc/chrony.conf
+# chrony: make sure /etc/chrony.d is read, WITHOUT adding a duplicate.
+#
+# AL2023's stock /etc/chrony.conf already carries BOTH `confdir /etc/chrony.d`
+# and `sourcedir /etc/chrony.d`. Appending `include /etc/chrony.d/*.conf` on top
+# of that makes chrony parse every drop-in TWICE, which registers the single
+# `refclock PHC` line below as two refclocks - chrony names them PHC0 and PHC1
+# and nodes then disagree on which one they select. Verified live: one refclock
+# on disk, two in `chronyc sources`. See dev/roadmap/precision.md Finding 5.
+#
+# So only add a directive if NONE of the three already covers the directory.
+grep -qE '^[[:space:]]*(confdir|sourcedir|include)[[:space:]]+/etc/chrony\.d' /etc/chrony.conf 2>/dev/null || \
+  echo 'confdir /etc/chrony.d' >> /etc/chrony.conf
 
 # chrony: comment out default NTP server (our config takes over)
 sed -i 's/^server 169\.254\.169\.123/# server 169.254.169.123/' /etc/chrony.conf 2>/dev/null || true
@@ -121,13 +130,46 @@ maxslewrate 500
 rtcsync
 EOF
 
-# chrony: refclock PHC (activated after reboot with phc_enable=1)
+# chrony: refclock PHC (activated after reboot with phc_enable=1).
+#
+# Device path: use the /dev/ptp_ena symlink, NOT /dev/ptp0. PTP device indices
+# depend on hardware initialization order, so /dev/ptp0 is not stable if a
+# second PTP-capable device ever appears; AL2023's udev rule creates ptp_ena
+# precisely to give a stable name.
+#
+# `delay 0.000010` follows AWS's documented recommendation (10us assumed delay,
+# covering OS latency). `trust` is deliberately NOT set: it disables chrony's
+# spike rejection, and AWS's own recommended line omits it. `dpoll -2` is a
+# local tuning (more frequent driver polling) and is kept.
+#
+# Accuracy, measured rather than assumed: chronyd tracks this refclock to
+# ~6-128 ns (System time), but the PHC's own bound against UTC
+# (phc_error_bound) measures 14-30 us and dominates the error budget. A
+# precision-time placement group does NOT improve it - tested and rejected.
+# Relative precision between two hosts is what the benchmarks rely on, at
+# under ~2 us. Full detail: dev/roadmap/precision.md.
+#
+# Do NOT enable chrony's `hwtimestamp` on ENA: the NIC reports
+# `Hardware Transmit Timestamp Modes: none`, so there is no TX hardware
+# timestamp for NTP to use. (Hardware RX packet timestamping is supported and
+# is a separate feature - see precision.md.)
+#
+# NOTE: /dev/ptp_ena does not exist yet at bake time - phc_enable=1 was only
+# just written to modprobe.d and this script never reboots. The device appears
+# on first boot of an instance launched from this AMI. So do NOT test for it
+# here; instead guarantee the udev rule that creates it is present. Recent
+# AL2023 ships this rule already, so add it only when absent (a second
+# SYMLINK rule would be harmless, but duplicated config is exactly the class
+# of bug Finding 5 was).
+if ! grep -rqs 'ena-ptp' /etc/udev/rules.d/ /usr/lib/udev/rules.d/ 2>/dev/null; then
+  echo 'SUBSYSTEM=="ptp", ATTR{clock_name}=="ena-ptp-*", SYMLINK += "ptp_ena"' \
+    > /etc/udev/rules.d/53-ena-ptp.rules
+  echo "=== added ena-ptp udev rule (AL2023 did not ship one) ==="
+else
+  echo "=== ena-ptp udev rule already present; not adding a duplicate ==="
+fi
 cat > /etc/chrony.d/aws-phc.conf <<'EOF'
-# ENA PHC (Nitro hypervisor clock) — ±50-500ns accuracy.
-# Bypasses NTP-UDP; reads PHC device directly.
-# Requires phc_enable=1 (set in /etc/modprobe.d/ena-phc.conf).
-# Do NOT use hwtimestamp on ENA — SIOCSHWTSTAMP not supported.
-refclock PHC /dev/ptp0 poll 0 dpoll -2 trust prefer
+refclock PHC /dev/ptp_ena poll 0 dpoll -2 delay 0.000010 prefer
 EOF
 
 # BPF JIT
@@ -358,21 +400,27 @@ REPLICATOR_MCAST_GROUP=224.0.31.50
 REPLICATOR_ZEROCOPY=true    # AF_XDP zero-copy (ENA-supported); set false to force copy/DRV mode
 EOF
 
-# Force clock sync before anything latency-sensitive starts. The stock
-# chrony config here relies on `makestep 1.0 3` (steps only during the
-# first 3 updates, and only if the offset exceeds 1s) plus `refclock PHC
-# ... trust` (accepts the PHC's reading outright, no spike-rejection
-# filtering). Neither one guarantees the clock is actually converged by
-# the time other units start: a post-boot PHC offset under 1s falls
-# through to gradual slewing bounded by `maxslewrate 500` (500ppm), so a
-# real offset seen live on this fleet post-reboot (53.7ms slow) would take
-# ~107s to fully correct on its own - long enough to run several
-# benchmark cycles against a still-skewed clock. `chronyc waitsync` blocks
-# until chrony reports converged (or the timeout elapses, so this cannot
-# hang a boot indefinitely on a chrony misconfiguration); `makestep` right
-# after is a fast, explicit step for any residual offset that `waitsync`
-# considered "good enough" but is still non-trivial. See dev/roadmap/fix.md's hop1
-# clock-skew section for the RMS-jitter background this closes the gap on.
+# Force clock sync before anything latency-sensitive starts.
+#
+# The stock chrony config relies on `makestep 1.0 3`, which steps only during
+# the first 3 updates AND only if the offset exceeds 1 second. That threshold is
+# the whole problem: a post-boot offset just UNDER 1s is never stepped and is
+# instead slewed off at `maxslewrate 500` (500 ppm). Measured live on this fleet
+# on freshly started nodes: 814 ms and 890 ms offsets, slewing at exactly
+# 500 ppm, i.e. ~1628 s (about 27 minutes) to converge. Any benchmark started in
+# that window silently produces garbage hop1/hop2 splits - the bogus hop1=0 /
+# hop2~=665000us runs in dev/roadmap/fix.md are this defect.
+#
+# Worse, it is invisible to the obvious health check: while 814 ms wrong, the
+# same node reported `Last offset: -81 ns` and `RMS offset: 94 ns`, because those
+# fields describe how well chrony tracks its reference's RATE, not the absolute
+# error outstanding on the system clock. Gate on `System time` instead - see
+# clockOffsetUs() in control_plane/agent/runner.go.
+#
+# `chronyc waitsync` blocks until chrony reports converged (with a timeout, so
+# this cannot hang a boot indefinitely on a chrony misconfiguration), and the
+# `makestep` right after is an explicit step that ignores the 1.0 s threshold
+# entirely. Full analysis: dev/roadmap/precision.md Finding 2.
 cat > /etc/systemd/system/chrony-force-sync.service <<'EOF'
 [Unit]
 Description=Force clock convergence before latency-sensitive services start
@@ -382,10 +430,19 @@ Before=replicator.service afxdp-agent.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/chronyc waitsync 30 0.0001 0 0
-ExecStartPost=/usr/bin/chronyc makestep
+# waitsync's 4th arg is the RETRY INTERVAL in seconds. It was 0, which made
+# chronyc burn all 30 tries within a single second (journal showed try 1..30 at
+# the same timestamp, refid 00000000 = no source selected yet) and exit 1 long
+# before chronyd could converge. Because ExecStart then failed, the
+# ExecStartPost makestep never ran either - the unit did nothing at all. Use a
+# 1 s interval so 30 tries really means ~30 s.
+#
+# Both commands live in one ExecStart so the makestep ALWAYS runs, even if
+# waitsync gives up: a step is exactly what a still-unconverged clock needs, and
+# systemd skips ExecStartPost when ExecStart fails.
+ExecStart=/bin/sh -c 'chronyc waitsync 30 0.0001 0 1 || echo "chrony-force-sync: waitsync did not converge in ~30s; stepping anyway" >&2; exec chronyc makestep'
 RemainAfterExit=yes
-TimeoutStartSec=35
+TimeoutStartSec=45
 
 [Install]
 WantedBy=multi-user.target

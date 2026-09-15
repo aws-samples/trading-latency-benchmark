@@ -100,7 +100,7 @@
         make full
         # Install to /opt/af-xdp for consistent path with baked AMI
         mkdir -p /opt/af-xdp/xdp
-        cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/
+        cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send phcsample /opt/af-xdp/
         cp -f src/xdp/*.o /opt/af-xdp/xdp/
         chown -R ec2-user:ec2-user /home/ec2-user/af_xdp
 
@@ -111,12 +111,28 @@
         content: "options ena enable_llq=1 phc_enable=1\n"
       when: not (rebuild | default(false) | bool)
 
-    - name: Ensure chrony includes drop-in directory
+    # AL2023's stock /etc/chrony.conf already carries BOTH `confdir /etc/chrony.d`
+    # and `sourcedir /etc/chrony.d`. Unconditionally appending
+    # `include /etc/chrony.d/*.conf` on top makes chrony parse every drop-in
+    # TWICE, registering the single `refclock PHC` line below as two refclocks
+    # (chrony names them PHC0/PHC1, and nodes then disagree on which one they
+    # select). See dev/roadmap/precision/precision.md Finding 5 and
+    # bake-ami.sh's matching fix - only add a directive if none of confdir/
+    # sourcedir/include already covers the directory.
+    - name: Check whether /etc/chrony.d is already covered
+      ansible.builtin.command:
+        cmd: grep -qE '^[[:space:]]*(confdir|sourcedir|include)[[:space:]]+/etc/chrony\.d' /etc/chrony.conf
+      register: chrony_dir_covered
+      failed_when: false
+      changed_when: false
+      when: not (rebuild | default(false) | bool)
+
+    - name: Ensure chrony reads /etc/chrony.d (only if not already covered)
       ansible.builtin.lineinfile:
         path: /etc/chrony.conf
-        line: "include /etc/chrony.d/*.conf"
+        line: "confdir /etc/chrony.d"
         state: present
-      when: not (rebuild | default(false) | bool)
+      when: not (rebuild | default(false) | bool) and chrony_dir_covered.rc != 0
 
     - name: Comment out default NTP server
       ansible.builtin.replace:
@@ -134,11 +150,30 @@
           rtcsync
       when: not (rebuild | default(false) | bool)
 
+    # /dev/ptp_ena is a stable symlink for the PHC device (PTP device indices
+    # are not stable if a second PTP-capable device appears). Recent AL2023
+    # ships the udev rule that creates it already; add it only if absent, per
+    # bake-ami.sh's matching guard - a second SYMLINK rule would be harmless
+    # but duplicated config is exactly the class of bug Finding 5 was.
+    - name: Check for an existing ena-ptp udev rule
+      ansible.builtin.command:
+        cmd: grep -rqs ena-ptp /etc/udev/rules.d/ /usr/lib/udev/rules.d/
+      register: ena_ptp_udev_rule
+      failed_when: false
+      changed_when: false
+      when: not (rebuild | default(false) | bool)
+
+    - name: Add ena-ptp udev rule (only if AL2023 did not ship one)
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/53-ena-ptp.rules
+        content: 'SUBSYSTEM=="ptp", ATTR{clock_name}=="ena-ptp-*", SYMLINK += "ptp_ena"'
+      when: not (rebuild | default(false) | bool) and ena_ptp_udev_rule.rc != 0
+
     - name: Write chrony refclock PHC config
       ansible.builtin.copy:
         dest: /etc/chrony.d/aws-phc.conf
         content: |
-          refclock PHC /dev/ptp0 poll 0 dpoll -2 trust prefer
+          refclock PHC /dev/ptp_ena poll 0 dpoll -2 delay 0.000010 prefer
       when: not (rebuild | default(false) | bool)
 
     - name: Write BPF JIT sysctl
