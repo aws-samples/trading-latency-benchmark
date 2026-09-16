@@ -80,13 +80,22 @@ private:
     bool mcast_mode_;         // mcast mode: m2u-tagged unicast UDP carries the multicast group
     // Forward path (REPLICATOR_FWD_MODE env): 0=copy (build packet in a TX-pool frame),
     // 1=inplace (patch the RX frame's headers + TX that same UMEM frame — no payload copy),
-    // 2=kernel (XDP program forwards via XDP_TX; userspace fan-out is bypassed).
+    // 3=kernel (plain UDP sockets end-to-end; no XDP/eBPF anywhere in the mcast path).
     int  fwd_mode_ = 0;
+
+    // kernel fwd mode's RX socket (fwd_mode_==3). Bound once in initialize();
+    // processMcastKernelRx() polls it. -1 for every other fwd mode.
+    int kernel_rx_socket_{-1};
+
+    // kernel fwd mode only changes behavior in mcast mode: unicast delivery has
+    // no equivalent to CTRL_MCAST_JOIN's destination registration, so a plain
+    // kernel RX loop would have no delivery mechanism. See initialize()'s notice
+    // logged when this is false but REPLICATOR_FWD_MODE=kernel was requested.
+    bool kernelFwdActive() const { return fwd_mode_ == 3 && mcast_mode_; }
 
     // ── Dynamic group tracking (mcast mode) / static seed (unicast mode) ─────
     // config_map_fd_: BPF map fd retained after initialize() for runtime updates.
     int config_map_fd_{-1};
-    int fwd_map_fd_{-1};   // kernel XDP_TX forward targets (REPLICATOR_FWD_MODE=kernel)
 
     // Per-group BPF state.  All maps keyed by group IP in network byte order,
     // protected by group_mutex_.  Used by mcast mode only.
@@ -125,24 +134,44 @@ private:
     // Protected by destinations_mutex_.
     std::unordered_map<std::string, Destination> all_destinations_;
     
-    // HFT OPTIMIZATIONS: Thread-local destination cache (per group / unicast)
-    struct alignas(64) ThreadLocalDestCache {
+    // Immutable fan-out snapshot, published by the refresher thread and read by
+    // the packet threads. The hot path only does one acquire load: no clock read,
+    // no mutex, and no ARP resolution, all of which used to run inline on the RX
+    // thread every 100 ms and stalled it.
+    struct DestSnapshot {
         // Maps multicast group NBO → destinations interested in that group.
         std::unordered_map<uint32_t, std::vector<Destination>> group_dests;
-        std::chrono::steady_clock::time_point last_update;
-        bool valid{false};
-        static constexpr std::chrono::milliseconds CACHE_TIMEOUT{100};
     };
-    static thread_local ThreadLocalDestCache dest_cache_;
+    // Retired snapshots stay alive for RETAIN generations before their slot is
+    // reused. A reader holds a snapshot pointer only for the duration of one
+    // packet, so RETAIN x 100 ms is an ample grace period and lets readers run
+    // without any reference counting.
+    static constexpr size_t SNAPSHOT_RETAIN = 8;
+    std::array<std::shared_ptr<DestSnapshot>, SNAPSHOT_RETAIN> snapshot_ring_;
+    size_t snapshot_ring_pos_{0};
+    std::atomic<const DestSnapshot*> dest_snapshot_{nullptr};
+    std::unique_ptr<std::thread> dest_refresh_thread_;
+    static constexpr std::chrono::milliseconds DEST_REFRESH_INTERVAL{100};
+    // Per-thread memo of the last {snapshot, group} lookup, so a steady stream
+    // keyed by one group skips the hash lookup entirely.
+    static thread_local const DestSnapshot* tls_memo_snap_;
+    static thread_local uint32_t tls_memo_group_;
+    static thread_local const std::vector<Destination>* tls_memo_vec_;
     
-    // HFT OPTIMIZATIONS: CPU affinity for threads
+    // CPU cores assigned to packet-processing threads.
     std::vector<int> cpu_cores_;
     bool enable_cpu_affinity_{true};
     
     // Statistics (per-queue and total) - Cache aligned for performance
     static constexpr int MAX_QUEUES = 8;  // Support up to 8 queues
-    alignas(64) std::array<std::atomic<uint64_t>, MAX_QUEUES> packets_received_per_queue_;
-    alignas(64) std::array<std::atomic<uint64_t>, MAX_QUEUES> packets_sent_per_queue_;
+    // Each per-queue counter occupies its own cache line so queue threads do not
+    // invalidate each other's counters. Necessary for correct scaling when RSS delivers
+    // frames across multiple queues on different cores.
+    struct alignas(64) PaddedCounter {
+        std::atomic<uint64_t> v{0};
+    };
+    alignas(64) std::array<PaddedCounter, MAX_QUEUES> packets_received_per_queue_;
+    alignas(64) std::array<PaddedCounter, MAX_QUEUES> packets_sent_per_queue_;
     alignas(64) std::atomic<uint64_t> packets_received_;
     alignas(64) std::atomic<uint64_t> packets_sent_;
     alignas(64) std::atomic<uint64_t> bytes_received_;
@@ -300,6 +329,14 @@ private:
     void processPacketsForQueue(int queueId);
 
     /**
+     * REPLICATOR_FWD_MODE=kernel RX loop: one thread, one plain UDP socket,
+     * no AF_XDP/eBPF anywhere in the path. poll()-with-timeout so stop() is
+     * never blocked on a recvfrom() that may never return. Mirrors
+     * processPacketsForQueue's role but for the kernel-socket transport.
+     */
+    void processMcastKernelRx();
+
+    /**
      * Handle control protocol messages
      */
     void handleControlProtocol();
@@ -333,6 +370,26 @@ private:
     bool extractUdpPayloadMulticast(const uint8_t* packetData, size_t packetLen,
                               const uint8_t*& payloadData, size_t& payloadLen,
                               uint32_t& group_nbo);
+
+    /**
+     * Transport-agnostic m2u frame processing: reads the m2u magic/group at
+     * the start of m2u_data and stamps replicator_ns into the app payload.
+     * Does NOT unwrap Eth/IP/UDP — the caller must already have positioned
+     * m2u_data at the m2u header (AF_XDP: after extractUdpPayloadMulticast;
+     * kernel socket: recvfrom()'s buffer already starts here, the kernel
+     * stripped Eth/IP/UDP before userspace ever sees it).
+     * Shared by replicatePacket (AF_XDP) and processMcastKernelRx (kernel fwd mode).
+     *
+     * @param m2u_data    Buffer starting at the 8-byte m2u header.
+     * @param m2u_len     Length of m2u_data.
+     * @param payload_data Output: same as m2u_data (payload is emitted [m2u|app] verbatim).
+     * @param payload_len  Output: length of the m2u+app payload, clamped to m2u_len.
+     * @param group_nbo    Output: multicast group, network byte order.
+     * @return false if m2u_data is too short or the magic doesn't match.
+     */
+    bool processMcastFrame(const uint8_t* m2u_data, size_t m2u_len,
+                            const uint8_t*& payload_data, size_t& payload_len,
+                            uint32_t& group_nbo);
 
     /**
      * Fallback method using regular socket when zero-copy fails
@@ -381,13 +438,19 @@ private:
      */
     bool patchHeadersInPlace(const Destination& destination, uint8_t* frame, size_t frame_len);
 
-    /**
-     * Populate/clear the kernel XDP_TX forward target (REPLICATOR_FWD_MODE=kernel)
-     * for the config_map slot of `group_nbo`, so mcast.o forwards this group's
-     * frames to `dest` entirely in the kernel. No-op unless fwd_mode_ == kernel.
-     */
-    void updateKernelFwdTarget(uint32_t group_nbo, const Destination& dest, bool enable);
+    // Fan-out snapshot publisher: rebuilds off the RX thread and publishes.
+    void destRefreshLoop();
+    void publishDestSnapshot();
 
+    // Sum of the invariant IPv4 header words for this payload size, with daddr
+    // and check as zero. Each copy then folds in only its own daddr.
+    uint32_t ipCsumInvariantBase(size_t payloadLen) const;
+
+    // Build one fan-out copy into `buffer`, reusing the batch's checksum base and
+    // TX timestamp. Returns the frame length, or 0 if it would not fit.
+    size_t buildCopyFrame(const Destination& destination, const uint8_t* payload, size_t payloadLen,
+                          uint8_t* buffer, size_t bufferSize,
+                          uint32_t ipCsumBase, uint64_t txNsBe);
 
     /**
      * Process control message
@@ -475,7 +538,6 @@ private:
      * mcast mode: from group_destinations_.
      * Unicast mode: from all_destinations_ keyed by listen_ip_nbo_.
      */
-    void updateDestinationCache();
 };
 
 #endif // PACKET_REPLICATOR_HPP

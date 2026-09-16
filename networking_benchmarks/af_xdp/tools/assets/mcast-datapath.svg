@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 440" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12">
+  <rect width="900" height="440" fill="#fafafa"/>
+  <text x="450" y="28" text-anchor="middle" font-size="15" font-weight="bold" fill="#2e7d32">Multicast One-Way Measurement  (mcast_send → replicator → mcast_receive)</text>
+  <text x="450" y="46" text-anchor="middle" font-size="11" fill="#555">Cross-host path — requires PHC/chrony sync on all hosts (~µs accuracy)</text>
+
+  <defs>
+    <marker id="ag" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><path d="M0,0 L7,2.5 L0,5Z" fill="#2e7d32"/></marker>
+    <marker id="ao" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><path d="M0,0 L7,2.5 L0,5Z" fill="#e65100"/></marker>
+  </defs>
+
+  <!-- mcast_send -->
+  <rect x="20" y="68" width="240" height="200" rx="8" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.5"/>
+  <text x="140" y="88" text-anchor="middle" font-weight="bold" fill="#1b5e20">SOURCE: mcast_send</text>
+  <text x="30" y="110" font-weight="600" fill="#333">[M1] Build m2u frame in UMEM</text>
+  <text x="30" y="126" fill="#333">Eth|IPv4|UDP|m2u{magic,group}|AppHdr</text>
+  <text x="30" y="146" font-weight="600" fill="#333">[M2] Pace (clock_nanosleep ABSTIME)</text>
+  <text x="30" y="162" fill="#333">-i interval_us absolute cadence</text>
+  <text x="30" y="182" font-weight="600" fill="#333">[M3] Stamp + AF_XDP TX</text>
+  <text x="30" y="198" fill="#333">ts_ns = CLOCK_REALTIME</text>
+  <text x="30" y="214" fill="#333">immediately before submit</text>
+  <text x="30" y="234" font-size="10" fill="#666">sfence → DMA-visible ordering</text>
+  <text x="30" y="250" font-size="10" fill="#666">Unicast to -D &lt;replicator-ip&gt;</text>
+  <text x="30" y="262" font-size="10" fill="#666">ARP-resolved dst MAC at startup</text>
+
+  <!-- Wire 1 -->
+  <line x1="260" y1="168" x2="316" y2="168" stroke="#2e7d32" stroke-width="2" marker-end="url(#ag)"/>
+  <text x="272" y="160" font-size="10" fill="#2e7d32">unicast</text>
+
+  <!-- Replicator (mcast mode) -->
+  <rect x="320" y="68" width="260" height="200" rx="8" fill="#fff3e0" stroke="#e65100" stroke-width="1.5"/>
+  <text x="450" y="88" text-anchor="middle" font-weight="bold" fill="#e65100">REPLICATOR (--mcast)</text>
+  <text x="330" y="110" fill="#333">mcast.o (XDP): parse m2u header</text>
+  <text x="330" y="126" fill="#333">Match {group,port} in config_map</text>
+  <text x="330" y="146" font-weight="600" fill="#333">Stamp replicator_ns at RX entry</text>
+  <text x="330" y="162" fill="#333">  = hop1 boundary marker</text>
+  <text x="330" y="182" fill="#333">AF_XDP redirect → userspace fan-out</text>
+  <text x="330" y="202" font-weight="600" fill="#333">Stamp replicator_tx_ns at TX</text>
+  <text x="330" y="218" fill="#333">  = hop2 start boundary</text>
+  <text x="330" y="238" fill="#333">Replicate to K destinations</text>
+  <text x="330" y="256" font-size="10" fill="#666">(unicast per dest, ENA has no L2 mcast)</text>
+
+  <!-- Wire 2 -->
+  <line x1="580" y1="168" x2="636" y2="168" stroke="#e65100" stroke-width="2" marker-end="url(#ao)"/>
+  <text x="592" y="160" font-size="10" fill="#e65100">×K unicast</text>
+
+  <!-- mcast_receive -->
+  <rect x="640" y="68" width="240" height="200" rx="8" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.5"/>
+  <text x="760" y="88" text-anchor="middle" font-weight="bold" fill="#1b5e20">DEST: mcast_receive</text>
+  <text x="650" y="110" font-weight="600" fill="#333">[M4] Own mcast.o + config_map</text>
+  <text x="650" y="126" fill="#333">Seeds {group,port} filter → XDP redirect</text>
+  <text x="650" y="146" font-weight="600" fill="#333">[M5] AF_XDP RX (busy-poll NAPI)</text>
+  <text x="650" y="162" fill="#333">rx_ns = CLOCK_REALTIME at dequeue</text>
+  <text x="650" y="182" font-weight="600" fill="#333">[M6] Per-hop latency</text>
+  <text x="650" y="198" fill="#333">hop1 = repl_ns − ts_ns</text>
+  <text x="650" y="214" fill="#333">hop2 = rx_ns − repl_tx_ns</text>
+  <text x="650" y="230" fill="#333">total = rx_ns − ts_ns</text>
+  <text x="650" y="250" font-weight="600" fill="#333">[M7] Percentiles + JSON</text>
+  <text x="650" y="264" font-size="10" fill="#666">Counts negative hop2 (clock-skew guard)</text>
+
+  <!-- Latency breakdown bar -->
+  <rect x="20" y="296" width="860" height="56" rx="6" fill="#eceff1" stroke="#546e7a"/>
+  <text x="450" y="314" text-anchor="middle" font-weight="bold" fill="#37474f">Per-Hop Latency Breakdown</text>
+  <!-- hop1 -->
+  <rect x="40" y="322" width="260" height="20" rx="3" fill="#a5d6a7"/>
+  <text x="170" y="336" text-anchor="middle" font-size="11" fill="#1b5e20">hop1: replicator_ns − ts_ns</text>
+  <!-- proc -->
+  <rect x="310" y="322" width="140" height="20" rx="3" fill="#ffe0b2"/>
+  <text x="380" y="336" text-anchor="middle" font-size="11" fill="#e65100">proc: repl_tx − repl_ns</text>
+  <!-- leg2 -->
+  <rect x="460" y="322" width="260" height="20" rx="3" fill="#b2dfdb"/>
+  <text x="590" y="336" text-anchor="middle" font-size="11" fill="#00695c">leg2: rx_ns − replicator_tx_ns</text>
+  <!-- total -->
+  <rect x="730" y="322" width="140" height="20" rx="3" fill="#e1bee7"/>
+  <text x="800" y="336" text-anchor="middle" font-size="11" fill="#6a1b9a">total: rx_ns − ts_ns</text>
+
+  <!-- On-wire format -->
+  <rect x="20" y="370" width="860" height="56" rx="6" fill="#f5f5f5" stroke="#9e9e9e"/>
+  <text x="30" y="390" font-weight="bold" fill="#424242">On-Wire (m2u frame):</text>
+  <text x="30" y="410" font-family="monospace" font-size="11" fill="#333">Eth(14) │ IPv4(20) │ UDP(8) │ m2u{ magic "M2CU"(4) + group(4) } │ AppHdr{ seq(8) ts_ns(8) replicator_ns(8) replicator_tx_ns(8) }</text>
+  <text x="30" y="422" font-size="10" fill="#666">All AppHdr fields big-endian uint64.  Min frame = 82 bytes.  replicator_ns/replicator_tx_ns zeroed by sender; written in-flight by replicator.</text>
+</svg>

@@ -21,66 +21,77 @@
 // zero-copy AF_XDP TX, kernel fallback, and packet build / in-place patch.
 
 #include "Internal.hpp"
-
-// HFT OPTIMIZED: Removed processPackets() method - using processPacketsForQueue() instead
+#include "common/wire.h"   // S1: the ONE definition of the m2u wire format
+#include <poll.h>
+#include <linux/net_tstamp.h>  // SOF_TIMESTAMPING_RX_SOFTWARE / SOF_TIMESTAMPING_SOFTWARE (kernel fwd mode RX socket tuning)
 
 void Replicator::processPacketsForQueue(int queueId) {
     std::cout << "HFT-optimized packet processing thread started for queue " << queueId << std::endl;
     
-    // HFT OPTIMIZATION: Pre-allocate batch vectors with cache-aligned memory.
-    // mcast mode: source sends multi-hundred-frame bursts — use 256 to drain in one peek.
-    // Unicast mode: sparse arrivals; 64 is never the limiting factor.
-    // 256 fits well within the 2048-frame RX UMEM partition (256 in-flight + 1792 in fill queue).
-    const int rx_batch = mcast_mode_ ? 256 : 64;
-    alignas(64) std::vector<int> offsets(rx_batch);
-    alignas(64) std::vector<int> lengths(rx_batch);
+    // Batch size: 256 drains a mcast burst in one peek (source sends 100–256 frames).
+    // 64 is enough for sparse ucast arrivals. Both fit within the 2048-frame RX UMEM.
+    // S4: these are plain heap vectors sized once, outside the loop. The previous
+    // code wrote `alignas(64) std::vector<int>` and claimed "cache-aligned memory",
+    // which is not what that does — alignas applies to the ~24-byte vector object,
+    // not to its heap buffer. Dropping the false claim rather than pretending:
+    // XdpSocket::receive() takes std::vector<int>&, and for a small int array of
+    // descriptor offsets the allocator's default alignment is not a hot-path factor.
+    static constexpr int MAX_RX_BATCH = 256;
+    const int rx_batch = mcast_mode_ ? MAX_RX_BATCH : 64;
+    std::vector<int> offsets(rx_batch);
+    std::vector<int> lengths(rx_batch);
     
-    // HFT OPTIMIZATION: Pre-calculate TX frames for bitwise operations
+    // tx_frames must be a power of 2 so (tx_idx & mask) * FRAME_SIZE gives the UMEM address.
     const uint32_t tx_frames = 2048;  // Must be power of 2
     static_assert((tx_frames & (tx_frames - 1)) == 0, "tx_frames must be power of 2");
     
     while (__builtin_expect(running_.load(std::memory_order_relaxed), 1)) {
         try {
-            // HFT OPTIMIZATION: Receive packets from AF_XDP socket for this specific queue
             int received = xdp_sockets_[queueId]->receive(offsets, lengths);
             
-            if (__builtin_expect(received > 0, 1)) {  // Branch prediction hint: packets expected
-                // HFT OPTIMIZATION: Prefetch next batch of packet data
+            if (__builtin_expect(received > 0, 1)) {
+                // Prefetch the second packet while processing the first.
                 if (__builtin_expect(received > 1, 1)) {
                     uint8_t* next_packet = xdp_sockets_[queueId]->getUmemBuffer() + offsets[1];
                     __builtin_prefetch(next_packet, 0, 3);  // Prefetch for read, high temporal locality
                 }
                 
+                // P4: accumulate in locals and publish ONCE per drained batch,
+                // instead of three atomic RMWs per packet.
+                uint64_t batch_bytes = 0;
+                int      batch_sent  = 0;
+
                 // Process each packet with optimized loop
                 for (int i = 0; i < received; i++) {
                     uint8_t* packet_data = xdp_sockets_[queueId]->getUmemBuffer() + offsets[i];
                     size_t packet_len = lengths[i];
-                    
-                    // HFT OPTIMIZATION: Prefetch next packet data
+
+                    // Prefetch the next packet while processing the current one.
                     if (__builtin_expect(i + 1 < received, 1)) {
                         uint8_t* next_packet = xdp_sockets_[queueId]->getUmemBuffer() + offsets[i + 1];
                         __builtin_prefetch(next_packet, 0, 3);
                     }
-                    
-                    // HFT OPTIMIZATION: Update per-queue and total statistics with relaxed memory ordering
-                    packets_received_per_queue_[queueId].fetch_add(1, std::memory_order_relaxed);
-                    packets_received_.fetch_add(1, std::memory_order_relaxed);
-                    bytes_received_.fetch_add(packet_len, std::memory_order_relaxed);
-                    
-                    // HFT OPTIMIZATION: Replicate the packet to all destinations using lock-free cache
+
+                    batch_bytes += packet_len;
+
+                    // Replicate the packet to all destinations using the lock-free cache
                     int sent_count = replicatePacket(packet_data, packet_len, queueId);
-                    
-                    if (__builtin_expect(sent_count > 0, 1)) {  // Branch prediction: expect successful sends
-                        packets_sent_per_queue_[queueId].fetch_add(sent_count, std::memory_order_relaxed);
+                    if (__builtin_expect(sent_count > 0, 1)) {
+                        batch_sent += sent_count;
                     }
                 }
+
+                packets_received_per_queue_[queueId].v.fetch_add((uint64_t)received, std::memory_order_relaxed);
+                packets_received_.fetch_add((uint64_t)received, std::memory_order_relaxed);
+                bytes_received_.fetch_add(batch_bytes, std::memory_order_relaxed);
+                if (batch_sent > 0)
+                    packets_sent_per_queue_[queueId].v.fetch_add((uint64_t)batch_sent, std::memory_order_relaxed);
                 
                 // Recycle the frames back to the fill queue
                 xdp_sockets_[queueId]->recycleFrames();
             } else {
-                // HFT OPTIMIZATION: Busy polling with CPU pause instead of sleep
-                // This keeps the CPU active for lowest possible latency
-                __builtin_ia32_pause();  // Pause CPU to reduce power and avoid busy-wait penalties
+                // No frames available; yield the pipeline without a context switch.
+                __builtin_ia32_pause();
             }
         } catch (const std::exception& e) {
             if (__builtin_expect(running_.load(std::memory_order_relaxed), 1)) {
@@ -92,26 +103,56 @@ void Replicator::processPacketsForQueue(int queueId) {
             }
         }
         
-        // HFT OPTIMIZATION: *** REMOVED 100μs SLEEP *** - Now using busy polling for minimal latency
-        // The __builtin_ia32_pause() above provides the CPU hints without blocking
     }
     
     std::cout << "HFT-optimized packet processing thread stopped for queue " << queueId << std::endl;
 }
 
-int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId) {
-    // Capture RX time at entry — before header parsing — so replicator_ns marks
-    // the dequeue instant, not the post-parse instant. Keeps the hop1/hop2 split
-    // (source->replicator vs replicator->dest) from charging parse cost to hop1.
-    uint64_t replicator_ns_be = 0;
-    if (mcast_mode_) {
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        uint64_t ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
-                    + static_cast<uint64_t>(ts.tv_nsec);
-        replicator_ns_be = __builtin_bswap64(ns);  // to big-endian (x86 is LE)
-    }
+// UMEM frame stride. Must match the size XdpSocket registers per frame.
+static constexpr uint64_t FRAME_SIZE = 4096;
 
+bool Replicator::processMcastFrame(const uint8_t* m2u_data, size_t m2u_len,
+                                    const uint8_t*& payload_data, size_t& payload_len,
+                                    uint32_t& group_nbo) {
+    // Capture RX time at entry — before parsing — so replicator_ns marks the
+    // dequeue instant (AF_XDP ring pop, or recvfrom() return under kernel fwd
+    // mode), not the post-parse instant. Keeps the hop1/hop2 split (source->
+    // replicator vs replicator->dest) from charging parse cost to hop1.
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
+                + static_cast<uint64_t>(ts.tv_nsec);
+    uint64_t replicator_ns_be = __builtin_bswap64(ns);  // to big-endian (x86 is LE)
+
+    // m2u_data must already be positioned at the 8-byte m2u header (magic+group).
+    // The AF_XDP path arrives here via extractUdpPayloadMulticast, which already
+    // validated the magic while unwrapping Eth/IP/UDP; the kernel fwd mode's
+    // recvfrom() buffer starts here directly (the kernel already stripped
+    // Eth/IP/UDP), so this magic check is the ONLY validation for that path —
+    // not redundant defense-in-depth in that case.
+    if (m2u_len < WIRE_M2U_HDR_LEN)
+        return false;
+    uint32_t magic;
+    memcpy(&magic, m2u_data, 4);
+    if (ntohl(magic) != WIRE_M2U_MAGIC)
+        return false;
+    memcpy(&group_nbo, m2u_data + WIRE_M2U_GROUP_OFF, 4);
+
+    payload_data = m2u_data;   // [m2u(8) | app payload]
+    payload_len  = m2u_len;
+
+    // Write the entry-captured RX time into the app payload's replicator_ns
+    // slot (payload[16..23], i.e. +8 past the m2u header). The sender zeroed
+    // the slot; the receiver uses it to split reported latency into hop1
+    // (source->replicator) and hop2 (replicator->destination).
+    if (payload_len >= WIRE_M2U_HDR_LEN + WIRE_APP_HDR_LEN) {
+        memcpy(const_cast<uint8_t*>(payload_data)
+                   + WIRE_M2U_HDR_LEN + WIRE_APP_REPL_NS_OFF, &replicator_ns_be, 8);
+    }
+    return true;
+}
+
+int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId) {
     const uint8_t* payload_data = nullptr;
     size_t payload_len = 0;
     uint32_t group_nbo = 0;
@@ -120,16 +161,14 @@ int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int
         return 0; // Not a valid UDP packet
     }
 
-    // m2u mode: write the entry-captured RX time into the app payload's
-    // replicator_ns slot (payload[16..23]). payload_data points at the 8-byte
-    // m2u header, so the app payload starts at +8. The sender zeroed the slot;
-    // the receiver uses it to split reported latency into hop1 (source->replicator)
-    // and hop2 (replicator->destination).
+    // mcast mode: extractUdpPayload (via extractUdpPayloadMulticast) already
+    // unwrapped Eth/IP/UDP and left payload_data at the m2u header.
+    // processMcastFrame does the RX-stamp + m2u parse — shared with
+    // processMcastKernelRx (REPLICATOR_FWD_MODE=kernel), which calls it
+    // directly on a recvfrom() buffer that has no Eth/IP/UDP to unwrap.
     if (mcast_mode_) {
-        static constexpr size_t M2U_HDR = 8;
-        if (payload_len >= M2U_HDR + 24) {  // m2u + HDR_SIZE
-            memcpy(const_cast<uint8_t*>(payload_data) + M2U_HDR + 16, &replicator_ns_be, 8);
-        }
+        if (!processMcastFrame(payload_data, payload_len, payload_data, payload_len, group_nbo))
+            return 0;
     }
 
     // Per-group fan-out: only send to destinations that joined this multicast group via IGMP.
@@ -140,37 +179,111 @@ int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int
     }
 
     int sent_count = 0;
+    XdpSocket* sock = (queueId >= 0 && queueId < num_queues_) ? xdp_sockets_[queueId].get() : nullptr;
+    if (!sock) {
+        for (const Destination& dest : current_destinations)
+            if (sendToDestinationFallback(dest, payload_data, payload_len)) sent_count++;
+        return sent_count;
+    }
+
     // Drain TX completions once per batch (frees ring slots for all K destinations)
-    // rather than once per destination inside sendSinglePacketDirect().
-    xdp_sockets_[queueId]->pollTxCompletions();
+    // rather than once per destination.
+    sock->pollTxCompletions();
+
     const size_t ndest = current_destinations.size();
-    for (size_t di = 0; di < ndest; di++) {
-        const Destination& dest = current_destinations[di];
-        // In-place zero-copy forward (REPLICATOR_FWD_MODE=inplace): the RX frame can
-        // only be transmitted once, so use it for the LAST destination and copy the
-        // rest. Falls back to the copy path if patch/submit fails.
-        if (fwd_mode_ == 1 && di + 1 == ndest) {
-            uint64_t rx_addr = static_cast<uint64_t>(
-                packetData - xdp_sockets_[queueId]->getUmemBuffer());
-            if (patchHeadersInPlace(dest, const_cast<uint8_t*>(packetData), packetLen)
-                && xdp_sockets_[queueId]->forwardFrameInPlace(rx_addr, static_cast<uint32_t>(packetLen))) {
-                sent_count++;
-                packets_sent_++;
-                bytes_sent_ += payload_len;
-                continue;
-            }
-        }
-        if (sendToDestinationWithQueue(dest, payload_data, payload_len, queueId)) {
+    size_t first_copy = 0;
+
+    // In-place zero-copy forward (REPLICATOR_FWD_MODE=inplace). The RX frame can be
+    // transmitted once, and it goes to destination 0 so the zero-copy path serves the
+    // FIRST destination out rather than the one that already waited behind every copy.
+    // The payload is stashed first because submitting the frame hands it to the NIC.
+    alignas(64) uint8_t stash[FRAME_SIZE];
+    const uint8_t* copy_src = payload_data;
+    if (fwd_mode_ == 1 && ndest > 0 && payload_len <= sizeof(stash)) {
+        memcpy(stash, payload_data, payload_len);
+        const uint64_t rx_addr = static_cast<uint64_t>(packetData - sock->getUmemBuffer());
+        if (patchHeadersInPlace(current_destinations[0], const_cast<uint8_t*>(packetData), packetLen)
+            && sock->forwardFrameInPlace(rx_addr, static_cast<uint32_t>(packetLen))) {
             sent_count++;
-            packets_sent_++;
-            bytes_sent_ += payload_len;
+            first_copy = 1;
+            copy_src = stash;   // RX frame now belongs to TX
         }
     }
 
-    // One driver kick after all K destinations have been queued — avoids K-1 redundant
-    // needs_wakeup checks and potential sendto syscalls inside the per-destination loop.
+    if (first_copy < ndest) {
+        // Frame size depends only on payload_len, so validate once for the whole
+        // batch. This keeps the reserve/submit counts exactly equal below.
+        const size_t frame_len = WIRE_ETH_LEN + WIRE_IP_LEN + WIRE_UDP_LEN + payload_len;
+        if (frame_len > FRAME_SIZE) {
+            for (size_t di = first_copy; di < ndest; di++)
+                if (sendToDestinationFallback(current_destinations[di], copy_src, payload_len)) sent_count++;
+        } else {
+            // Destinations whose ARP has not resolved carry a broadcast MAC, which
+            // ENA/VPC drops; they go through the kernel socket and must NOT consume a
+            // reserved TX slot. Count the eligible ones so reserve == submit exactly:
+            // a mismatch permanently desyncs the ring's cached and real producer.
+            static constexpr uint8_t BROADCAST_MAC[ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+            size_t nxdp = 0;
+            for (size_t di = first_copy; di < ndest; di++)
+                if (memcmp(current_destinations[di].mac, BROADCAST_MAC, ETH_ALEN) != 0) nxdp++;
+
+            // One CLOCK_REALTIME read for the batch instead of one per destination:
+            // the copies are submitted together, so they share a TX instant.
+            uint64_t tx_ns_be = 0;
+            if (mcast_mode_) {
+                struct timespec ts;
+                clock_gettime(CLOCK_REALTIME, &ts);
+                tx_ns_be = __builtin_bswap64(static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
+                                             + static_cast<uint64_t>(ts.tv_nsec));
+            }
+            // Invariant part of the IPv4 checksum, computed once; each copy folds in
+            // only its own daddr rather than re-summing the whole header.
+            const uint32_t csum_base = ipCsumInvariantBase(payload_len);
+
+            // One TX slot at a time, as before. Reserving K slots up front was
+            // tried and reverted: it produced frames the destinations never
+            // received (see the audit notes), and the win was not worth shipping
+            // an unverified fan-out. The per-batch completion drain, single driver
+            // kick, single clock read and shared checksum base all still apply.
+            (void)nxdp;
+            static constexpr uint64_t TX_FRAMES_MASK = XdpSocket::DEFAULT_TX_FRAMES - 1;
+            for (size_t di = first_copy; di < ndest; di++) {
+                const Destination& dest = current_destinations[di];
+                if (memcmp(dest.mac, BROADCAST_MAC, ETH_ALEN) == 0) {
+                    if (sendToDestinationFallback(dest, copy_src, payload_len)) sent_count++;
+                    continue;
+                }
+                uint32_t tx_idx = 0;
+                if (sock->reserveTxRing(1, &tx_idx) != 1) {
+                    sock->requestDriverPoll();
+                    sock->pollTxCompletions();
+                    if (sock->reserveTxRing(1, &tx_idx) != 1) {
+                        if (sendToDestinationFallback(dest, copy_src, payload_len)) sent_count++;
+                        continue;
+                    }
+                }
+                const uint64_t addr = (static_cast<uint64_t>(tx_idx) & TX_FRAMES_MASK) * FRAME_SIZE;
+                uint8_t* buf = sock->getUmemBuffer() + addr;
+                const size_t len = buildCopyFrame(dest, copy_src, payload_len, buf, FRAME_SIZE,
+                                                  csum_base, tx_ns_be);
+                if (len == 0) continue;
+                sock->setTxDescriptor(tx_idx, addr, len);
+                sock->submitTxRing(1);
+                sent_count++;
+            }
+        }
+    }
+
+    // Fold the per-destination counter updates into ONE relaxed RMW each.
+    if (sent_count > 0) {
+        packets_sent_.fetch_add(static_cast<uint64_t>(sent_count), std::memory_order_relaxed);
+        bytes_sent_.fetch_add(static_cast<uint64_t>(sent_count) * payload_len,
+                              std::memory_order_relaxed);
+    }
+
+    // One driver kick once every destination is queued.
     if (sent_count > 0)
-        xdp_sockets_[queueId]->requestDriverPoll();
+        sock->requestDriverPoll();
 
     return sent_count;
 }
@@ -182,9 +295,9 @@ bool Replicator::extractUdpPayloadMulticast(const uint8_t* packetData, size_t pa
     // (Historical name kept; the wire format is the flat 8-byte m2u header.)
     // payloadData is set to the m2u header start so the fan-out path can
     // re-emit [m2u | app-payload] verbatim via createUdpPacket().
-    static constexpr size_t   M2U_HDR   = 8;            // magic(4) + group(4)
-    static constexpr uint32_t M2U_MAGIC = 0x4D324355;   // "M2CU"
-    static constexpr size_t   MIN_PKT   = 14 + 20 + 8 + M2U_HDR;
+    static constexpr size_t   M2U_HDR   = WIRE_M2U_HDR_LEN;   // magic(4) + group(4)
+    static constexpr uint32_t M2U_MAGIC = WIRE_M2U_MAGIC;     // "M2CU"
+    static constexpr size_t   MIN_PKT   = WIRE_PAYLOAD_OFF;
     if (packetLen < MIN_PKT)
         return false;
 
@@ -211,7 +324,7 @@ bool Replicator::extractUdpPayloadMulticast(const uint8_t* packetData, size_t pa
     memcpy(&magic, m2u, 4);
     if (ntohl(magic) != M2U_MAGIC)
         return false;
-    memcpy(&group_nbo, m2u + 4, 4);   // network byte order multicast group
+    memcpy(&group_nbo, m2u + WIRE_M2U_GROUP_OFF, 4);   // network byte order multicast group
 
     // UDP-declared payload length (m2u + app), clamped to the received frame.
     size_t udp_len = ntohs(udp->len);
@@ -297,11 +410,101 @@ bool Replicator::sendToDestinationFallback(const Destination& destination, const
     return sent == static_cast<ssize_t>(length);
 }
 
+void Replicator::processMcastKernelRx() {
+    std::cout << "kernel fwd-mode RX thread started on port " << listen_port_ << std::endl;
+
+    // Socket tuning: apply the AF_XDP RX path's existing busy-poll parity
+    // (see XdpSocket.cpp's openSocket — same constants) plus the two options
+    // genuinely new to this mode (SO_RCVBUF, SO_TIMESTAMPING). RLIMIT_MEMLOCK
+    // and CPU pinning are process-wide/thread-wide and already applied
+    // elsewhere (XdpSocket::setResourceLimits() at startup; setCpuAffinity()
+    // by the caller of this thread) — not repeated here.
+#ifndef SO_BUSY_POLL
+#define SO_BUSY_POLL 46
+#endif
+#ifndef SO_PREFER_BUSY_POLL
+#define SO_PREFER_BUSY_POLL 69
+#endif
+#ifndef SO_BUSY_POLL_BUDGET
+#define SO_BUSY_POLL_BUDGET 70
+#endif
+    {
+        int on = 1, busy_us = 50, budget = 64, rcvbuf = 4 * 1024 * 1024;
+        setsockopt(kernel_rx_socket_, SOL_SOCKET, SO_PREFER_BUSY_POLL, &on, sizeof(on));
+        setsockopt(kernel_rx_socket_, SOL_SOCKET, SO_BUSY_POLL, &busy_us, sizeof(busy_us));
+        setsockopt(kernel_rx_socket_, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
+        setsockopt(kernel_rx_socket_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+        // Kernel-software RX timestamp (SOF_TIMESTAMPING_RX_SOFTWARE): stamped in
+        // the NAPI netif_receive_skb path, before socket-queue enqueue — closer to
+        // wire time than a clock_gettime() call after recvfrom() returns, which
+        // would also fold in socket-queue + wake latency. See rtt.cpp's
+        // detect_timestamp_mode for the same rationale applied to the rtt tool.
+        int ts_flags = SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_SOFTWARE;
+        setsockopt(kernel_rx_socket_, SOL_SOCKET, SO_TIMESTAMPING, &ts_flags, sizeof(ts_flags));
+        setsockopt(kernel_rx_socket_, SOL_SOCKET, SO_TIMESTAMP, &on, sizeof(on));
+    }
+
+    std::vector<uint8_t> buf(65535);
+    struct pollfd pfd{};
+    pfd.fd = kernel_rx_socket_;
+    pfd.events = POLLIN;
+
+    while (running_.load(std::memory_order_relaxed)) {
+        // 500ms timeout, matching KernelEcho.cpp's shutdown pattern: a bare
+        // blocking recvfrom() would hang stop() waiting for a packet that may
+        // never arrive.
+        int ret = poll(&pfd, 1, 500);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            if (running_.load(std::memory_order_relaxed))
+                std::cerr << "kernel fwd-mode poll error: " << strerror(errno) << std::endl;
+            continue;
+        }
+        if (ret == 0 || !(pfd.revents & POLLIN))
+            continue;
+
+        ssize_t n = recvfrom(kernel_rx_socket_, buf.data(), buf.size(), 0, nullptr, nullptr);
+        if (n <= 0) {
+            if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && running_.load(std::memory_order_relaxed))
+                std::cerr << "kernel fwd-mode recvfrom error: " << strerror(errno) << std::endl;
+            continue;
+        }
+
+        // recvfrom()'s buffer starts at the m2u header — the kernel already
+        // stripped Eth/IP/UDP, so processMcastFrame is called directly with
+        // no extractUdpPayloadMulticast unwrap (there is nothing to unwrap).
+        const uint8_t* payload_data = nullptr;
+        size_t payload_len = 0;
+        uint32_t group_nbo = 0;
+        if (!processMcastFrame(buf.data(), static_cast<size_t>(n), payload_data, payload_len, group_nbo))
+            continue;
+
+        const std::vector<Destination>& current_destinations = getCachedGroupDestinations(group_nbo);
+        if (current_destinations.empty())
+            continue;
+
+        int sent_count = 0;
+        for (const Destination& dest : current_destinations) {
+            if (sendToDestinationFallback(dest, payload_data, payload_len))
+                sent_count++;
+        }
+
+        packets_received_.fetch_add(1, std::memory_order_relaxed);
+        bytes_received_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+        if (sent_count > 0) {
+            packets_sent_.fetch_add(static_cast<uint64_t>(sent_count), std::memory_order_relaxed);
+            bytes_sent_.fetch_add(static_cast<uint64_t>(sent_count) * payload_len, std::memory_order_relaxed);
+        }
+    }
+
+    std::cout << "kernel fwd-mode RX thread stopped" << std::endl;
+}
+
 bool Replicator::sendToDestinationWithQueue(const Destination& destination, const uint8_t* data, size_t length, int queueId) {
     // If ARP has not yet resolved for this destination, the cached MAC is all-broadcast.
     // ENA/VPC drops frames with broadcast dst MAC, so route through the kernel socket
-    // which handles ARP internally.  updateDestinationCache() will re-resolve the MAC on
-    // the next 100ms cache refresh and automatically restore the AF_XDP fast path.
+    // which handles ARP internally. The refresher thread re-resolves the MAC on
+    // the next snapshot and automatically restores the AF_XDP fast path.
     static constexpr uint8_t BROADCAST_MAC[ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
     if (__builtin_expect(memcmp(destination.mac, BROADCAST_MAC, ETH_ALEN) == 0, 0)) {
         return sendToDestinationFallback(destination, data, length);
@@ -312,7 +515,12 @@ bool Replicator::sendToDestinationWithQueue(const Destination& destination, cons
     }
 
     try {
-        return sendSinglePacketDirect(destination, data, length, queueId);
+        // Returns false when the TX ring is full after a retry (P1: this used to
+        // throw on the hot path). Fall back to the kernel socket rather than
+        // dropping the packet.
+        if (sendSinglePacketDirect(destination, data, length, queueId))
+            return true;
+        return sendToDestinationFallback(destination, data, length);
     } catch (const std::exception& e) {
         std::cerr << "Direct AF_XDP send failed on queue " << queueId << ": " << e.what()
                   << ", falling back to regular socket" << std::endl;
@@ -332,9 +540,10 @@ bool Replicator::sendSinglePacketDirect(const Destination& destination, const ui
     // (was: xdp_socket->pollTxCompletions() here, once per destination)
 
     // Reserve a TX ring slot first; derive the UMEM frame address from the ring index.
-    // This guarantees the frame is not still in-flight: a ring slot is only reusable
-    // after its completion has been processed, so (tx_idx % TX_FRAMES) * FRAME_SIZE
-    // maps to a frame that is safe to write into.
+    // NOTE (B5): ring-slot availability alone does NOT prove the frame is free — the
+    // TX ring's consumer index advances when the kernel dequeues the descriptor, not
+    // when DMA completes. Frame safety comes from the outstanding_tx_ < TX_FRAMES
+    // guard now enforced inside XdpSocket::reserveTxRing(); see the comment there.
     uint32_t tx_idx = 0;
     int ret = xdp_socket->reserveTxRing(1, &tx_idx);
     if (ret != 1) {
@@ -345,13 +554,17 @@ bool Replicator::sendSinglePacketDirect(const Destination& destination, const ui
         xdp_socket->pollTxCompletions();
         ret = xdp_socket->reserveTxRing(1, &tx_idx);
         if (ret != 1) {
+            // TX ring full even after the retry. Return a status instead of
+            // throwing: this fires exactly when we are LOADED, and an
+            // exception throw/unwind (plus the per-packet cerr in the old
+            // handler) turned back-pressure into a latency cliff. The caller
+            // falls back to the kernel socket.
             DEBUG_TX_PRINT("DEBUG TX: TX ring full after retry, falling back");
-            throw std::runtime_error("TX ring full after retry");
+            return false;
         }
     }
 
     // Frame address derived from ring slot — power-of-2 modulo via bitmask
-    static constexpr uint64_t FRAME_SIZE     = 4096;
     static constexpr uint64_t TX_FRAMES_MASK = XdpSocket::DEFAULT_TX_FRAMES - 1;
     uint64_t tx_frame_addr = (static_cast<uint64_t>(tx_idx) & TX_FRAMES_MASK) * FRAME_SIZE;
 
@@ -376,7 +589,7 @@ bool Replicator::sendSinglePacketDirect(const Destination& destination, const ui
     // TX frame: Eth(14)+IP(20)+UDP(8)+m2u(8) + app-payload slot at +24.
     // mcast ONLY: this offset lands inside the m2u app header; in ucast the payload
     // is opaque application data (e.g. rtt's seq at offset 38) and must NOT be mutated.
-    static constexpr size_t REPL_TX_OFF = 14 + 20 + 8 + 8 + 24;
+    static constexpr size_t REPL_TX_OFF = WIRE_REPL_TX_FRAME_OFF;
     if (mcast_mode_ && packet_len >= REPL_TX_OFF + 8) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
@@ -466,6 +679,82 @@ size_t Replicator::createUdpPacket(const Destination& destination, const uint8_t
     return total_len;
 }
 
+uint32_t Replicator::ipCsumInvariantBase(size_t payloadLen) const {
+    // Sum the IPv4 header words that every copy in a fan-out shares. daddr and
+    // check are left zero, so a copy only has to fold in its own daddr. Summing a
+    // header laid out in memory is byte-order agnostic (RFC 1071).
+    struct iphdr ip;
+    memset(&ip, 0, sizeof(ip));
+    ip.version  = 4;
+    ip.ihl      = WIRE_IP_IHL_NO_OPTIONS;
+    ip.tos      = 0;
+    ip.tot_len  = htons(static_cast<uint16_t>(WIRE_IP_LEN + WIRE_UDP_LEN + payloadLen));
+    ip.id       = 0;
+    ip.frag_off = htons(IP_DF);
+    ip.ttl      = 64;
+    ip.protocol = IPPROTO_UDP;
+    ip.check    = 0;
+    ip.saddr    = cached_iface_saddr_nbo_;
+    ip.daddr    = 0;
+
+    uint32_t sum = 0;
+    const uint16_t* w = reinterpret_cast<const uint16_t*>(&ip);
+    for (int i = 0; i < WIRE_IP_IHL_WORDS; i++) sum += w[i];
+    return sum;
+}
+
+size_t Replicator::buildCopyFrame(const Destination& destination, const uint8_t* payload, size_t payloadLen,
+                                  uint8_t* buffer, size_t bufferSize,
+                                  uint32_t ipCsumBase, uint64_t txNsBe) {
+    const size_t total_len = WIRE_ETH_LEN + WIRE_IP_LEN + WIRE_UDP_LEN + payloadLen;
+    if (total_len > bufferSize)
+        return 0;
+
+    struct ethhdr* eth = reinterpret_cast<struct ethhdr*>(buffer);
+    memcpy(eth->h_dest,   destination.mac,  ETH_ALEN);
+    memcpy(eth->h_source, cached_iface_mac_, ETH_ALEN);
+    eth->h_proto = htons(ETH_P_IP);
+
+    struct iphdr* ip = reinterpret_cast<struct iphdr*>(buffer + WIRE_ETH_LEN);
+    ip->version  = 4;
+    ip->ihl      = WIRE_IP_IHL_NO_OPTIONS;
+    ip->tos      = 0;
+    ip->tot_len  = htons(static_cast<uint16_t>(WIRE_IP_LEN + WIRE_UDP_LEN + payloadLen));
+    ip->id       = 0;             // Atomic datagram: ID=0 per RFC 6864 when DF is set
+    ip->frag_off = htons(IP_DF);
+    ip->ttl      = 64;
+    ip->protocol = IPPROTO_UDP;
+    ip->saddr    = cached_iface_saddr_nbo_;
+    ip->daddr    = destination.addr.sin_addr.s_addr;
+
+    // Full recompute over the 20-byte header. A precomputed invariant base was
+    // tried and reverted: summing a freshly built local struct through a uint16_t*
+    // is a strict-aliasing violation, and under -O3 -flto it yielded a checksum the
+    // VPC rejected, so every fan-out copy was dropped with no local counter moving.
+    (void)ipCsumBase;
+    ip->check = 0;
+    uint32_t sum = 0;
+    const uint16_t* w = reinterpret_cast<const uint16_t*>(ip);
+    for (int i = 0; i < WIRE_IP_IHL_WORDS; i++) sum += w[i];
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    ip->check = static_cast<uint16_t>(~sum);
+
+    struct udphdr* udp = reinterpret_cast<struct udphdr*>(buffer + WIRE_ETH_LEN + WIRE_IP_LEN);
+    udp->source = htons(listen_port_);
+    udp->dest   = destination.addr.sin_port;
+    udp->len    = htons(static_cast<uint16_t>(WIRE_UDP_LEN + payloadLen));
+    udp->check  = 0;  // optional for IPv4
+
+    memcpy(buffer + WIRE_ETH_LEN + WIRE_IP_LEN + WIRE_UDP_LEN, payload, payloadLen);
+
+    // replicator_tx_ns from the batch's single clock read. mcast only: the offset
+    // lands inside the m2u app header, and a ucast payload is opaque.
+    if (mcast_mode_ && txNsBe != 0 && total_len >= WIRE_REPL_TX_FRAME_OFF + 8)
+        memcpy(buffer + WIRE_REPL_TX_FRAME_OFF, &txNsBe, 8);
+
+    return total_len;
+}
+
 bool Replicator::patchHeadersInPlace(const Destination& destination, uint8_t* frame, size_t frame_len) {
     // Rewrite the RX frame's L2/L3/L4 headers for `destination` — no payload copy.
     // The source sends a standard 20-byte IPv4 header (ihl=5), so offsets are fixed.
@@ -478,12 +767,16 @@ bool Replicator::patchHeadersInPlace(const Destination& destination, uint8_t* fr
     // h_proto already ETH_P_IP (the RX frame is IPv4).
 
     struct iphdr* ip = reinterpret_cast<struct iphdr*>(frame + ETH);
+    // Fast paths recompute the checksum over exactly WIRE_IP_IHL_WORDS (20 bytes).
+    // Frames with IP options (ihl > 5) carry more header bytes; refuse to patch them
+    // so the caller uses the copy path, which rebuilds headers from scratch.
+    if (ip->ihl != WIRE_IP_IHL_NO_OPTIONS) return false;
     ip->saddr = cached_iface_saddr_nbo_;
     ip->daddr = destination.addr.sin_addr.s_addr;
     ip->check = 0;
     uint32_t sum = 0;
     const uint16_t* w = reinterpret_cast<const uint16_t*>(ip);
-    for (int i = 0; i < 10; i++) sum += w[i];   // 20-byte header
+    for (int i = 0; i < WIRE_IP_IHL_WORDS; i++) sum += w[i];  // 20-byte header (ihl==5 enforced)
     while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
     ip->check = static_cast<uint16_t>(~sum);
 
@@ -495,7 +788,7 @@ bool Replicator::patchHeadersInPlace(const Destination& destination, uint8_t* fr
     // Stamp replicator_tx_ns in place (app-payload slot at m2u+24 → frame +74).
     // mcast ONLY (see sendSinglePacketDirect): the offset is inside the m2u app
     // header; never mutate an opaque ucast payload.
-    static constexpr size_t REPL_TX_OFF = ETH + IP + UDP + 8 + 24;  // 74
+    static constexpr size_t REPL_TX_OFF = WIRE_REPL_TX_FRAME_OFF;  // 74
     if (mcast_mode_ && frame_len >= REPL_TX_OFF + 8) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);

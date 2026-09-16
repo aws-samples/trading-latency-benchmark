@@ -24,6 +24,7 @@
 #include <sys/resource.h>
 #include <sys/mman.h>
 #include <fcntl.h>
+#include <poll.h>          // poll() drives the AF_XDP busy-poll path in receive()
 #include <net/if.h>
 #include <linux/if_link.h>
 #include <linux/if_ether.h>
@@ -487,11 +488,22 @@ int XdpSocket::bind(const std::string& ifName, int queueId, int flags) {
     {
         int xfd = xsk_socket__fd(wrapper_->xsk);
         int on = 1, busy_us = 50, budget = 64;
-        setsockopt(xfd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &on, sizeof(on));
-        setsockopt(xfd, SOL_SOCKET, SO_BUSY_POLL, &busy_us, sizeof(busy_us));
-        setsockopt(xfd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
-        DEBUG_PRINT("XSK busy-poll enabled: prefer=1 busy_us=%d budget=%d (fd=%d)\n",
-                    busy_us, budget, xfd);
+        // Report results rather than discarding them: an inert SO_BUSY_POLL is
+        // indistinguishable from a working one except by a ~10us per-packet
+        // latency difference. receive()'s poll() is what drives the busy-poll
+        // path these options enable.
+        int r_pref = setsockopt(xfd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &on, sizeof(on));
+        int r_busy = setsockopt(xfd, SOL_SOCKET, SO_BUSY_POLL, &busy_us, sizeof(busy_us));
+        int r_budg = setsockopt(xfd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
+        int rb = 0; socklen_t rl = sizeof(rb);
+        getsockopt(xfd, SOL_SOCKET, SO_BUSY_POLL, &rb, &rl);
+        std::cout << "XSK busy-poll (fd=" << xfd << "): SO_PREFER_BUSY_POLL="
+                  << (r_pref == 0 ? "ok" : strerror(errno))
+                  << " SO_BUSY_POLL(" << busy_us << "us)="
+                  << (r_busy == 0 ? "ok" : strerror(errno))
+                  << " SO_BUSY_POLL_BUDGET(" << budget << ")="
+                  << (r_budg == 0 ? "ok" : strerror(errno))
+                  << " readback=" << rb << "us" << std::endl;
     }
 
     // Populate the fill queue
@@ -630,6 +642,32 @@ void XdpSocket::requestDriverPoll() {
 int XdpSocket::reserveTxRing(int count, uint32_t* tx_idx) {
     // No checkOpen(): called only from sendSinglePacketDirect which is guarded
     // by sendToDestinationWithQueue's queueId/socket validity check.
+    //
+    // B5 — FRAME-SAFETY BACKPRESSURE. A successful xsk_ring_prod__reserve() only
+    // means a DESCRIPTOR slot is free: the TX ring's consumer index advances when
+    // the kernel DEQUEUES the descriptor, not when the NIC has finished DMA-ing the
+    // buffer. The UMEM frame that sendSinglePacketDirect() derives from the ring
+    // index — (tx_idx % TX_FRAMES) * FRAME_SIZE — is only safe to overwrite once
+    // its COMPLETION has been reaped. Without this guard the producer can wrap onto
+    // a frame that is still in flight and rewrite it mid-transmission, putting a
+    // torn/inconsistent frame on the wire; AWS VPC then drops it silently, which
+    // shows up as apparent packet "loss" that grows with run length and has no
+    // local drop counter.
+    //
+    // The batched path (sendPackets) has always carried the equivalent ena-xdp
+    // check `outstanding_tx_ > TX_FRAMES - TX_BATCH_SIZE`; it was never ported to
+    // this single-packet path, which is the one the replicator hot path uses.
+    // The guard must cover the WHOLE reservation: a fan-out reserves K slots at
+    // once, so checking only that one frame is free lets a K-slot reserve wrap onto
+    // frames still being DMA'd (e.g. 2040 outstanding + 24 reserved > 2048 frames),
+    // which puts torn frames on the wire that AWS VPC drops without any local
+    // counter moving.
+    const uint32_t need = static_cast<uint32_t>(count);
+    if (outstanding_tx_ + need > static_cast<uint32_t>(TX_FRAMES)) {
+        pollTxCompletions();
+        if (outstanding_tx_ + need > static_cast<uint32_t>(TX_FRAMES))
+            return 0;   // caller kicks + retries, then falls back to the kernel socket
+    }
     return xsk_ring_prod__reserve(&wrapper_->tx, count, tx_idx);
 }
 
@@ -649,7 +687,7 @@ void XdpSocket::submitTxRing(int count) {
 }
 
 bool XdpSocket::forwardFrameInPlace(uint64_t rx_addr, uint32_t len) {
-    // Free TX slots (this also recycles previously-borrowed RX frames back to fill).
+    // Release TX ring slots. RX-range frames (inplace mode) are returned to the fill queue.
     pollTxCompletions();
 
     // This RX frame is being handed to TX; make sure recycleFrames() does NOT also
@@ -723,13 +761,20 @@ int XdpSocket::receive(std::vector<int>& offsets, std::vector<int>& lengths) {
         // App-driven busy-poll: run NAPI in *this* thread's context (the pinned
         // isolated CPU) so RX delivery does not wait on the deferred ENA hard IRQ
         // (napi_defer_hard_irqs / gro_flush_timeout) which fires on a different,
-        // often-contended CPU. With SO_PREFER_BUSY_POLL + SO_BUSY_POLL set on this
-        // fd (see openSocket), this recvfrom spins the NAPI poll for up to
-        // SO_BUSY_POLL microseconds, pulling frames the instant the NIC posts them,
-        // and also wakes the fill ring when needed. Issued on every empty peek
-        // (not gated on needs_wakeup) so NAPI is driven regardless of fill state —
-        // this is what makes hop1 (source->replicator) gro-independent.
-        recvfrom(xsk_socket__fd(wrapper_->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
+        // often-contended CPU.
+        //
+        // poll() is the entry point that drives this: xsk_poll() calls
+        // sk_busy_loop() when SO_BUSY_POLL is active on the fd (set in
+        // openSocket). A zero timeout makes it a single non-blocking pass, so the
+        // caller's loop keeps spinning the ring. recvfrom() does NOT reliably
+        // enter the busy-poll path on an XSK fd, so it is used strictly for the
+        // fill-ring wakeup it is meant for.
+        struct pollfd pfd{};
+        pfd.fd     = xsk_socket__fd(wrapper_->xsk);
+        pfd.events = POLLIN;
+        poll(&pfd, 1, 0);
+        if (xsk_ring_prod__needs_wakeup(&wrapper_->fq))
+            recvfrom(xsk_socket__fd(wrapper_->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
     }
 
     return valid_packets;

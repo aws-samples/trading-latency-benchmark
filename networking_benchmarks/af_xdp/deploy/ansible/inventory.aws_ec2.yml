@@ -4,18 +4,32 @@
 plugin: amazon.aws.aws_ec2
 
 # Dynamic inventory from EC2 tags set by FleetStack.
-# Discovers both the primary (us-east-1) and secondary (eu-west-2) regions so a
-# single run covers cross-region topologies. Single-region runs just get an
-# empty result from the other region (harmless).
+#
+# Region(s) are determined by environment variables — set them to match your
+# CDK deploy context rather than hardcoding:
+#
+#   AWS_DEFAULT_REGION   — primary fleet region (required; e.g. ap-northeast-1)
+#   AWS_SECONDARY_REGION — second region for cross-region topologies (optional)
+#
+# The secondary region is supported via a companion inventory file:
+#   ansible-playbook -i inventory.aws_ec2.yml [-i inventory_secondary.aws_ec2.yml] ...
+#
+# For a single-region fleet (the common case):
+#   AWS_DEFAULT_REGION=ap-northeast-1 ansible-playbook -i inventory.aws_ec2.yml sync.yaml
 regions:
-  - us-east-1
-  - eu-west-2
+  - "{{ lookup('env', 'AWS_DEFAULT_REGION') | default('ap-northeast-1', true) }}"
 
 include_filters:
   - tag:Role:
       - source
       - replicator
       - destination
+  # The control-plane instance (XdpStack-ControlPlane) carries no Role tag -
+  # it's not a fleet member - so it needs its own filter to be reachable by
+  # sync.yaml at all. Matched by its CFN stack-name tag rather than hardcoding
+  # an instance ID, so this survives a control-plane redeploy.
+  - tag:aws:cloudformation:stack-name:
+      - XdpStack-ControlPlane
 
 hostnames:
   - ip-address
@@ -23,12 +37,10 @@ hostnames:
 compose:
   ansible_host: public_ip_address
   ansible_user: "'ec2-user'"
-  # Per-region key: eu-west-2 nodes use SSH_KEY_FILE_SECONDARY (e.g. london.pem),
-  # everything else uses SSH_KEY_FILE (e.g. virginia.pem). Selected by AZ prefix
-  # so single-region runs (only SSH_KEY_FILE set) keep working unchanged.
-  ansible_ssh_private_key_file: "('eu-west-2' in placement.availability_zone) | ternary(lookup('env', 'SSH_KEY_FILE_SECONDARY'), lookup('env', 'SSH_KEY_FILE'))"
+  ansible_ssh_private_key_file: "{{ lookup('env', 'SSH_KEY_FILE') }}"
 
 groups:
-  source:       "tags.Role == 'source'"
-  replicator:   "tags.Role == 'replicator'"
-  destination:  "tags.Role == 'destination'"
+  source:        "tags.Role == 'source'"
+  replicator:    "tags.Role == 'replicator'"
+  destination:   "tags.Role == 'destination'"
+  control_plane: "tags['aws:cloudformation:stack-name'] is defined and tags['aws:cloudformation:stack-name'] == 'XdpStack-ControlPlane'"

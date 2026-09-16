@@ -35,12 +35,13 @@
 // Required license for BPF programs
 char _license[] SEC("license") = "GPL";
 
-// rtt --xdp-rx probe header (KEEP IN SYNC with tools/rtt.cpp). The rtt client sets
-// the magic at payload[0..3]; on the ECHO ingress (client host) we stamp an early
-// bpf_ktime_get_ns() (CLOCK_MONOTONIC) into payload[4..11] and XDP_PASS it up to the
-// kernel UDP socket. The same host writes and reads it, so host byte order (no bswap).
-#define RTT_MAGIC   0x58545452u   /* "RTTX" little-endian */
-#define RTT_HDR_LEN 12            /* [0..3] magic, [4..11] xdp_rx_ns */
+// rtt --xdp-rx probe: the rtt client sets the magic at payload[0..3]. On the
+// echo ingress we stamp bpf_ktime_get_ns() (CLOCK_MONOTONIC) at the offset defined
+// by WIRE_RTT_XDP_RX_NS_OFF and XDP_PASS the frame to the kernel socket. Constants
+// shared with tools/rtt.cpp via src/common/wire.h.
+#include "../common/wire.h"
+#define RTT_MAGIC   WIRE_RTT_MAGIC
+#define RTT_HDR_LEN WIRE_RTT_HDR_LEN
 
 // Statistics map for monitoring
 struct
@@ -177,7 +178,7 @@ int ucast(struct xdp_md *ctx)
         void *pl = (void *)udp + sizeof(struct udphdr);
         if (pl + RTT_HDR_LEN <= data_end && *(__u32 *)pl == RTT_MAGIC) {
             __u64 t = bpf_ktime_get_ns();
-            __builtin_memcpy((__u8 *)pl + 4, &t, sizeof(t));
+            __builtin_memcpy((__u8 *)pl + WIRE_RTT_XDP_RX_NS_OFF, &t, sizeof(t));
             udp->check = 0;
             increment_counter(4);  // rtt --xdp-rx stamped
         }
@@ -185,10 +186,8 @@ int ucast(struct xdp_md *ctx)
     }
 
     // Redirect to the AF_XDP socket registered for this RX queue.
-    // XDP_PASS fallback: if no socket is registered (e.g. during the brief window
-    // between loadXdpProgram and registerXskMap), packets fall through to the kernel
-    // stack rather than being silently dropped.  This also avoids the extra
-    // bpf_map_lookup_elem that the old explicit-check pattern incurred per packet.
+    // Redirect to the XSK for this queue. Falls back to the kernel stack
+    // (XDP_PASS) when no socket is registered yet.
     increment_counter(3);  // matched + redirecting
     return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_PASS);
 }

@@ -1,8 +1,0 @@
-[
-  {"count": 1, "type": "c7i.4xlarge", "az": "a"},
-  {"count": 1, "type": "c7i.4xlarge", "az": "b"},
-  {"count": 2, "type": "c7i.4xlarge", "az": "a", "pgType": "cluster", "pgName": "cpg-a-2"},
-  {"count": 2, "type": "c7i.4xlarge", "az": "b", "pgType": "cluster", "pgName": "cpg-b-2"},
-  {"count": 2, "type": "c7i.4xlarge", "az": "a", "pgType": "spread", "pgName": "spg-a-1"},
-  {"count": 2, "type": "c7i.4xlarge", "az": "b", "pgType": "spread", "pgName": "spg-b-1"}
-]

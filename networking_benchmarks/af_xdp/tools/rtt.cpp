@@ -25,6 +25,43 @@
  *   PHC hardware RX timestamps live in a separate epoch and are used only for the
  *   one-way multicast path (mcast_receive), not here.
  *
+ * ── Datapath per variation + WHY xdp is NOT faster than kernel here ───────────
+ * The measurement is apples-to-apples (recv - actual_send, same clock domain per
+ * mode). The latency ordering (kernel <= xdp-*) is a REAL property of THIS test,
+ * not an artifact. What each flag actually does:
+ *
+ *   kernel   : TX = sendto();  RX = kernel busy-poll recvmsg(), kernel-SW RX ts.
+ *   --xdp-tx : TX = AF_XDP (build frame + TX ring + a needs_wakeup sendto kick);
+ *              RX unchanged (kernel busy-poll socket).
+ *   --xdp-rx : TX = sendto();  RX unchanged — STILL the kernel busy-poll socket.
+ *              It does NOT receive via an XSK; it only reads the XDP-stamped
+ *              ingress time from the payload. "xdp-rx" == instrumented kernel RX,
+ *              not a kernel-bypass receive.
+ *   --xdp-txrx: both of the above.
+ *
+ * Why kernel wins at queue-depth 1 (one packet in flight, unloaded):
+ *   1. AF_XDP's advantage is amortizing per-packet cost across BATCHES at high
+ *      PPS. At QD=1 there is nothing to batch, so the win is zero.
+ *   2. The AF_XDP TX still issues one syscall per packet (the needs_wakeup kick —
+ *      an idle ENA driver will not poll the TX ring), PLUS a userspace frame build
+ *      and TX/completion-ring management. vs a single, already-fast kernel sendto.
+ *   3. The RX side is identical in every mode (same busy-poll socket, XDP_PASS),
+ *      so --xdp-rx cannot shorten anything — it only moves the RX timestamp a few
+ *      hundred ns earlier.
+ *   4. The "kernel" baseline is NOT the generic stack: SO_BUSY_POLL +
+ *      SO_PREFER_BUSY_POLL + SCHED_FIFO + isolated-core pinning + ENA IRQ
+ *      affinity + napi_defer_hard_irqs + gro_flush_timeout=10us + coalescing off.
+ *      That tuned busy-polled path (~36us RT on cluster-PG c7i.2xlarge) is the
+ *      honest floor; QD=1 AF_XDP cannot beat it.
+ *   The intuition "kernel-bypass = lower latency" holds under LOAD (high PPS /
+ *   many flows) where the stack saturates — not for a single unloaded ping-pong.
+ *   The startup line prints "(zero-copy)" vs "(COPY/SKB fallback)" so the actual
+ *   TX datapath is visible: if ENA can't do ZC TX, --xdp-tx is a copy path and is
+ *   expected to be slower still. --xdp-tx binds XDP_ZEROCOPY (true zero-copy TX)
+ *   rather than only XDP_USE_NEED_WAKEUP, so its parity with the kernel baseline
+ *   reflects the TX-stack cost removed, not RX (which stays the kernel busy-poll
+ *   socket in every mode at QD=1).
+ *
  * Design:
  *   - Lock-free preallocated slot array indexed by sequence ID (no map, no mutex)
  *   - Busy-poll receive with SO_BUSY_POLL (no poll()/select() wakeup jitter)
@@ -65,6 +102,8 @@
 #include <linux/ethtool.h>
 #include <net/if.h>
 #include <immintrin.h>  // _mm_pause for busy-poll spin
+#include "common/wire.h"   // S1: single source of the on-wire layout
+#include "common/nexthop.h"  // next-hop MAC (gateway when off-subnet)
 
 #include "common/ControlPort.hpp"
 
@@ -118,8 +157,15 @@ public:
         if (!get_iface_info(iface.c_str(), src)) { err = "get_iface_info failed for " + iface; return false; }
 
         uint8_t dst_mac[6];
-        if (!resolve_mac(dst_ip.c_str(), iface.c_str(), dst_mac)) {
-            err = "ARP resolution failed for " + dst_ip; return false;
+        char next_hop[INET_ADDRSTRLEN] = {0};
+        if (!afxdp::resolve_next_hop_mac(dst_ip.c_str(), iface.c_str(), dst_mac,
+                                         next_hop, sizeof(next_hop))) {
+            err = "next-hop MAC resolution failed for " + dst_ip
+                + " (next hop " + next_hop + ")";
+            return false;
+        }
+        if (strcmp(next_hop, dst_ip.c_str()) != 0) {
+            printf("  off-subnet destination: addressing frames to gateway %s\n", next_hop);
         }
 
         uint32_t dst_ip_nbo = 0;
@@ -147,17 +193,33 @@ public:
                                  &fq_unused_, &cq_, &ucfg);
         if (e) { err = std::string("xsk_umem__create: ") + strerror(-e); return false; }
 
+        // Prefer true zero-copy native TX to remove the kernel TX stack from
+        // the send leg. Requesting only XDP_USE_NEED_WAKEUP lets the kernel
+        // silently pick copy mode on ENA, so force XDP_ZEROCOPY and fall back
+        // to copy (SKB) only if the driver can't (version-dependent on ENA).
         struct xsk_socket_config xcfg = {
             .rx_size = 0, .tx_size = TX_RING,
             .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
-            .xdp_flags = XDP_FLAGS_DRV_MODE, .bind_flags = XDP_USE_NEED_WAKEUP,
+            .xdp_flags = XDP_FLAGS_DRV_MODE,
+            .bind_flags = XDP_ZEROCOPY | XDP_USE_NEED_WAKEUP,
         };
-        e = xsk_socket__create(&xsk_, iface.c_str(), (uint32_t)queue_, umem_,
-                               nullptr, &tx_, &xcfg);
-        if (e) {  // native ZC failed — retry SKB (copy) mode
-            xcfg.xdp_flags = XDP_FLAGS_SKB_MODE;
+        // Retry the zero-copy bind with backoff: a prior run's XSK on this
+        // queue can still be tearing down (ENA releases it a few ms after the
+        // process exits), which can make the first ZC bind fail spuriously.
+        e = -1;
+        for (int attempt = 0; attempt < 10 && e; ++attempt) {
             e = xsk_socket__create(&xsk_, iface.c_str(), (uint32_t)queue_, umem_,
                                    nullptr, &tx_, &xcfg);
+            if (e) usleep(100000);  // 100ms — let a prior XSK finish releasing the queue
+        }
+        if (!e) {
+            zerocopy_ = true;
+        } else {  // zero-copy genuinely unavailable — last-resort copy (SKB) mode
+            xcfg.xdp_flags  = XDP_FLAGS_SKB_MODE;
+            xcfg.bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP;
+            e = xsk_socket__create(&xsk_, iface.c_str(), (uint32_t)queue_, umem_,
+                                   nullptr, &tx_, &xcfg);
+            zerocopy_ = false;
         }
         if (e) { err = std::string("xsk_socket__create (queue ") + std::to_string(queue_)
                        + "): " + strerror(-e); return false; }
@@ -165,18 +227,37 @@ public:
         return true;
     }
 
+    bool zerocopy() const { return zerocopy_; }
+
     // Encode seq (10 ASCII digits), stamp TX time just before submit, transmit.
     // Returns the CLOCK_REALTIME ns captured at the stamp point.
-    bool send(uint64_t seq, int64_t& send_realtime_ns)
+    // Encode seq (10 ASCII digits), stamp TX time just before submit, transmit.
+    // Stamps BOTH clock domains at the SAME instant so every mode measures from an
+    // identical TX baseline regardless of mode.
+    bool send(uint64_t seq, int64_t& send_realtime_ns, int64_t& send_mono_ns)
     {
-        drain_completions();
+        // Frame reuse guard: (seq % NUM_FRAMES) selects the UMEM slot. Reap completions
+        // before writing — a slot is free only after DMA completes. Poll the completion
+        // ring in userspace; kick only every 1024 spins to amortise the syscall cost.
+
+        for (int spin = 0; outstanding_ >= NUM_FRAMES && spin < MAX_SPIN; ++spin) {
+            drain_completions();
+            if (outstanding_ >= NUM_FRAMES && (spin & 0x3FF) == 0) kick();
+        }
 
         uint32_t idx = 0;
+        int spins = 0;
         while (xsk_ring_prod__reserve(&tx_, 1, &idx) == 0) {
-            if (xsk_ring_prod__needs_wakeup(&tx_))
-                sendto(fd_, nullptr, 0, MSG_DONTWAIT, nullptr, 0);
+            // TX ring full (under load). Reap completions cheaply and kick
+            // periodically: the driver may not be polling (deferred hard IRQs), in
+            // which case a needs_wakeup-gated kick never fires and this loop
+            // livelocks if the driver never polls. Bounded so we
+            // fail loudly instead of hanging.
             drain_completions();
+            if ((spins & 0x3FF) == 0) kick();
+            if (++spins >= MAX_SPIN) { tx_stalls_++; return false; }
         }
+        if (spins) ring_full_events_++;
 
         uint64_t addr  = ((uint64_t)seq % NUM_FRAMES) * FRAME_SIZE;
         uint8_t* frame = (uint8_t*)umem_buf_ + addr;
@@ -186,19 +267,34 @@ public:
         uint64_t s = seq;
         for (int i = 9; i >= 0; --i) { p[i] = (uint8_t)('0' + (s % 10)); s /= 10; }
 
-        // Stamp as close to the wire as possible.
-        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
-        send_realtime_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+        // Stamp as close to the wire as possible — both domains, same instant.
+        struct timespec tr, tm;
+        clock_gettime(CLOCK_REALTIME, &tr);
+        clock_gettime(CLOCK_MONOTONIC, &tm);
+        send_realtime_ns = (int64_t)tr.tv_sec * 1000000000LL + tr.tv_nsec;
+        send_mono_ns     = (int64_t)tm.tv_sec * 1000000000LL + tm.tv_nsec;
 
         struct xdp_desc* d = xsk_ring_prod__tx_desc(&tx_, idx);
         d->addr = addr; d->len = (uint32_t)pkt_len_;
         asm volatile("sfence" ::: "memory");
         xsk_ring_prod__submit(&tx_, 1);
         outstanding_++;
-        if (xsk_ring_prod__needs_wakeup(&tx_))
-            sendto(fd_, nullptr, 0, MSG_DONTWAIT, nullptr, 0);
+        // Kick unconditionally. needs_wakeup==false means the driver is currently
+        // polling but does not guarantee a prompt TX flush — the fleet runs
+        // napi_defer_hard_irqs + gro_flush_timeout=10µs for RX busy-poll. At QD=1
+        // the kick is the transmit trigger; omitting it adds ~10–16µs of deferral.
+        if (!xsk_ring_prod__needs_wakeup(&tx_)) kicks_when_not_needed_++;
+        kick();
+        // Reap PRIOR completions AFTER the kick, so it never sits on the next
+        // send's pre-stamp path.
+        drain_completions();
         return true;
     }
+
+    // Diagnostics for scale runs.
+    uint64_t ringFullEvents()      const { return ring_full_events_; }
+    uint64_t txStalls()            const { return tx_stalls_; }
+    uint64_t kicksWhenNotNeeded()  const { return kicks_when_not_needed_; }
 
     void close_()
     {
@@ -215,6 +311,9 @@ private:
     static constexpr uint32_t NUM_FRAMES = 256;
     static constexpr uint32_t FRAME_SIZE = 4096;
     static constexpr uint32_t TX_RING    = 256;
+    // Bound on ring-full / completion-wait spins. After MAX_SPIN attempts the
+    // send is abandoned; the caller records it as a send failure.
+    static constexpr int      MAX_SPIN    = 200000;
 
     struct iface_info { uint8_t mac[6]; uint32_t ip; int ifindex; };
 
@@ -229,7 +328,15 @@ private:
     int      pkt_len_     = -1;
     int      seq_frame_off_ = 0;
     uint32_t outstanding_ = 0;
+    bool     zerocopy_ = false;
+    uint64_t ring_full_events_ = 0;
+    uint64_t tx_stalls_ = 0;
+    uint64_t kicks_when_not_needed_ = 0;
     uint8_t  templ_[2048];
+
+    // Trigger transmission. Safe (and cheap) to call even when needs_wakeup is
+    // clear; with XDP_USE_NEED_WAKEUP the kernel merely doesn't *require* it.
+    void kick() { sendto(fd_, nullptr, 0, MSG_DONTWAIT, nullptr, 0); }
 
     void drain_completions() {
         uint32_t idx = 0;
@@ -259,39 +366,6 @@ private:
         else ok = false;
         ::close(s);
         return ok;
-    }
-
-    static bool resolve_mac(const char* dst_ip, const char* iface, uint8_t mac[6]) {
-        // Trigger neighbour resolution, then read /proc/net/arp.
-        int s = socket(AF_INET, SOCK_DGRAM, 0);
-        if (s >= 0) {
-            setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, iface, strlen(iface) + 1);
-            struct sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(9);
-            inet_pton(AF_INET, dst_ip, &a.sin_addr);
-            connect(s, (struct sockaddr*)&a, sizeof(a));
-            ::send(s, nullptr, 0, 0);
-            ::close(s);
-        }
-        for (int attempt = 0; attempt < 20; ++attempt) {
-            usleep(50000);
-            FILE* f = fopen("/proc/net/arp", "r");
-            if (!f) return false;
-            char line[256]; fgets(line, sizeof(line), f);  // header
-            bool found = false;
-            while (fgets(line, sizeof(line), f)) {
-                char ip[64], hw[64], t[64], fl[64], m[64], dev[64];
-                if (sscanf(line, "%63s %63s %63s %63s %63s %63s", ip, t, fl, hw, m, dev) != 6) continue;
-                if (strcmp(ip, dst_ip) != 0) continue;
-                unsigned b[6];
-                if (sscanf(hw, "%x:%x:%x:%x:%x:%x", &b[0],&b[1],&b[2],&b[3],&b[4],&b[5]) != 6) continue;
-                if ((b[0]|b[1]|b[2]|b[3]|b[4]|b[5]) == 0) break;  // 00:00.. → not resolved yet
-                for (int i = 0; i < 6; i++) mac[i] = (uint8_t)b[i];
-                found = true; break;
-            }
-            fclose(f);
-            if (found) return true;
-        }
-        return false;
     }
 
     static int build_udp_pkt(uint8_t* buf, int max_buf, const iface_info& src,
@@ -387,6 +461,27 @@ static int64_t extract_rx_timestamp_ns(struct msghdr* msg) {
 // ---------------------------------------------------------------------------
 // Lock-free timing slots
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Pacing
+// ---------------------------------------------------------------------------
+static inline int64_t now_mono_ns() {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+// Wait until an ABSOLUTE CLOCK_MONOTONIC deadline. Uses
+// clock_nanosleep(TIMER_ABSTIME) rather than a spin-wait: in AF_XDP
+// zero-copy, TX completions are reaped by the driver in NAPI/softirq
+// context, and sleeping (not spinning) yields the core so that can run.
+// Returns immediately if the deadline is already past.
+static inline void wait_until_ns(int64_t deadline_ns) {
+    struct timespec d;
+    d.tv_sec  = deadline_ns / 1000000000LL;
+    d.tv_nsec = deadline_ns % 1000000000LL;
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &d, nullptr);
+}
+
 struct alignas(64) TimingSlot {
     int64_t  send_realtime_ns;    // CLOCK_REALTIME at actual send (default-mode TX stamp)
     int64_t  send_mono_ns;        // CLOCK_MONOTONIC at actual send (--xdp-rx TX stamp)
@@ -394,6 +489,8 @@ struct alignas(64) TimingSlot {
     int64_t  recv_ns;             // RX timestamp (ns): default = kernel-SW SO_TIMESTAMPING
                                   //   (CLOCK_REALTIME) or userspace CLOCK_REALTIME fallback;
                                   //   --xdp-rx = XDP bpf_ktime (CLOCK_MONOTONIC) from the payload
+    int64_t  recv_ksw_ns;         // kernel-SW cmsg stamp, ALSO captured in --xdp-rx mode so the
+                                  //   two RX stamps can be differenced (see dual-stamp reporting). -1 = none.
     uint8_t  received;            // 1 if response arrived
 };
 
@@ -407,12 +504,13 @@ static const char* MSG_TEMPLATE =
     R"({"e":"trade","E":1234567890123,"s":"BTC-USDT","t":0000000000,"p":"45000","q":"1.5","b":1000000001,"a":1000000002,"T":1234567890000,"S":"1","X":"MARKET"})";
 static size_t MSG_LEN = 0;  // set at init
 
-// rtt --xdp-rx wire header (KEEP IN SYNC with src/xdp/ucast.c): the first bytes of
+// rtt --xdp-rx wire header (defined in src/common/wire.h; shared with ucast.c).
+// The first bytes of
 // the UDP payload carry [0..3] magic, [4..11] xdp_rx_ns (stamped by the XDP program
 // at echo ingress, host order). TRADE_ID_OFFSET (38) is past this header, so the
 // seq digits are unaffected.
-static constexpr uint32_t RTT_MAGIC = 0x58545452u;   // "RTTX" little-endian
-static constexpr size_t   RTT_HDR_LEN = 12;
+static constexpr uint32_t RTT_MAGIC   = WIRE_RTT_MAGIC;    // "RTTX" little-endian
+static constexpr size_t   RTT_HDR_LEN = WIRE_RTT_HDR_LEN;
 static char g_probe[256];                            // probe template (magic patched for --xdp-rx)
 
 static void encode_message(char* buf, uint64_t seq_id) {
@@ -482,10 +580,92 @@ static bool subscribe_to_replicator(const char* replicator_ip, [[maybe_unused]] 
     return (r == 1 && ack == 1);
 }
 
+// Deregister from the replicator's destination registry.
+//
+// CRITICAL: without this, `all_destinations_` on the remote replicator grows by
+// one entry per distinct source IP that has ever measured against it, and the
+// UNICAST echo path fans out to EVERY registered destination
+// (Destinations.cpp: `if (!mcast_mode_ && !all_copy.empty())`). Each subsequent
+// measurement then costs N sends per packet instead of 1, adding a CONSTANT
+// per-packet delay — the observed ms-scale whole-distribution p50 shift with a
+// normal (20-100us) spread. Best-effort: a failed remove must not fail the run,
+// but it is retried once.
+static bool unsubscribe_from_replicator(const char* replicator_ip, const char* local_ip, uint16_t local_port) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return false;
+    struct timeval tv = {2, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in server = {};
+    server.sin_family = AF_INET;
+    server.sin_port = htons(afxdp_control_port());
+    inet_pton(AF_INET, replicator_ip, &server.sin_addr);
+
+    // Wire format: [2=REMOVE][4B IP network order][2B port network order]
+    uint8_t msg[7];
+    msg[0] = 2;  // CTRL_REMOVE_DESTINATION
+    inet_pton(AF_INET, local_ip, &msg[1]);
+    uint16_t port_net = htons(local_port);
+    memcpy(&msg[5], &port_net, 2);
+
+    uint8_t ack = 0;
+    ssize_t r = -1;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (sendto(fd, msg, 7, 0, (struct sockaddr*)&server, sizeof(server)) == 7) {
+            r = recv(fd, &ack, 1, 0);
+            if (r == 1 && ack == 1) break;
+        }
+    }
+    close(fd);
+    if (r == 1 && ack == 1) {
+        std::cout << "Unsubscribed from replicator at " << replicator_ip << std::endl;
+        return true;
+    }
+    std::cerr << "WARNING: failed to unsubscribe from " << replicator_ip
+              << " — the replicator will keep echoing to " << local_ip << ":" << local_port
+              << ", inflating latency for subsequent runs" << std::endl;
+    return false;
+}
+
+// Registration state for the exit/signal cleanup path.
+static char g_reg_replicator_ip[64] = {0};
+static char g_reg_local_ip[64]      = {0};
+static uint16_t g_reg_local_port    = 0;
+static bool g_registered            = false;
+
+static void deregister_if_needed() {
+    if (!g_registered) return;
+    g_registered = false;   // idempotent: atexit + signal must not double-send
+    unsubscribe_from_replicator(g_reg_replicator_ip, g_reg_local_ip, g_reg_local_port);
+}
+
 // ---------------------------------------------------------------------------
 // CPU pinning
 // ---------------------------------------------------------------------------
 static void pin_to_cpu(int cpu) {
+    // Defense-in-depth: pinning to an OFFLINE cpu (e.g. an SMT sibling disabled
+    // by nosmt, or a bad send_cpu arg) makes sched_setaffinity fail and the
+    // thread silently stays on the contended housekeeping CPU 0 — which wrecks
+    // the AF_XDP TX path. If the requested cpu isn't online, remap to the
+    // highest online CPU and warn instead of failing quietly.
+    bool online = true;
+    if (cpu > 0) {  // cpu0 has no 'online' sysfs node and is always online
+        char path[64];
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/online", cpu);
+        FILE* f = fopen(path, "r");
+        if (f) { int v = 1; if (fscanf(f, "%d", &v) == 1) online = (v != 0); fclose(f); }
+        else {  // no 'online' node: cpu may not exist -> compare to configured count
+            long nconf = sysconf(_SC_NPROCESSORS_CONF);
+            if (nconf > 0 && cpu >= nconf) online = false;
+        }
+    }
+    if (!online) {
+        int remap = (int)sysconf(_SC_NPROCESSORS_ONLN) - 1;
+        if (remap < 0) remap = 0;
+        std::cerr << "  WARNING: CPU " << cpu << " offline; remapping to CPU " << remap
+                  << " (check isolcpus/nosmt vs send_cpu/recv_cpu)" << std::endl;
+        cpu = remap;
+    }
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(cpu, &set);
@@ -515,15 +695,26 @@ static void enable_realtime() {
     }
 }
 
-// Safety alarm: auto-kill if stuck in RT spin loop (prevents system lockup)
+// Safety alarm: auto-kill if stuck in RT spin loop (prevents system lockup).
+// Signal-handler safe: write(2) only, no iostreams/malloc.
 static void alarm_handler(int) {
-    // Force exit -- RT thread may be spinning and blocking normal shutdown
-    _exit(2);
+    static const char msg[] =
+        "\nFATAL: rtt safety alarm fired - the run exceeded (count/rate + 30s).\n"
+        "  Likely a TX stall/livelock (ring full with no completions) or a rate the\n"
+        "  sender cannot sustain. Exit code 3.\n";
+    ssize_t w = write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    (void)w;
+    _exit(3);
 }
 
 static void set_safety_alarm(uint64_t total_msgs, uint64_t rate_per_sec) {
-    // Expected runtime + generous 30s headroom
-    unsigned int timeout_sec = static_cast<unsigned int>(total_msgs / rate_per_sec) + 30;
+    // Budget on an achievable rate, not the requested one: a single-threaded
+    // sender pays a few us per packet (frame build + submit + kick), so a
+    // request far above that cannot be met. Assume no better than
+    // ASSUMED_MAX_PPS for the budget; the alarm still bounds a real hang.
+    constexpr uint64_t ASSUMED_MAX_PPS = 50000;
+    uint64_t eff = rate_per_sec < ASSUMED_MAX_PPS ? rate_per_sec : ASSUMED_MAX_PPS;
+    unsigned int timeout_sec = static_cast<unsigned int>(total_msgs / (eff ? eff : 1)) + 30;
     signal(SIGALRM, alarm_handler);
     alarm(timeout_sec);
     std::cout << "  safety alarm: " << timeout_sec << "s" << std::endl;
@@ -533,6 +724,8 @@ static void set_safety_alarm(uint64_t total_msgs, uint64_t rate_per_sec) {
 // Global state
 // ---------------------------------------------------------------------------
 static volatile bool g_running = true;
+static std::atomic<uint64_t> rx_datagrams{0};   // datagrams read from the socket
+static std::atomic<uint64_t> rx_bad_seq{0};     // read but sequence id undecodable
 static void sig_handler(int) { g_running = false; }
 
 // ---------------------------------------------------------------------------
@@ -626,13 +819,13 @@ int main(int argc, char* argv[]) {
         perror("bind"); close(recv_fd); return 1;
     }
 
-    // Detect and configure RX timestamp mode. --xdp-rx reads the XDP-stamped time
-    // from the payload instead, so skip kernel/HW RX timestamping.
-    RxTimestampMode ts_mode = RxTimestampMode::USERSPACE;
+    // Detect and configure RX timestamp mode. We enable kernel timestamping in ALL
+    // modes: --xdp-rx uses the XDP payload stamp for its RTT, but we still want the
+    // kernel-SW cmsg stamp alongside it for the dual-stamp cross-check.
+    RxTimestampMode ts_mode = detect_timestamp_mode(recv_fd);
     if (xdp_rx) {
-        std::cout << "Timestamp mode: XDP RX ktime (bpf_ktime_get_ns MONOTONIC, stamped at XDP ingress)" << std::endl;
-    } else {
-        ts_mode = detect_timestamp_mode(recv_fd);
+        std::cout << "Timestamp mode: XDP RX ktime (bpf_ktime_get_ns MONOTONIC, stamped at XDP ingress)"
+                  << " [+ kernel-SW cmsg captured for cross-check]" << std::endl;
     }
 
     // Subscribe to the replicator
@@ -640,6 +833,14 @@ int main(int argc, char* argv[]) {
         std::cerr << "Failed to subscribe to replicator" << std::endl;
         close(recv_fd); return 1;
     }
+    // Arm the deregistration path (normal exit + SIGINT/SIGTERM). Leaving a stale
+    // registration makes the replicator fan out every echo to this dead endpoint,
+    // inflating p50 for every later measurement against that node.
+    snprintf(g_reg_replicator_ip, sizeof(g_reg_replicator_ip), "%s", replicator_ip);
+    snprintf(g_reg_local_ip, sizeof(g_reg_local_ip), "%s", local_ip);
+    g_reg_local_port = local_port;
+    g_registered = true;
+    atexit(deregister_if_needed);
 
     // Create send socket
     int send_fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -679,33 +880,41 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
-            // Get RX timestamp
+            // Get RX timestamp(s). We ALWAYS try the kernel-SW cmsg stamp so that in
+            // --xdp-rx mode we hold BOTH stamps for the same packet and can difference
+            // them (the XDP stamp is architecturally EARLIER than the kernel-SW
+            // stamp, so any positive xdp-rx penalty must be a domain error).
             int64_t rx_ns;
+            int64_t rx_ksw_ns = extract_rx_timestamp_ns(&msg);   // <0 when unavailable
             if (xdp_rx) {
                 // XDP stamped bpf_ktime_get_ns() into payload[4..11] (host order);
                 // 0 means it was not stamped (old ucast.o / off path) -> dropped by sanity.
                 uint64_t xrx = 0;
-                if (n >= (ssize_t)RTT_HDR_LEN) memcpy(&xrx, buf + 4, sizeof(xrx));
+                if (n >= (ssize_t)RTT_HDR_LEN) memcpy(&xrx, buf + WIRE_RTT_XDP_RX_NS_OFF, sizeof(xrx));
                 rx_ns = static_cast<int64_t>(xrx);
-            } else if (ts_mode == RxTimestampMode::USERSPACE) {
+            } else if (ts_mode == RxTimestampMode::USERSPACE || rx_ksw_ns < 0) {
                 struct timespec now;
                 clock_gettime(CLOCK_REALTIME, &now);
                 rx_ns = now.tv_sec * 1000000000LL + now.tv_nsec;
             } else {
-                rx_ns = extract_rx_timestamp_ns(&msg);
-                if (rx_ns < 0) {
-                    // Fallback to userspace (same CLOCK_REALTIME domain) if cmsg missing
-                    struct timespec now;
-                    clock_gettime(CLOCK_REALTIME, &now);
-                    rx_ns = now.tv_sec * 1000000000LL + now.tv_nsec;
-                }
+                rx_ns = rx_ksw_ns;
             }
 
             uint64_t seq = decode_seq_id(buf, n);
+            rx_datagrams.fetch_add(1, std::memory_order_relaxed);
             if (seq > 0 && seq <= slot_count) {
                 slots[seq - 1].recv_ns = rx_ns;
+                slots[seq - 1].recv_ksw_ns = rx_ksw_ns;
                 slots[seq - 1].received = 1;
                 total_received.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                // Read from the socket but the embedded sequence id is unusable.
+                // Without this counter such packets vanish silently and inflate
+                // "lost", which is indistinguishable from real packet loss.
+                rx_bad_seq.fetch_add(1, std::memory_order_relaxed);
+                if (rx_bad_seq.load(std::memory_order_relaxed) <= 3)
+                    std::cerr << "  note: undecodable seq (" << seq << ") in a "
+                              << n << "-byte datagram" << std::endl;
             }
         }
     });
@@ -732,7 +941,9 @@ int main(int argc, char* argv[]) {
                       << "); falling back to kernel sendto" << std::endl;
             use_xdp_tx = false;
         } else {
-            std::cout << "AF_XDP TX enabled on " << iface << " queue " << xdp_queue << std::endl;
+            std::cout << "AF_XDP TX enabled on " << iface << " queue " << xdp_queue
+                      << (xtx.zerocopy() ? " (zero-copy)" : " (COPY/SKB fallback — no kernel-bypass on TX)")
+                      << std::endl;
         }
     }
 #endif
@@ -749,31 +960,29 @@ int main(int argc, char* argv[]) {
     const int64_t mono_to_real_off = (start_rt.tv_sec * 1000000000LL + start_rt.tv_nsec)
                                    - static_cast<int64_t>(start_ns);
 
+    uint64_t tx_send_failures = 0;   // sends abandoned after MAX_SPIN retries
+    const int64_t send_loop_start_ns = now_mono_ns();
     for (uint64_t i = 1; i <= slot_count && g_running; ++i) {
         uint64_t intended_ns = start_ns + (i - 1) * interval_ns;
 
-        // Pace via absolute deadline
-        struct timespec deadline;
-        deadline.tv_sec = intended_ns / 1000000000ULL;
-        deadline.tv_nsec = intended_ns % 1000000000ULL;
-        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr);
+        // Pace via absolute deadline (hybrid sleep+spin; see wait_until_ns).
+        wait_until_ns((int64_t)intended_ns);
 
-        // Actual-send CLOCK_MONOTONIC (used by --xdp-rx, whose RX stamp is bpf_ktime MONOTONIC)
-        int64_t send_mono_ns = 0;
-        if (xdp_rx) { struct timespec m; clock_gettime(CLOCK_MONOTONIC, &m); send_mono_ns = m.tv_sec * 1000000000LL + m.tv_nsec; }
-
-        // Send: AF_XDP zero-copy TX (kernel-bypass) or kernel sendto.
-        int64_t send_rt_ns = 0;
+        // Stamp both clock domains at the same wire point so every mode shares an
+        // equivalent TX baseline.
+        int64_t send_rt_ns = 0, send_mono_ns = 0;
 #ifndef ECHO_MODE_ONLY
         if (use_xdp_tx) {
-            xtx.send(i, send_rt_ns);
+            if (!xtx.send(i, send_rt_ns, send_mono_ns)) tx_send_failures++;
         } else
 #endif
         {
             encode_message(msg_buf, i);
-            struct timespec send_ts;
-            clock_gettime(CLOCK_REALTIME, &send_ts);
-            send_rt_ns = send_ts.tv_sec * 1000000000LL + send_ts.tv_nsec;
+            struct timespec sr, sm;
+            clock_gettime(CLOCK_REALTIME, &sr);
+            clock_gettime(CLOCK_MONOTONIC, &sm);
+            send_rt_ns   = (int64_t)sr.tv_sec * 1000000000LL + sr.tv_nsec;
+            send_mono_ns = (int64_t)sm.tv_sec * 1000000000LL + sm.tv_nsec;
             sendto(send_fd, msg_buf, MSG_LEN, 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
         }
 
@@ -790,9 +999,23 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Wait for stragglers (up to 3 seconds)
+    // Wait for stragglers, capped at 3 seconds. Exits as soon as every sent
+    // datagram is accounted for, which is the normal 0%-loss case and makes the
+    // wait ~1ms instead of 3s. When responses are genuinely missing the full cap
+    // is used, so loss accounting is unchanged: the early exit can only trigger
+    // once nothing is outstanding.
+    const int64_t send_loop_end_ns = now_mono_ns();   // before the straggler wait
     std::cout << "Sending complete. Waiting for responses..." << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(3));
+    {
+        const int64_t cap_ns = 3000000000LL;
+        const int64_t wait_start = now_mono_ns();
+        while (now_mono_ns() - wait_start < cap_ns) {
+            if (total_received.load(std::memory_order_relaxed) >= slot_count) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::cout << "  straggler wait: " << (now_mono_ns() - wait_start) / 1000000
+                  << " ms (received=" << total_received.load() << "/" << slot_count << ")" << std::endl;
+    }
     g_running = false;
     receiver.join();
     close(send_fd);
@@ -801,6 +1024,7 @@ int main(int argc, char* argv[]) {
     // --- Compute statistics (skip warmup) ---
     std::vector<int64_t> service_rtts;   // recv_ns - send_ref (same clock domain per mode)
     std::vector<int64_t> response_rtts;  // recv_ns - intended_send_ns (coordinated omission)
+    std::vector<int64_t> stamp_deltas;   // dual-stamp: kernel-SW RX minus XDP RX (ns)
     uint64_t lost = 0;
 
     for (uint64_t i = warmup; i < slot_count; ++i) {
@@ -818,6 +1042,13 @@ int main(int argc, char* argv[]) {
         int64_t resp_rtt = slots[i].recv_ns - intended_ref;
         if (resp_rtt > 0 && resp_rtt < 100000000) {
             response_rtts.push_back(resp_rtt);
+        }
+
+        // Dual-stamp delta: in --xdp-rx mode we hold both RX stamps for the same packet.
+        // delta = kernel-SW(REALTIME) - [XDP(MONOTONIC) + mono->real offset].
+        // XDP runs before the skb exists, so the expected value is a small positive ns.
+        if (xdp_rx && slots[i].recv_ns > 0 && slots[i].recv_ksw_ns > 0) {
+            stamp_deltas.push_back(slots[i].recv_ksw_ns - (slots[i].recv_ns + mono_to_real_off));
         }
     }
 
@@ -841,7 +1072,24 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== RTT Latency Results  ===" << std::endl;
     std::cout << "Messages: " << measured << " measured (+ " << warmup << " warmup)" << std::endl;
     std::cout << "Rate: " << rate_per_sec << " msg/sec" << std::endl;
+    // Achieved vs requested: a single-threaded paced sender cannot reach arbitrary
+    // rates. Report it so a load sweep's rate axis is never silently uncalibrated.
+    {
+        double secs = (double)(send_loop_end_ns - send_loop_start_ns) / 1e9;
+        if (secs > 0) {
+            uint64_t achieved = (uint64_t)(slot_count / secs);
+            std::cout << "Rate achieved: " << achieved << " msg/sec ("
+                      << (int)(100.0 * achieved / (rate_per_sec ? rate_per_sec : 1)) << "% of requested, "
+                      << slot_count << " sends in " << secs << "s)" << std::endl;
+            if (achieved * 10 < rate_per_sec * 8) {
+                std::cout << "  WARNING: requested rate NOT met — treat this run as a "
+                          << achieved << " pps run, not " << rate_per_sec << " pps." << std::endl;
+            }
+        }
+    }
     std::cout << "Lost: " << lost << " (" << (100.0 * lost / measured) << "%)" << std::endl;
+    std::cout << "RX path: " << rx_datagrams.load() << " datagrams read, "
+              << rx_bad_seq.load() << " with undecodable seq" << std::endl;
     if (xdp_rx) {
         std::cout << "RX timestamp: XDP bpf_ktime_get_ns (CLOCK_MONOTONIC, XDP ingress hook)" << std::endl;
         std::cout << "TX timestamp: CLOCK_MONOTONIC (matches --xdp-rx RX domain)" << std::endl;
@@ -853,6 +1101,36 @@ int main(int argc, char* argv[]) {
                   << std::endl;
         std::cout << "TX timestamp: CLOCK_REALTIME (clock_gettime before send)" << std::endl;
     }
+
+    // ── Dual-stamp verdict: XDP vs kernel-SW RX stamp comparison.
+    // delta = kernel-SW(REAL) - [XDP(MONO) + mono->real off].
+    if (!stamp_deltas.empty()) {
+        std::vector<int64_t> sd = stamp_deltas;
+        std::sort(sd.begin(), sd.end());
+        int64_t med = sd[sd.size() / 2];
+        std::cout << "\nRX stamp cross-check (kernel-SW minus XDP, domain-corrected), n=" << sd.size() << ":"
+                  << "\n  p50: " << med << " ns   (min " << sd.front() << ", max " << sd.back() << ")"
+                  << "\n  expected: small POSITIVE (XDP runs before the skb is built)."
+                  << (med < -2000
+                        ? "\n  VERDICT: NEGATIVE -> the bpf_ktime and userspace CLOCK_MONOTONIC domains"
+                          "\n           DISAGREE by roughly this much; --xdp-rx RTTs are offset by it."
+                        : (med >= 0
+                            ? "\n  VERDICT: consistent — XDP stamp is genuinely earlier; domains agree."
+                            : "\n  VERDICT: slightly negative (sub-2us) — within noise."))
+                  << std::endl;
+    }
+
+#ifndef ECHO_MODE_ONLY
+    if (use_xdp_tx) {
+        std::cout << "\nAF_XDP TX diagnostics:"
+                  << "\n  ring-full events:      " << xtx.ringFullEvents()
+                  << "\n  send give-ups (stall): " << xtx.txStalls() << " (bounded retry)"
+                  << "\n  kicks issued when needs_wakeup was clear: " << xtx.kicksWhenNotNeeded()
+                  << "\n"
+                  << std::endl;
+        if (tx_send_failures) std::cout << "  WARNING: " << tx_send_failures << " sends failed" << std::endl;
+    }
+#endif
 
     if (!service_rtts.empty()) {
         std::cout << "\nService-time RTT (recv - actual_send):" << std::endl;
@@ -884,6 +1162,15 @@ int main(int argc, char* argv[]) {
         fprintf(jf, "  \"messages\": %lu,\n", measured);
         fprintf(jf, "  \"warmup\": %lu,\n", warmup);
         fprintf(jf, "  \"rate_mps\": %lu,\n", rate_per_sec);
+        // Achieved vs requested rate: elapsed_s/achieved_pps mirror the stdout
+        // "Rate achieved:" line above, written here too so the control-plane
+        // can read it back programmatically.
+        {
+            double secs = (double)(send_loop_end_ns - send_loop_start_ns) / 1e9;
+            double achieved = secs > 0 ? (double)slot_count / secs : 0.0;
+            fprintf(jf, "  \"elapsed_s\": %.6f,\n", secs);
+            fprintf(jf, "  \"achieved_pps\": %.1f,\n", achieved);
+        }
         fprintf(jf, "  \"lost\": %lu,\n", lost);
         fprintf(jf, "  \"loss_pct\": %.4f,\n", 100.0 * lost / measured);
         fprintf(jf, "  \"timestamp_rx\": \"%s\",\n",

@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 620" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="12">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#58a6ff"/>
+    </marker>
+    <marker id="arr-green" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#3fb950"/>
+    </marker>
+    <marker id="arr-orange" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#f0883e"/>
+    </marker>
+    <marker id="arr-purple" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#a371f7"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="980" height="620" rx="8" fill="#0d1117"/>
+
+  <!-- Title -->
+  <text x="490" y="32" text-anchor="middle" fill="#e6edf3" font-size="17" font-weight="700">AF_XDP Control Plane — Architecture</text>
+
+  <!-- Fleet Nodes region -->
+  <rect x="30" y="56" width="330" height="480" rx="6" fill="none" stroke="#30363d" stroke-dasharray="6,3"/>
+  <text x="195" y="78" text-anchor="middle" fill="#8b949e" font-size="11" font-weight="600" letter-spacing="0.5">FLEET NODES (EC2 instances)</text>
+
+  <!-- Agent (source) -->
+  <rect x="48" y="94" width="294" height="106" rx="6" fill="#161b22" stroke="#30363d"/>
+  <text x="195" y="116" text-anchor="middle" fill="#58a6ff" font-weight="700" font-size="12.5">Agent (source)</text>
+  <text x="60" y="136" fill="#8b949e" font-size="10">• IMDS self-registration (instance-id,</text>
+  <text x="70" y="149" fill="#8b949e" font-size="10">IP, AZ, PG, role)</text>
+  <text x="60" y="166" fill="#8b949e" font-size="10">• Heartbeat every 5s (state, replicator</text>
+  <text x="70" y="179" fill="#8b949e" font-size="10">mode, clock offset)</text>
+  <text x="60" y="192" fill="#8b949e" font-size="10">• Runs rtt, mcast_send/receive, set_mode</text>
+
+  <!-- Agent (replicator) -->
+  <rect x="48" y="212" width="294" height="80" rx="6" fill="#161b22" stroke="#30363d"/>
+  <text x="195" y="234" text-anchor="middle" fill="#58a6ff" font-weight="700" font-size="12.5">Agent (replicator)</text>
+  <text x="60" y="254" fill="#8b949e" font-size="10">• Same binary — role from IMDS tag or</text>
+  <text x="70" y="267" fill="#8b949e" font-size="10">env AGENT_ROLE</text>
+  <text x="60" y="282" fill="#8b949e" font-size="10">• Controls replicator.service mode</text>
+
+  <!-- Agent (destination) -->
+  <rect x="48" y="304" width="294" height="80" rx="6" fill="#161b22" stroke="#30363d"/>
+  <text x="195" y="326" text-anchor="middle" fill="#58a6ff" font-weight="700" font-size="12.5">Agent (destination)</text>
+  <text x="60" y="346" fill="#8b949e" font-size="10">• Joins mcast group via replicator_ctl</text>
+  <text x="60" y="362" fill="#8b949e" font-size="10">• Runs mcast_receive, publishes</text>
+  <text x="70" y="375" fill="#8b949e" font-size="10">one-way telemetry</text>
+
+  <!-- Additional agents indicator -->
+  <rect x="48" y="396" width="294" height="34" rx="6" fill="#161b22" stroke="#21262d" stroke-dasharray="4,2"/>
+  <text x="195" y="417" text-anchor="middle" fill="#6e7681" font-size="11">… N agents (any mix of roles)</text>
+
+  <!-- afxdpctl CLI (moved below agents, same column, no crossing) -->
+  <rect x="48" y="446" width="294" height="72" rx="6" fill="#1c2128" stroke="#f0883e"/>
+  <text x="195" y="468" text-anchor="middle" fill="#f0883e" font-weight="700" font-size="12.5">afxdpctl CLI</text>
+  <text x="60" y="488" fill="#8b949e" font-size="10">fleet · run · cancel · report · up · sync · down</text>
+  <text x="60" y="503" fill="#8b949e" font-size="10">Same HTTP API as the web UI (localhost:8080)</text>
+
+  <!-- NATS bus -->
+  <rect x="400" y="150" width="160" height="290" rx="8" fill="#1c2128" stroke="#f0883e" stroke-width="2"/>
+  <text x="480" y="176" text-anchor="middle" fill="#f0883e" font-weight="700" font-size="14">NATS</text>
+  <text x="480" y="194" text-anchor="middle" fill="#8b949e" font-size="10">Control Bus</text>
+  <line x1="416" y1="204" x2="544" y2="204" stroke="#30363d"/>
+  <text x="416" y="222" fill="#6e7681" font-size="9">fleet.register</text>
+  <text x="416" y="238" fill="#6e7681" font-size="9">fleet.heartbeat</text>
+  <text x="416" y="254" fill="#6e7681" font-size="9">fleet.telemetry</text>
+  <text x="416" y="270" fill="#6e7681" font-size="9">fleet.cmd.agent.&#123;id&#125;</text>
+  <text x="416" y="286" fill="#6e7681" font-size="9">fleet.cmd.role.&#123;role&#125;</text>
+  <text x="416" y="302" fill="#6e7681" font-size="9">fleet.cmd.all</text>
+  <text x="416" y="318" fill="#6e7681" font-size="9">fleet.result.&#123;id&#125;</text>
+  <line x1="416" y1="332" x2="544" y2="332" stroke="#30363d"/>
+  <text x="416" y="352" fill="#8b949e" font-size="9">Token auth + optional TLS</text>
+  <text x="416" y="368" fill="#8b949e" font-size="9">All connections outbound from</text>
+  <text x="416" y="382" fill="#8b949e" font-size="9">agents — no inbound fleet ports</text>
+
+  <!-- Arrows agent -> NATS (fan-in, non-crossing) -->
+  <path d="M342,147 C375,147 375,190 400,205" fill="none" stroke="#3fb950" marker-end="url(#arr-green)"/>
+  <path d="M342,252 L400,252" fill="none" stroke="#3fb950" marker-end="url(#arr-green)"/>
+  <path d="M342,344 C375,344 375,300 400,285" fill="none" stroke="#3fb950" marker-end="url(#arr-green)"/>
+
+  <!-- Backend -->
+  <rect x="610" y="80" width="340" height="330" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="2"/>
+  <text x="780" y="105" text-anchor="middle" fill="#58a6ff" font-weight="700" font-size="14.5">Backend (Go)</text>
+  <text x="780" y="122" text-anchor="middle" fill="#6e7681" font-size="10">dedicated EC2 alongside nats-server</text>
+
+  <!-- Backend sub-components -->
+  <rect x="626" y="136" width="148" height="34" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="700" y="158" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">Registry</text>
+
+  <rect x="786" y="136" width="148" height="34" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="860" y="158" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">Collector (NxN)</text>
+
+  <rect x="626" y="180" width="148" height="34" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="700" y="202" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">Orchestrator</text>
+
+  <rect x="786" y="180" width="148" height="34" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="860" y="202" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">Hub (SSE fan-out)</text>
+
+  <rect x="626" y="224" width="308" height="34" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="780" y="246" text-anchor="middle" fill="#e6edf3" font-size="10.5" font-weight="600">Ingest: NATS subscriptions → registry / collector / hub</text>
+
+  <rect x="626" y="268" width="308" height="60" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="780" y="286" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">HTTP + SSE API</text>
+  <text x="638" y="302" fill="#8b949e" font-size="9.5">GET /api/fleet · GET /api/events (SSE)</text>
+  <text x="638" y="316" fill="#8b949e" font-size="9.5">POST /api/run · /api/cancel · /api/cmd</text>
+
+  <rect x="626" y="338" width="308" height="46" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="780" y="357" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">Static file server (web/dist)</text>
+  <text x="780" y="373" text-anchor="middle" fill="#8b949e" font-size="9.5">Svelte + three.js topology viewer</text>
+
+  <!-- Arrows NATS <-> Backend (parallel, non-crossing) -->
+  <path d="M560,230 L608,230" fill="none" stroke="#f0883e" stroke-width="2" marker-end="url(#arr-orange)"/>
+  <text x="565" y="222" fill="#f0883e" font-size="9">telemetry</text>
+  <path d="M608,270 L560,270" fill="none" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="565" y="284" fill="#58a6ff" font-size="9">commands</text>
+
+  <!-- Browser / Web UI -->
+  <rect x="640" y="460" width="310" height="100" rx="6" fill="#1c2128" stroke="#a371f7" stroke-width="2"/>
+  <text x="795" y="484" text-anchor="middle" fill="#a371f7" font-weight="700" font-size="13">Web Browser</text>
+  <text x="652" y="504" fill="#8b949e" font-size="10">• SSE stream (EventSource /api/events)</text>
+  <text x="652" y="520" fill="#8b949e" font-size="10">• POST /api/run, /api/cancel</text>
+  <text x="652" y="536" fill="#8b949e" font-size="10">• Client-side HTML report download</text>
+
+  <!-- Arrow Backend <-> Browser (straight vertical, own lane) -->
+  <line x1="780" y1="410" x2="780" y2="458" stroke="#a371f7" stroke-width="1.5" marker-end="url(#arr-purple)"/>
+
+  <!-- Arrow CLI -> Backend API: straight past the NATS block, then a smooth bend up to Backend's bottom-left corner -->
+  <path d="M342,482 L560,482 C590,482 590,450 610,412" fill="none" stroke="#f0883e" stroke-dasharray="4,3" marker-end="url(#arr-orange)"/>
+</svg>

@@ -10,6 +10,8 @@
 #     -e replicator_private_ip=10.61.0.5
 #   ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml \
 #     -e replicator_private_ip=10.61.0.5 -e count=10000 -e interval_us=100
+#   ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml \
+#     -e replicator_private_ip=10.61.0.5 -e payload_size=256 -e tx_queue=1 -e rx_queue=0
 #
 # Results saved to: af_xdp/results/<timestamp>/
 #   <src_ip>-<dst_ip>.json          — per-pair one-way latency (service_rtt_us schema)
@@ -45,6 +47,14 @@
     max_clock_offset_us: 10
     allow_unsynced: false
     results_dir: "{{ hostvars['localhost'].results_dir }}"
+    # Payload bytes for mcast_send (mirrors `-s`; tool minimum 32B, tool
+    # default 64B). Empty = don't pass -s, tool falls back to its own default.
+    payload_size: ""
+    # AF_XDP queue overrides (mirror `-q` on each tool). Empty = don't pass
+    # -q, tool falls back to its own default (queue 1 for mcast_send, queue 0
+    # for mcast_receive).
+    tx_queue: ""
+    rx_queue: ""
 
   tasks:
 
@@ -157,6 +167,7 @@
           -p {{ data_port }} \
           -c {{ count }} \
           -t {{ timeout_sec }} \
+          {{ '-q ' + rx_queue if rx_queue | length > 0 else '' }} \
           -j /tmp/mcast_results.json \
           > /tmp/mcast_receive.log 2>&1 &
         echo $!
@@ -197,7 +208,9 @@
           -g {{ mcast_group }} \
           -p {{ data_port }} \
           -c {{ count }} \
-          -i {{ interval_us }}
+          -i {{ interval_us }} \
+          {{ '-s ' + payload_size if payload_size | length > 0 else '' }} \
+          {{ '-q ' + tx_queue if tx_queue | length > 0 else '' }}
       when: "'source' in group_names"
 
     # ── Wait for receivers to finish ───────────────────────────────────────
@@ -270,7 +283,7 @@
 # ── Generate report (local) — heatmap + fleet.json for the web viewer ─────────
 # Mirrors run_ucast.yaml Play 4: the per-pair <src_ip>-<dst_ip>.json files (one-way
 # source->destination latency in the service_rtt_us schema) + <ip>_metadata.json
-# feed the same gen scripts, so the web app (report/web) renders mcast identically.
+# feed the same gen scripts, so the web app (control_plane/web) renders mcast identically.
 - name: Generate report
   hosts: localhost
   become: false
@@ -283,8 +296,8 @@
 
     - name: Run report generator (heatmap + fleet.json)
       ansible.builtin.shell: |
-        python3 {{ playbook_dir }}/../../report/gen/report.py {{ latest_dir }}
-        python3 {{ playbook_dir }}/../../report/gen/fleet_json.py {{ latest_dir }}
+        python3 {{ playbook_dir }}/../../control_plane/gen/report.py {{ latest_dir }}
+        python3 {{ playbook_dir }}/../../control_plane/gen/fleet_json.py {{ latest_dir }}
       register: report_output
       changed_when: true
 
@@ -301,5 +314,5 @@
       ansible.builtin.debug:
         msg: >-
           Wrote matrix_report.html, fleet.json, matrix_summary.json to
-          {{ latest_dir }} — view fleet.json in report/web (2D/3D)
+          {{ latest_dir }} — view fleet.json in control_plane/web (2D/3D)
       when: report_output.rc == 0

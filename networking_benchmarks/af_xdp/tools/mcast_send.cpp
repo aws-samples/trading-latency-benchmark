@@ -30,8 +30,11 @@
 #include <cstring>
 #include <cstdint>
 #include <cerrno>
+#include <vector>
 
 #include <arpa/inet.h>
+#include "common/wire.h"   // S1: single source of the on-wire layout
+#include "common/nexthop.h"  // next-hop MAC (gateway when off-subnet)
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
@@ -45,6 +48,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <poll.h>
+#include <sched.h>
 
 #include <xdp/xsk.h>
 #include <bpf/libbpf.h>
@@ -62,13 +66,13 @@ static constexpr int         DEF_COUNT       = 10000;
 static constexpr int         DEF_INTERVAL_US = 1000;
 static constexpr int         DEF_SIZE        = 64;
 static constexpr int         DEF_TX_QUEUE    = 1;   /* queue 0 is RSS-pinned (carries SSH/ctrl); bind TX off it */
-static constexpr int         HDR_SIZE        = 32;   /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
+static constexpr int         HDR_SIZE        = WIRE_APP_HDR_LEN;   /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
 
 /* Light mcast->ucast tunnel tag ("M2CU"): an 8-byte header {magic, group}
  * prepended to the UDP payload. Kept in
  * sync with src/xdp/mcast.c, src/Replicator.cpp and tools/mcast_receive.cpp. */
-static constexpr uint32_t    M2U_MAGIC       = 0x4D324355;
-static constexpr int         M2U_HDR_LEN     = 8;   /* magic(4) + group(4) */
+static constexpr uint32_t    M2U_MAGIC       = WIRE_M2U_MAGIC;
+static constexpr int         M2U_HDR_LEN     = WIRE_M2U_HDR_LEN;   /* magic(4) + group(4) */
 
 /*
  * Fixed offsets within the ethernet frame for the fields updated per packet.
@@ -81,11 +85,11 @@ static constexpr int         M2U_HDR_LEN     = 8;   /* magic(4) + group(4) */
  *                                zeroed in template — receiver skips hop
  *                                breakdown if still 0)
  */
-static constexpr int PAYLOAD_OFF    = 14 + 20 + 8 + M2U_HDR_LEN;
+static constexpr int PAYLOAD_OFF    = WIRE_PAYLOAD_OFF;
 static constexpr int SEQ_OFF        = PAYLOAD_OFF;
-static constexpr int TS_OFF         = PAYLOAD_OFF + 8;
-static constexpr int REPLICATOR_TS_OFF  = PAYLOAD_OFF + 16;  /* written by replicator, not sender */
-static constexpr int REPLICATOR_TX_TS_OFF = PAYLOAD_OFF + 24;  /* written by replicator at TX submit, not sender */
+static constexpr int TS_OFF         = PAYLOAD_OFF + WIRE_APP_TS_NS_OFF;
+static constexpr int REPLICATOR_TS_OFF  = PAYLOAD_OFF + WIRE_APP_REPL_NS_OFF;  /* written by replicator, not sender */
+static constexpr int REPLICATOR_TX_TS_OFF = PAYLOAD_OFF + WIRE_APP_REPL_TX_NS_OFF;  /* written by replicator at TX submit, not sender */
 
 struct __attribute__((packed)) pkt_hdr {
 	uint64_t seq;
@@ -111,15 +115,21 @@ static inline uint64_t now_ns()
 	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-static inline void busy_wait_ns(uint64_t ns)
+// Absolute-deadline pace, matching rtt.cpp's wait_until_ns(). Waits until
+// deadline_ns on CLOCK_MONOTONIC, or returns immediately if already past.
+//
+// Uses an absolute deadline (t0 + seq*interval_ns) rather than a per-iteration
+// relative sleep, so the loop's own processing time is absorbed into the
+// interval instead of adding on top of it. clock_nanosleep(TIMER_ABSTIME) also
+// lets this core run NAPI/softirq TX-completion cleanup between packets,
+// unlike a tight spin which never yields and would starve that path on a
+// zero-copy TX ring.
+static inline void wait_until_ns(int64_t deadline_ns)
 {
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	uint64_t target = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec + ns;
-	for (;;) {
-		clock_gettime(CLOCK_MONOTONIC, &ts);
-		if ((uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec >= target) break;
-	}
+	struct timespec d;
+	d.tv_sec  = deadline_ns / 1000000000LL;
+	d.tv_nsec = deadline_ns % 1000000000LL;
+	clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &d, nullptr);
 }
 
 /* ── IP checksum ──────────────────────────────────────────────────────── */
@@ -163,41 +173,6 @@ static bool get_iface_info(const char *iface, iface_info &out)
 }
 
 /* ── ARP MAC resolution ───────────────────────────────────────────────── */
-static bool resolve_mac(const char *dst_ip, const char *iface, uint8_t mac[6])
-{
-	int s = socket(AF_INET, SOCK_DGRAM, 0);
-	if (s < 0) return false;
-	setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, iface, strlen(iface) + 1);
-	struct sockaddr_in a{};
-	a.sin_family = AF_INET;
-	a.sin_port   = htons(9);
-	inet_pton(AF_INET, dst_ip, &a.sin_addr);
-	connect(s, (struct sockaddr *)&a, sizeof(a));
-	send(s, nullptr, 0, 0);
-	close(s);
-
-	usleep(50000);
-
-	FILE *f = fopen("/proc/net/arp", "r");
-	if (!f) { perror("open /proc/net/arp"); return false; }
-
-	char line[256];
-	fgets(line, sizeof(line), f);
-	while (fgets(line, sizeof(line), f)) {
-		char ip[32], hwtype[16], flags[16], hw[32], mask[16], dev[32];
-		if (sscanf(line, "%31s %15s %15s %31s %15s %31s",
-		           ip, hwtype, flags, hw, mask, dev) != 6) continue;
-		if (strcmp(ip, dst_ip) != 0) continue;
-		unsigned int b[6];
-		if (sscanf(hw, "%x:%x:%x:%x:%x:%x",
-		           &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) continue;
-		for (int i = 0; i < 6; i++) mac[i] = (uint8_t)b[i];
-		fclose(f);
-		return true;
-	}
-	fclose(f);
-	return false;
-}
 
 /*
  * Build the full m2u packet template into buf.
@@ -269,6 +244,108 @@ static int build_m2u_pkt(uint8_t *buf, int max_buf,
 	return total;
 }
 
+/* ── kernel mode (-k): plain UDP socket, no AF_XDP/root ──────────────────
+ * sendto() only needs [m2u(8) | app payload] — the kernel builds Eth/IP/UDP
+ * itself, unlike the AF_XDP path above which builds the full raw frame.
+ * Same wire.h layout, same replicator_ns/replicator_tx_ns semantics; this is
+ * the apples-to-apples TX-side counterpart of REPLICATOR_FWD_MODE=kernel. */
+static int run_kernel_send(const char *replicator_ip_s, const char *group, int port,
+                            int count, int interval_us, int pkt_size)
+{
+	int sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock < 0) { perror("socket"); return 1; }
+
+	struct sockaddr_in dst{};
+	dst.sin_family = AF_INET;
+	dst.sin_port   = htons((uint16_t)port);
+	if (inet_pton(AF_INET, replicator_ip_s, &dst.sin_addr) != 1) {
+		fprintf(stderr, "error: invalid replicator IP %s\n", replicator_ip_s);
+		close(sock);
+		return 1;
+	}
+
+	uint32_t mcast_ip_nbo;
+	inet_pton(AF_INET, group, &mcast_ip_nbo);
+
+	const int m2u_len = M2U_HDR_LEN;
+	const int buf_len = m2u_len + pkt_size;
+	std::vector<uint8_t> buf(buf_len, 0);
+
+	uint32_t magic_be = htonl(M2U_MAGIC);
+	memcpy(buf.data(),     &magic_be,     4);
+	memcpy(buf.data() + 4, &mcast_ip_nbo, 4);
+	/* payload bytes [0..15] (seq, ts_ns) are overwritten per packet below;
+	 * [16..31] (replicator_ns, replicator_tx_ns) stay zero — the receiver
+	 * treats a still-zero replicator_ns as "no hop breakdown available". */
+
+	printf("Sending %d packets to replicator %s (inner %s:%d)  "
+	       "payload=%dB  interval=%dus  [kernel mode]\n\n",
+	       count, replicator_ip_s, group, port, pkt_size, interval_us);
+
+	uint64_t interval_ns = (uint64_t)interval_us * 1000ULL;
+
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	int64_t t0_ns = (int64_t)t0.tv_sec * 1000000000LL + t0.tv_nsec;
+
+	for (int seq = 0; seq < count; seq++) {
+		uint64_t seq_be = htobe64_((uint64_t)seq);
+		memcpy(buf.data() + m2u_len + WIRE_APP_SEQ_OFF, &seq_be, 8);
+
+		/* Stamp ts_ns immediately before sendto(), mirroring the AF_XDP path's
+		 * "stamp right before submit" placement (there submit = ring push,
+		 * here submit = the sendto() call itself). */
+		uint64_t ts_be = htobe64_(now_ns());
+		memcpy(buf.data() + m2u_len + WIRE_APP_TS_NS_OFF, &ts_be, 8);
+
+		ssize_t sent = sendto(sock, buf.data(), buf.size(), 0,
+		                      reinterpret_cast<struct sockaddr *>(&dst), sizeof(dst));
+		if (sent < 0) {
+			perror("sendto");
+		}
+
+		if (seq % 100 == 0) {
+			printf("  sent %d/%d\r", seq, count);
+			fflush(stdout);
+		}
+
+		if (interval_us > 0)
+			wait_until_ns(t0_ns + (int64_t)(seq + 1) * (int64_t)interval_ns);
+	}
+
+	struct timespec t1;
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+	double achieved_pps = elapsed > 0 ? count / elapsed : 0.0;
+	double requested_pps = interval_us > 0 ? 1e6 / interval_us : achieved_pps;
+	printf("\nDone. Sent %d packets in %.3fs (achieved %.0f pps, requested %.0f pps, %.1f%%)  [kernel mode]\n",
+	       count, elapsed, achieved_pps, requested_pps,
+	       requested_pps > 0 ? 100.0 * achieved_pps / requested_pps : 0.0);
+	close(sock);
+	return 0;
+}
+
+/* ── real-time scheduling ────────────────────────────────────────────────
+ * AF_XDP-path-only: matches rtt.cpp's enable_realtime(). SCHED_FIFO removes
+ * scheduler wakeup latency on the TX hot loop (stamp -> submit -> doorbell).
+ * Not applied in run_kernel_send(): that path is the deliberately-untuned
+ * stock-kernel baseline and must stay that way for the comparison to mean
+ * what it claims to. */
+static void enable_realtime()
+{
+	struct sched_param param = {};
+	param.sched_priority = 80;
+	if (sched_setscheduler(0, SCHED_FIFO, &param) == 0)
+		printf("  SCHED_FIFO priority 80 enabled\n");
+	else
+		fprintf(stderr, "  Warning: SCHED_FIFO failed (need root/CAP_SYS_NICE), continuing with SCHED_OTHER\n");
+
+	if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0)
+		printf("  mlockall enabled (no page faults during measurement)\n");
+	else
+		fprintf(stderr, "  Warning: mlockall failed (need root/CAP_IPC_LOCK)\n");
+}
+
 /* ── usage ────────────────────────────────────────────────────────────── */
 static void usage(const char *prog)
 {
@@ -280,7 +357,9 @@ static void usage(const char *prog)
 	       "  -c <count>       number of packets         (default: %d)\n"
 	       "  -i <interval_us> inter-packet gap µs       (default: %d)\n"
 	       "  -s <size>        payload bytes             (default: %d, min: %d)\n"
-	       "  -q <queue>       AF_XDP TX queue           (default: %d)\n"
+	       "  -q <queue>       AF_XDP TX queue           (default: %d, ignored with -k)\n"
+	       "  -k               kernel mode: plain UDP socket, no AF_XDP/root\n"
+	       "                   (apples-to-apples baseline vs REPLICATOR_FWD_MODE=kernel)\n"
 	       "  -h               this help\n",
 	       prog, DEF_IFACE, DEF_GROUP, DEF_PORT,
 	       DEF_COUNT, DEF_INTERVAL_US, DEF_SIZE, HDR_SIZE, DEF_TX_QUEUE);
@@ -297,8 +376,10 @@ int main(int argc, char *argv[])
 	int pkt_size    = DEF_SIZE;
 	int tx_queue    = DEF_TX_QUEUE;
 
+	bool kernel_mode = false;
+
 	int opt;
-	while ((opt = getopt(argc, argv, "I:D:g:p:c:i:s:q:h")) != -1) {
+	while ((opt = getopt(argc, argv, "I:D:g:p:c:i:s:q:kh")) != -1) {
 		switch (opt) {
 		case 'I': iface       = optarg;          break;
 		case 'D': replicator_ip_s = optarg;          break;
@@ -308,6 +389,7 @@ int main(int argc, char *argv[])
 		case 'i': interval_us = atoi(optarg);    break;
 		case 's': pkt_size    = atoi(optarg);    break;
 		case 'q': tx_queue    = atoi(optarg);    break;
+		case 'k': kernel_mode = true;             break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
 		}
@@ -320,6 +402,9 @@ int main(int argc, char *argv[])
 	}
 	if (pkt_size < HDR_SIZE) pkt_size = HDR_SIZE;
 
+	if (kernel_mode)
+		return run_kernel_send(replicator_ip_s, group, port, count, interval_us, pkt_size);
+
 	/* ── interface info ───────────────────────────────────────────────── */
 	iface_info src;
 	if (!get_iface_info(iface, src)) return 1;
@@ -327,8 +412,8 @@ int main(int argc, char *argv[])
 	/* ── resolve replicator MAC ───────────────────────────────────────────── */
 	uint8_t dst_mac[6];
 	printf("Resolving MAC for %s ...\n", replicator_ip_s);
-	if (!resolve_mac(replicator_ip_s, iface, dst_mac)) {
-		fprintf(stderr, "error: ARP resolution failed for %s\n", replicator_ip_s);
+	if (!afxdp::resolve_next_hop_mac(replicator_ip_s, iface, dst_mac)) {
+		fprintf(stderr, "error: next-hop MAC resolution failed for %s\n", replicator_ip_s);
 		fprintf(stderr, "       ensure replicator is reachable and try again\n");
 		return 1;
 	}
@@ -412,8 +497,19 @@ int main(int argc, char *argv[])
 	       "payload=%dB  interval=%dus\n\n",
 	       count, replicator_ip_s, group, port, iface, tx_queue, pkt_size, interval_us);
 
+	// SCHED_FIFO + mlockall from here, not before AF_XDP setup: MAC
+	// resolution, posix_memalign, xsk_umem__create and xsk_socket__create all
+	// make syscalls that can need the kernel to schedule ordinary work on this
+	// core. Enabling RT only around the steady-state hot loop avoids
+	// starving that setup work while pages are already locked.
+	enable_realtime();
+
 	uint64_t interval_ns = (uint64_t)interval_us * 1000ULL;
 	uint32_t outstanding = 0;
+
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	int64_t t0_ns = (int64_t)t0.tv_sec * 1000000000LL + t0.tv_nsec;
 
 	for (int seq = 0; seq < count; seq++) {
 		/* drain completions */
@@ -461,21 +557,16 @@ int main(int argc, char *argv[])
 		if (xsk_ring_prod__needs_wakeup(&tx_ring))
 			sendto(xsk_fd, nullptr, 0, MSG_DONTWAIT, nullptr, 0);
 
-		if (seq % 100 == 0) {
-			printf("  sent %d/%d\r", seq, count);
-			fflush(stdout);
+		// Every 10000, no fflush - see mcast_receive.cpp's identical fix for
+		// why: fflush's write(2) inside a SCHED_FIFO hot loop on an isolated
+		// core is an uninterruptible stall surface, measured live as
+		// intermittent multi-hundred-ms latency spikes.
+		if (seq % 10000 == 0) {
+			printf("  sent %d/%d\n", seq, count);
 		}
 
-		if (interval_us > 0) {
-			if (interval_us < 1000)
-				busy_wait_ns(interval_ns);
-			else {
-				struct timespec sl{};
-				sl.tv_sec  = interval_us / 1000000;
-				sl.tv_nsec = (long)(interval_us % 1000000) * 1000L;
-				nanosleep(&sl, nullptr);
-			}
-		}
+		if (interval_us > 0)
+			wait_until_ns(t0_ns + (int64_t)(seq + 1) * (int64_t)interval_ns);
 	}
 
 	/* flush outstanding TX */
@@ -488,7 +579,15 @@ int main(int argc, char *argv[])
 		if (outstanding > 0) usleep(1000);
 	}
 
-	printf("\nDone. Sent %d packets.\n", count);
+	struct timespec t1;
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+	double achieved_pps = elapsed > 0 ? count / elapsed : 0.0;
+	double requested_pps = interval_us > 0 ? 1e6 / interval_us : achieved_pps;
+
+	printf("\nDone. Sent %d packets in %.3fs (achieved %.0f pps, requested %.0f pps, %.1f%%)\n",
+	       count, elapsed, achieved_pps, requested_pps,
+	       requested_pps > 0 ? 100.0 * achieved_pps / requested_pps : 0.0);
 	xsk_socket__delete(xsk);
 	xsk_umem__delete(umem);
 	free(umem_buf);

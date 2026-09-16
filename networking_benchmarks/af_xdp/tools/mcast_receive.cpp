@@ -21,6 +21,7 @@
 #include <string>
 
 #include <arpa/inet.h>
+#include "common/wire.h"   // S1: single source of the on-wire layout
 #include <net/if.h>
 #include <linux/if_ether.h>
 #include <netinet/ip.h>
@@ -31,6 +32,8 @@
 #include <signal.h>
 #include <poll.h>
 #include <sys/resource.h>
+#include <sched.h>
+#include <sys/mman.h>
 
 #include <xdp/xsk.h>
 #include <bpf/libbpf.h>
@@ -48,8 +51,8 @@ static constexpr uint32_t FILL_SIZE   = 2048;   /* XSK_RING_PROD__DEFAULT_NUM_DE
 static constexpr uint32_t RX_SIZE     = 2048;
 static constexpr uint32_t BATCH       = 64;
 static constexpr uint16_t ETH_P_IPV4  = 0x0800;
-static constexpr int      HDR_SIZE    = 32;     /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
-static constexpr uint32_t M2U_MAGIC   = 0x4D324355;  /* "M2CU" — light mcast->ucast tag */
+static constexpr int      HDR_SIZE    = WIRE_APP_HDR_LEN;     /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
+static constexpr uint32_t M2U_MAGIC   = WIRE_M2U_MAGIC;  /* "M2CU" — light mcast->ucast tag */
 static constexpr int      M2U_HDR_LEN = 8;           /* magic(4) + group(4) */
 
 struct __attribute__((packed)) pkt_hdr {
@@ -108,6 +111,374 @@ static uint64_t pct(std::vector<uint64_t> &sorted, int p)
 	return sorted[idx];
 }
 
+/* ── shared stats accumulation + reporting ────────────────────────────────
+ * Factored out so the AF_XDP path and the -k (kernel
+ * socket) path share identical hop1/hop2/total math, percentile aggregation,
+ * and -j JSON output — both consume the same parsed pkt_hdr fields
+ * regardless of how the frame arrived (ring peek vs recvfrom). */
+struct RxStats {
+	std::vector<uint64_t> latencies;       /* total: rx_ns - tx_ns */
+	std::vector<uint64_t> latencies_hop1;  /* hop1:  replicator_ns - tx_ns   (source → replicator) */
+	std::vector<uint64_t> latencies_hop2;  /* hop2:  rx_ns - replicator_ns   (replicator → destination) */
+	std::vector<uint64_t> latencies_proc;  /*   replicator_tx_ns - replicator_ns  (relay processing) */
+	std::vector<uint64_t> latencies_leg2;  /*   rx_ns - replicator_tx_ns          (wire + dest RX)   */
+	int      received      = 0;
+	int      lost          = 0;
+	int      ooo           = 0;
+	int64_t  last_seq      = -1;
+	// RX wall-clock of the first and last packet actually received. Used for
+	// achieved_pps instead of the loop's own elapsed time, since the loop
+	// starts before the sender has dispatched: elapsed-time-based rate would
+	// be deflated by the sender's own startup/dispatch dead time.
+	uint64_t first_rx_ns   = 0;
+	uint64_t last_rx_ns    = 0;
+	uint64_t min_lat       = UINT64_MAX;
+	uint64_t max_lat       = 0;
+	uint64_t sum_lat       = 0;
+	uint64_t min_lat1      = UINT64_MAX;
+	uint64_t max_lat1      = 0;
+	uint64_t sum_lat1      = 0;
+	uint64_t min_lat2      = UINT64_MAX;
+	uint64_t max_lat2      = 0;
+	uint64_t sum_lat2      = 0;
+	int      n_neg_h2      = 0;
+	int      n_neg_total   = 0;
+	int64_t  min_neg_h2_ns = 0;   // most-negative hop2 seen, 0 if none negative
+	int64_t  min_neg_total_ns = 0; // most-negative total seen, 0 if none negative
+	bool     has_replicator_ts = false;
+	bool     has_tx_ts     = false;
+
+	void reserve(int count) {
+		latencies.reserve(count);
+		latencies_hop1.reserve(count);
+		latencies_hop2.reserve(count);
+		latencies_proc.reserve(count);
+		latencies_leg2.reserve(count);
+	}
+};
+
+/* Record one already-parsed sample (pkt_hdr fields + RX timestamp) into st.
+ * Prints the same "[n/count] last=... avg(100)=..." progress line the
+ * AF_XDP loop always printed. Caller has already validated the frame down
+ * to the m2u header and extracted hdr/rx_ns. */
+static void record_sample(RxStats &st, const pkt_hdr *hdr, uint64_t rx_ns, int count)
+{
+	uint64_t seq              = betoh64_(hdr->seq);
+	uint64_t tx_ns            = betoh64_(hdr->ts_ns);
+	uint64_t replicator_ns    = betoh64_(hdr->replicator_ns);
+	uint64_t replicator_tx_ns = betoh64_(hdr->replicator_tx_ns);
+
+	uint64_t ulat = (rx_ns >= tx_ns) ? (rx_ns - tx_ns) : 0;
+	// Never clamp a negative sample silently - record its true signed
+	// magnitude too, so min_neg_total_ns is a real bound on the differential
+	// clock offset rather than a discarded value.
+	if (rx_ns < tx_ns) {
+		st.n_neg_total++;
+		int64_t signed_total = (int64_t)rx_ns - (int64_t)tx_ns;
+		if (signed_total < st.min_neg_total_ns) st.min_neg_total_ns = signed_total;
+	}
+	st.latencies.push_back(ulat);
+	st.sum_lat += ulat;
+	st.received++;
+	if (st.first_rx_ns == 0) st.first_rx_ns = rx_ns;
+	st.last_rx_ns = rx_ns;
+	if (ulat < st.min_lat) st.min_lat = ulat;
+	if (ulat > st.max_lat) st.max_lat = ulat;
+
+	if (replicator_ns != 0) {
+		st.has_replicator_ts = true;
+		uint64_t h1 = (replicator_ns >= tx_ns) ? (replicator_ns - tx_ns) : 0;
+		st.latencies_hop1.push_back(h1);
+		st.sum_lat1 += h1;
+		if (h1 < st.min_lat1) st.min_lat1 = h1;
+		if (h1 > st.max_lat1) st.max_lat1 = h1;
+
+		int64_t h2_signed = (int64_t)rx_ns - (int64_t)replicator_ns;
+		if (h2_signed <= 0) {
+			st.n_neg_h2++;
+			if (h2_signed < st.min_neg_h2_ns) st.min_neg_h2_ns = h2_signed;
+		} else {
+			uint64_t h2 = (uint64_t)h2_signed;
+			st.latencies_hop2.push_back(h2);
+			st.sum_lat2 += h2;
+			if (h2 < st.min_lat2) st.min_lat2 = h2;
+			if (h2 > st.max_lat2) st.max_lat2 = h2;
+
+			if (replicator_tx_ns > replicator_ns && rx_ns >= replicator_tx_ns) {
+				st.has_tx_ts = true;
+				st.latencies_proc.push_back(replicator_tx_ns - replicator_ns);
+				st.latencies_leg2.push_back(rx_ns - replicator_tx_ns);
+			}
+		}
+	}
+
+	int64_t iseq = (int64_t)seq;
+	if (st.last_seq >= 0) {
+		if (iseq < st.last_seq)          st.ooo++;
+		else if (iseq > st.last_seq + 1) st.lost += (int)(iseq - st.last_seq - 1);
+	}
+	if (iseq > st.last_seq) st.last_seq = iseq;
+
+	// Progress print: every 10000 packets, no fflush per line. An fflush
+	// under SCHED_FIFO on an isolated core is an uninterruptible syscall
+	// stall surface that can cause multi-hundred-ms latency spikes; letting
+	// libc's normal buffered write happen off the RT critical path avoids it.
+	if (st.received % 10000 == 0) {
+		uint64_t avg100 = 0;
+		int start = (int)st.latencies.size() - 100;
+		if (start < 0) start = 0;
+		for (size_t j = (size_t)start; j < st.latencies.size(); j++)
+			avg100 += st.latencies[j];
+		avg100 /= (st.latencies.size() - (size_t)start);
+		printf("  [%d/%d] last=%.1fus avg(100)=%.1fus\n",
+		       st.received, count, ulat / 1000.0, avg100 / 1000.0);
+	}
+}
+
+/* Print the full report and (optionally) write the JSON result. Identical
+ * for both RX transports — only the "Interface:" line's wording differs
+ * (kernel mode has no XDP queue to name), passed via queue_desc. */
+static void emit_report(RxStats &st, const char *iface_or_desc, const char *queue_desc,
+                         bool is_kernel, int port, int count, double elapsed,
+                         const char *json_path, bool raw)
+{
+	(void)port;
+	if (st.received == 0) { printf("\nNo packets received.\n"); return; }
+
+	std::sort(st.latencies.begin(), st.latencies.end());
+	std::sort(st.latencies_hop1.begin(), st.latencies_hop1.end());
+	std::sort(st.latencies_hop2.begin(), st.latencies_hop2.end());
+	std::sort(st.latencies_proc.begin(), st.latencies_proc.end());
+	std::sort(st.latencies_leg2.begin(), st.latencies_leg2.end());
+	uint64_t avg_lat = st.sum_lat / (uint64_t)st.received;
+
+	static const int pcts[] = {0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99};
+
+	printf("\n\n");
+	printf("==================================================\n");
+	printf("  Multicast Latency Report (%s)\n", is_kernel ? "kernel" : "AF_XDP");
+	printf("==================================================\n");
+	printf("  Interface:     %s%s\n", iface_or_desc, queue_desc);
+	printf("  Received:      %d/%d packets (%.1fs)\n", st.received, count, elapsed);
+	printf("  Lost:          %d packets\n", st.lost);
+	printf("  Out of order:  %d\n", st.ooo);
+
+	if (st.has_replicator_ts) {
+		uint64_t n1 = (uint64_t)st.latencies_hop1.size();
+		uint64_t n2 = (uint64_t)st.latencies_hop2.size();
+
+		printf("\n  Hop 1 — Exchange → Feeder (usec):\n");
+		printf("    Min: %8.1f   Avg: %8.1f   Max: %8.1f\n",
+		       st.min_lat1 / 1000.0, (n1 ? st.sum_lat1 / n1 : 0) / 1000.0, st.max_lat1 / 1000.0);
+		for (int p : pcts)
+			printf("    P%-3d  %8.1f\n", p, pct(st.latencies_hop1, p) / 1000.0);
+
+		printf("\n  Hop 2 — Feeder → Destination (usec):\n");
+		if (st.n_neg_h2 > 0) {
+			int total_h2 = st.n_neg_h2 + (int)st.latencies_hop2.size();
+			printf("    [!] %d/%d samples negative (replicator clock leads destination by > transit time)\n",
+			       st.n_neg_h2, total_h2);
+			printf("        Ensure refclock PHC /dev/ptp0 is active on all nodes (phc_enable=1).\n");
+		}
+		if (!st.latencies_hop2.empty()) {
+			printf("    Min: %8.1f   Avg: %8.1f   Max: %8.1f\n",
+			       st.min_lat2 / 1000.0, (n2 ? st.sum_lat2 / n2 : 0) / 1000.0, st.max_lat2 / 1000.0);
+			for (int p : pcts)
+				printf("    P%-3d  %8.1f\n", p, pct(st.latencies_hop2, p) / 1000.0);
+		} else {
+			printf("    No valid samples — all negative (clock skew > hop2 transit time)\n");
+		}
+
+		if (st.has_tx_ts && !st.latencies_proc.empty()) {
+			printf("\n  Hop 2 split (a) — Feeder processing: parse+build+submit (usec):\n");
+			for (int p : pcts)
+				printf("    P%-3d  %8.1f\n", p, pct(st.latencies_proc, p) / 1000.0);
+			printf("\n  Hop 2 split (b) — wire + destination RX (usec):\n");
+			for (int p : pcts)
+				printf("    P%-3d  %8.1f\n", p, pct(st.latencies_leg2, p) / 1000.0);
+		}
+	}
+
+	printf("\n  Total — Exchange → Destination (usec):%s\n",
+	       st.has_replicator_ts ? "" : "  (no replicator timestamps; single-hop view)");
+	printf("    Min: %8.1f   Avg: %8.1f   Max: %8.1f\n",
+	       st.min_lat / 1000.0, avg_lat / 1000.0, st.max_lat / 1000.0);
+	for (int p : pcts)
+		printf("    P%-3d  %8.1f\n", p, pct(st.latencies, p) / 1000.0);
+	if (st.n_neg_total > 0)
+		printf("  ** CLOCK SKEW: %d/%d samples had rx<tx (clamped to 0) — the destination\n"
+		       "     clock is BEHIND the source; one-way latency is INVALID. Re-sync chrony\n"
+		       "     (chronyc makestep) on both nodes and re-run. (This is NOT a datapath fault.)\n",
+		       st.n_neg_total, st.received);
+	printf("==================================================\n");
+
+	if (json_path) {
+		FILE *jf = fopen(json_path, "w");
+		if (!jf) {
+			fprintf(stderr, "warning: cannot open %s: %s\n", json_path, strerror(errno));
+		} else {
+			uint64_t p999 = st.latencies.empty() ? 0
+			              : st.latencies[(st.latencies.size() - 1) * 999 / 1000];
+			int total_pkts = st.received + st.lost;
+			double loss_pct = total_pkts > 0 ? 100.0 * st.lost / total_pkts : 0.0;
+			fprintf(jf, "{\n");
+			fprintf(jf, "  \"messages\": %d,\n", st.received);
+			fprintf(jf, "  \"lost\": %d,\n", st.lost);
+			fprintf(jf, "  \"loss_pct\": %.4f,\n", loss_pct);
+			fprintf(jf, "  \"clock_skew_samples\": %d,\n", st.n_neg_total);
+			fprintf(jf, "  \"clock_skew_hop2_samples\": %d,\n", st.n_neg_h2);
+			// One-sided bracket on the differential clock offset, computed
+			// from the most-negative signed sample observed (never discarded).
+			// 0 means no negative samples.
+			fprintf(jf, "  \"min_neg_total_us\": %.3f,\n", st.min_neg_total_ns / 1000.0);
+			fprintf(jf, "  \"min_neg_hop2_us\": %.3f,\n", st.min_neg_h2_ns / 1000.0);
+			fprintf(jf, "  \"timestamp_rx\": \"%s\",\n", is_kernel ? "kernel_recvfrom" : "xdp_afxdp");
+			fprintf(jf, "  \"timestamp_tx\": \"clock_realtime\",\n");
+			// Requested rate is not known to mcast_receive (it has no -i flag),
+			// so this reports elapsed_s and the destination's own achieved pps.
+			// active_s spans first->last packet received; achieved_pps is
+			// computed over that window so sender startup dead time before the
+			// first packet does not deflate the rate.
+			double active_s = (st.last_rx_ns > st.first_rx_ns)
+			                ? (double)(st.last_rx_ns - st.first_rx_ns) / 1e9 : 0.0;
+			fprintf(jf, "  \"elapsed_s\": %.6f,\n", elapsed);
+			fprintf(jf, "  \"active_s\": %.6f,\n", active_s);
+			fprintf(jf, "  \"achieved_pps\": %.1f,\n",
+			        active_s > 0 ? (st.received - 1) / active_s : 0.0);
+			fprintf(jf, "  \"service_rtt_us\": {\n");
+			fprintf(jf, "    \"min\": %" PRIu64 ",\n", st.min_lat / 1000);
+			fprintf(jf, "    \"mean\": %" PRIu64 ",\n", avg_lat / 1000);
+			fprintf(jf, "    \"p50\": %" PRIu64 ",\n", pct(st.latencies, 50) / 1000);
+			fprintf(jf, "    \"p90\": %" PRIu64 ",\n", pct(st.latencies, 90) / 1000);
+			fprintf(jf, "    \"p95\": %" PRIu64 ",\n", pct(st.latencies, 95) / 1000);
+			fprintf(jf, "    \"p99\": %" PRIu64 ",\n", pct(st.latencies, 99) / 1000);
+			fprintf(jf, "    \"p999\": %" PRIu64 ",\n", p999 / 1000);
+			fprintf(jf, "    \"max\": %" PRIu64 "\n", st.max_lat / 1000);
+			fprintf(jf, "  },\n");
+			// min_total_us doubles as a one-sided bracket on the differential
+			// clock offset between source and destination: the destination's
+			// minimum observed one-way total cannot be below the true physical
+			// transit floor, so a value near 0 (especially with
+			// clock_skew_samples>0) indicates the offset is comparable to or
+			// exceeds that floor. Emitted unconditionally since it is
+			// meaningful even on a single-hop path.
+			fprintf(jf, "  \"min_total_us\": %.3f,\n", st.min_lat / 1000.0);
+			if (st.has_replicator_ts && !st.latencies_hop1.empty()) {
+				fprintf(jf, "  \"hop1_us\": { \"min\": %.3f, \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 ", \"p999\": %" PRIu64 " },\n",
+				        st.min_lat1 / 1000.0, pct(st.latencies_hop1, 50) / 1000, pct(st.latencies_hop1, 99) / 1000,
+				        (st.latencies_hop1[(st.latencies_hop1.size() - 1) * 999 / 1000]) / 1000);
+			}
+			if (st.has_replicator_ts && !st.latencies_hop2.empty()) {
+				fprintf(jf, "  \"hop2_us\": { \"min\": %.3f, \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 ", \"p999\": %" PRIu64 " },\n",
+				        st.min_lat2 / 1000.0, pct(st.latencies_hop2, 50) / 1000, pct(st.latencies_hop2, 99) / 1000,
+				        (st.latencies_hop2[(st.latencies_hop2.size() - 1) * 999 / 1000]) / 1000);
+			}
+			if (st.has_tx_ts && !st.latencies_proc.empty()) {
+				fprintf(jf, "  \"hop2_proc_ns\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
+				        pct(st.latencies_proc, 50), pct(st.latencies_proc, 99));
+				fprintf(jf, "  \"hop2_wire_ns\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
+				        pct(st.latencies_leg2, 50), pct(st.latencies_leg2, 99));
+			}
+			fprintf(jf, "  \"received\": %d\n", st.received);
+			fprintf(jf, "}\n");
+			fclose(jf);
+			printf("  JSON results: %s\n", json_path);
+		}
+	}
+
+	if (raw) {
+		printf("\nRaw latencies (ns):\n");
+		for (size_t i = 0; i < st.latencies.size(); i++)
+			printf("  %zu: %" PRIu64 "\n", i, st.latencies[i]);
+	}
+}
+
+/* ── kernel mode (-k): plain UDP socket, no AF_XDP/root/XDP attach ───────
+ * recvfrom()'s buffer already starts at the m2u header — the kernel strips
+ * Eth/IP/UDP before userspace ever sees the datagram, so (unlike the AF_XDP
+ * loop below) there is no Eth/IP/UDP validation block to run; parsing starts
+ * directly at the m2u magic. Shares record_sample/emit_report with the
+ * AF_XDP path — only frame acquisition and header-offset math differ. */
+static int run_kernel_receive(const char *group, int port, int count, int timeout,
+                               const char *json_path, bool raw)
+{
+	int sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock < 0) { perror("socket"); return 1; }
+
+	int reuse = 1;
+	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+	/* Intentionally untuned: no SO_BUSY_POLL/SO_PREFER_BUSY_POLL/
+	 * SO_BUSY_POLL_BUDGET/SO_RCVBUF, unlike the AF_XDP path below. This arm is
+	 * the stock Linux datagram stack, the reference the optimised route is
+	 * measured against. Adding the AF_XDP tuning here would compare AF_XDP to a
+	 * hand-tuned kernel socket instead, losing that baseline. */
+
+	struct sockaddr_in bind_addr{};
+	bind_addr.sin_family      = AF_INET;
+	bind_addr.sin_port        = htons((uint16_t)port);
+	bind_addr.sin_addr.s_addr = INADDR_ANY;
+	if (bind(sock, reinterpret_cast<struct sockaddr *>(&bind_addr), sizeof(bind_addr)) < 0) {
+		perror("bind");
+		close(sock);
+		return 1;
+	}
+
+	uint32_t group_nbo;
+	if (inet_pton(AF_INET, group, &group_nbo) != 1) {
+		fprintf(stderr, "error: invalid multicast group '%s'\n", group);
+		close(sock);
+		return 1;
+	}
+
+	RxStats st;
+	st.reserve(count);
+
+	printf("kernel socket listening on 0.0.0.0:%d  inner group=%s  "
+	       "expect=%d  timeout=%ds  [kernel mode]\n\n", port, group, count, timeout);
+	fflush(stdout);
+
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+
+	struct pollfd pfd{};
+	pfd.fd = sock;
+	pfd.events = POLLIN;
+	std::vector<uint8_t> buf(65535);
+
+	while (st.received < count && !g_stop) {
+		int ret = poll(&pfd, 1, timeout * 1000);
+		if (ret < 0) {
+			if (errno == EINTR) continue;
+			break;
+		}
+		if (ret == 0) break;  // timeout: give up, same as the AF_XDP loop's poll(timeout) path
+		if (!(pfd.revents & POLLIN)) continue;
+
+		ssize_t n = recvfrom(sock, buf.data(), buf.size(), 0, nullptr, nullptr);
+		uint64_t rx_ns = now_ns();
+		if (n < (ssize_t)(M2U_HDR_LEN + HDR_SIZE)) continue;
+
+		uint32_t magic;
+		memcpy(&magic, buf.data(), 4);
+		if (ntohl(magic) != M2U_MAGIC) continue;
+		uint32_t rx_group_nbo;
+		memcpy(&rx_group_nbo, buf.data() + WIRE_M2U_GROUP_OFF, 4);
+		if (rx_group_nbo != group_nbo) continue;  // not our group — mirrors config_map's filter
+
+		const auto *hdr = reinterpret_cast<const pkt_hdr *>(buf.data() + M2U_HDR_LEN);
+		record_sample(st, hdr, rx_ns, count);
+	}
+
+	struct timespec t1;
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+
+	close(sock);
+	emit_report(st, "kernel socket", " (no AF_XDP queue)", true, port, count, elapsed, json_path, raw);
+	return st.received > 0 ? 0 : 1;
+}
+
 /* ── usage ────────────────────────────────────────────────────────────── */
 static void usage(const char *prog)
 {
@@ -117,11 +488,35 @@ static void usage(const char *prog)
 	       "  -p <port>    inner UDP dst port to match (default: %d)\n"
 	       "  -c <count>   packets to receive        (default: %d)\n"
 	       "  -t <timeout> seconds before giving up  (default: %d)\n"
-	       "  -q <queue>   XDP/AF_XDP queue index    (default: %d)\n"
+	       "  -q <queue>   XDP/AF_XDP queue index    (default: %d, ignored with -k)\n"
 	       "  -r           print raw latencies (ns)\n"
+	       "  -k           kernel mode: plain UDP socket, no AF_XDP/root/XDP attach\n"
+	       "               (apples-to-apples baseline vs REPLICATOR_FWD_MODE=kernel;\n"
+	       "               -I is not required in this mode)\n"
 	       "  -h           this help\n"
-	       "\nRequires root (XDP attach + AF_XDP).\n",
+	       "\nRequires root (XDP attach + AF_XDP), except with -k.\n",
 	       prog, DEF_PORT, DEF_COUNT, DEF_TIMEOUT, DEF_QUEUE);
+}
+
+/* ── real-time scheduling ────────────────────────────────────────────────
+ * AF_XDP-path-only: matches rtt.cpp's enable_realtime() and mcast_send.cpp's
+ * copy of it. SCHED_FIFO removes scheduler wakeup latency from the RX hot
+ * loop (ring peek -> poll() busy-poll -> record_sample). Not applied in
+ * run_kernel_receive(): that path is the deliberately-untuned stock-kernel
+ * baseline and must stay that way. */
+static void enable_realtime()
+{
+	struct sched_param param = {};
+	param.sched_priority = 80;
+	if (sched_setscheduler(0, SCHED_FIFO, &param) == 0)
+		printf("  SCHED_FIFO priority 80 enabled\n");
+	else
+		fprintf(stderr, "  Warning: SCHED_FIFO failed (need root/CAP_SYS_NICE), continuing with SCHED_OTHER\n");
+
+	if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0)
+		printf("  mlockall enabled (no page faults during measurement)\n");
+	else
+		fprintf(stderr, "  Warning: mlockall failed (need root/CAP_IPC_LOCK)\n");
 }
 
 int main(int argc, char *argv[])
@@ -133,10 +528,11 @@ int main(int argc, char *argv[])
 	int  timeout = DEF_TIMEOUT;
 	int  queue   = DEF_QUEUE;
 	bool raw     = false;
+	bool kernel_mode = false;
 	const char *json_path = nullptr;
 
 	int opt;
-	while ((opt = getopt(argc, argv, "I:g:p:c:t:q:rj:h")) != -1) {
+	while ((opt = getopt(argc, argv, "I:g:p:c:t:q:rj:kh")) != -1) {
 		switch (opt) {
 		case 'I': iface    = optarg;           break;
 		case 'g': group    = optarg;           break;
@@ -146,10 +542,18 @@ int main(int argc, char *argv[])
 		case 'q': queue    = atoi(optarg);     break;
 		case 'r': raw      = true;             break;
 		case 'j': json_path = optarg;          break;
+		case 'k': kernel_mode = true;          break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
 		}
 	}
+
+	if (kernel_mode) {
+		signal(SIGINT,  sig_handler);
+		signal(SIGTERM, sig_handler);
+		return run_kernel_receive(group, port, count, timeout, json_path, raw);
+	}
+
 	if (!iface) { fprintf(stderr, "error: -I <iface> is required\n"); usage(argv[0]); return 1; }
 
 	/* ── resolve BPF object path (search order) ────────────────────────── */
@@ -265,10 +669,11 @@ int main(int argc, char *argv[])
 
 	/* ── NAPI busy-poll ───────────────────────────────────────────────
 	 * Drive RX in-app so drain latency does not depend on the NIC's
-	 * gro_flush_timeout. With these set, the poll() in the RX loop busy-polls
-	 * the NAPI for up to busy_us and pulls frames the instant they land,
-	 * instead of waiting for the deferred-NAPI timer. Best paired with a small
-	 * gro_flush_timeout (~20µs) as a safety net. Guards mirror XdpSocket. */
+	 * gro_flush_timeout. These options only take effect inside a socket
+	 * syscall, so the RX loop issues poll() on every empty ring peek - see the
+	 * loop below. Without that syscall these setsockopts are inert and delivery
+	 * falls back to the deferred-NAPI timer (~10µs per packet). Best paired
+	 * with a small gro_flush_timeout as a safety net. Guards mirror XdpSocket. */
 #ifndef SO_BUSY_POLL
 #define SO_BUSY_POLL 46
 #endif
@@ -280,9 +685,21 @@ int main(int argc, char *argv[])
 #endif
 	{
 		int on = 1, busy_us = 50, budget = 64;
-		setsockopt(xsk_fd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &on, sizeof(on));
-		setsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL, &busy_us, sizeof(busy_us));
-		setsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
+		/* Report each result. An inert SO_BUSY_POLL is indistinguishable from a
+		 * working one except by a ~10us per-packet latency difference, so print
+		 * the state rather than leaving it to be inferred from timings. */
+		int r_pref = setsockopt(xsk_fd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &on, sizeof(on));
+		int r_busy = setsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL, &busy_us, sizeof(busy_us));
+		int r_budg = setsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
+		printf("busy-poll: SO_PREFER_BUSY_POLL=%s SO_BUSY_POLL(%dus)=%s SO_BUSY_POLL_BUDGET(%d)=%s\n",
+		       r_pref == 0 ? "ok" : strerror(errno),
+		       busy_us, r_busy == 0 ? "ok" : strerror(errno),
+		       budget, r_budg == 0 ? "ok" : strerror(errno));
+		/* Read back what the kernel actually retained. */
+		int rb = 0; socklen_t rl = sizeof(rb);
+		if (getsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL, &rb, &rl) == 0)
+			printf("busy-poll: SO_BUSY_POLL readback=%dus\n", rb);
+		fflush(stdout);
 	}
 
 	if (bpf_map_update_elem(map_fd, &queue, &xsk_fd, BPF_ANY) < 0) {
@@ -337,56 +754,97 @@ int main(int argc, char *argv[])
 	xsk_ring_prod__submit(&fq, fill_got);
 
 	/* ── stats ────────────────────────────────────────────────────────── */
-	std::vector<uint64_t> latencies;       /* total: rx_ns - tx_ns */
-	std::vector<uint64_t> latencies_hop1;  /* hop1:  replicator_ns - tx_ns   (source → replicator) */
-	std::vector<uint64_t> latencies_hop2;  /* hop2:  rx_ns - replicator_ns   (replicator → destination) */
-	/* hop2 sub-split (present when replicator_tx_ns is stamped): */
-	std::vector<uint64_t> latencies_proc;  /*   replicator_tx_ns - replicator_ns  (relay processing) */
-	std::vector<uint64_t> latencies_leg2;  /*   rx_ns - replicator_tx_ns          (wire + dest RX)   */
-	latencies.reserve(count);
-	latencies_hop1.reserve(count);
-	latencies_hop2.reserve(count);
-	latencies_proc.reserve(count);
-	latencies_leg2.reserve(count);
-	int      received      = 0;
-	int      lost          = 0;
-	int      ooo           = 0;
-	int64_t  last_seq      = -1;
-	uint64_t min_lat       = UINT64_MAX;
-	uint64_t max_lat       = 0;
-	uint64_t sum_lat       = 0;
-	uint64_t min_lat1      = UINT64_MAX;
-	uint64_t max_lat1      = 0;
-	uint64_t sum_lat1      = 0;
-	uint64_t min_lat2      = UINT64_MAX;
-	uint64_t max_lat2      = 0;
-	uint64_t sum_lat2      = 0;
-	int      n_neg_h2      = 0;   /* rx_ns < replicator_ns: replicator clock leads destination */
-	int      n_neg_total   = 0;   /* rx_ns < tx_ns: destination clock behind source (skew) -> total clamped to 0 */
-	bool     has_replicator_ts = false;
-	bool     has_tx_ts     = false;  /* replicator_tx_ns present -> hop2 sub-split available */
+	RxStats st;
+	st.reserve(count);
 
 	printf("AF_XDP listening on %s queue %d  inner UDP dst port=%d  "
 	       "expect=%d  timeout=%ds\n\n",
 	       iface, queue, port, count, timeout);
+	// Flush explicitly: stdout is redirected to a file by the agent, so libc
+	// picks full buffering and this line would otherwise sit in the buffer until
+	// exit. The orchestrator polls for it as the receiver's readiness signal and
+	// starts the source send only once every receiver has reported it.
+	fflush(stdout);
+
+	// SCHED_FIFO + mlockall from here, not from main() entry: everything above
+	// makes syscalls that can need the kernel to schedule ordinary work on this
+	// core, and running that setup at RT priority with pages already locked
+	// risks starving those calls. Enabling RT only around the steady-state hot
+	// loop (ring peek -> poll() -> record) avoids that risk.
+	enable_realtime();
 
 	struct timespec t0;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 
 	struct pollfd pfd = { xsk_fd, POLLIN, 0 };
 
+	/* Idle deadline. The RX loop busy-polls rather than blocking, so it does not
+	 * self-throttle when nothing is arriving - without an explicit deadline a
+	 * stalled run would spin an isolated core at 100% until the external
+	 * `timeout` killed it. Reset on every drained batch, so this fires only
+	 * after `timeout` seconds without progress. */
+	struct timespec t_idle;
+	clock_gettime(CLOCK_MONOTONIC, &t_idle);
+
 	/* ── RX loop ──────────────────────────────────────────────────────── */
-	while (received < count && !g_stop) {
+	// SCHED_FIFO busy-poll watchdog: force this thread to voluntarily block
+	// every WATCHDOG_EMPTY_POLLS empty poll() calls, capping how long it can
+	// spin without giving the scheduler a chance to run other work on this
+	// core. poll()'s busy-poll path can occasionally spin far longer than its
+	// SO_BUSY_POLL budget on isolcpus+nohz_full+rcu_nocbs cores with SCHED_FIFO,
+	// since nothing lower-priority can preempt it; nanosleep() forces a real
+	// block so lower-priority tasks (softirqs, kworkers) can run in the gap.
+	// The control-plane's mcastAbnormalTail() (control_plane/agent/runner.go)
+	// is the authoritative defense against any stall this does not catch.
+	static constexpr int WATCHDOG_EMPTY_POLLS = 200000;
+	uint64_t empty_polls = 0;
+	static const struct timespec WATCHDOG_YIELD_NS = { 0, 1000 }; /* 1us */
+
+	while (st.received < count && !g_stop) {
 		uint32_t idx_rx = 0;
 		uint32_t rcvd   = xsk_ring_cons__peek(&rx, BATCH, &idx_rx);
 
 		if (rcvd == 0) {
+			/* App-driven busy-poll. xsk_ring_cons__peek is a pure userspace
+			 * ring read, so without a socket syscall here SO_BUSY_POLL never
+			 * engages and frame delivery falls back to the gro_flush_timeout
+			 * deferral timer - a fixed ~10us per-packet penalty on the AF_XDP
+			 * RX path that a busy-polled kernel recvfrom() does not pay.
+			 *
+			 * poll() (not recvfrom) is the AF_XDP busy-poll entry point:
+			 * xsk_poll() calls sk_busy_loop() when SO_BUSY_POLL is active,
+			 * running NAPI in this pinned thread. A zero timeout makes it one
+			 * non-blocking pass. recvfrom() does not reliably enter this path
+			 * on an XSK fd. */
+			poll(&pfd, 1, 0);
+			/* Fill-ring wakeup only when the driver asks for it. */
 			if (xsk_ring_prod__needs_wakeup(&fq))
-				poll(&pfd, 1, timeout * 1000);
+				recvfrom(xsk_fd, NULL, 0, MSG_DONTWAIT, NULL, NULL);
+
+			if (++empty_polls >= WATCHDOG_EMPTY_POLLS) {
+				// nanosleep() makes this thread voluntarily block, letting
+				// the scheduler run lower-priority/non-RT work (softirqs,
+				// kworkers) on this core. sched_yield() would not do this:
+				// it only cedes to runnable tasks at >= this priority.
+				nanosleep(&WATCHDOG_YIELD_NS, nullptr);
+				empty_polls = 0;
+			}
+
+			{
+				struct timespec tn;
+				clock_gettime(CLOCK_MONOTONIC, &tn);
+				if (tn.tv_sec - t_idle.tv_sec >= timeout) {
+					printf("\n[!] no packets for %ds — giving up (received %d/%d)\n",
+					       timeout, st.received, count);
+					break;
+				}
+			}
 			continue;
 		}
+		empty_polls = 0;
+		clock_gettime(CLOCK_MONOTONIC, &t_idle);   /* progress: reset idle deadline */
 
-		for (uint32_t i = 0; i < rcvd && received < count; i++) {
+		for (uint32_t i = 0; i < rcvd && st.received < count; i++) {
 			const struct xdp_desc *desc =
 				xsk_ring_cons__rx_desc(&rx, idx_rx + i);
 			uint64_t rx_ns = now_ns();
@@ -432,63 +890,7 @@ int main(int argc, char *argv[])
 			const auto *hdr =
 				reinterpret_cast<const pkt_hdr *>(pkt + off);
 
-			uint64_t seq       = betoh64_(hdr->seq);
-			uint64_t tx_ns     = betoh64_(hdr->ts_ns);
-			uint64_t replicator_ns = betoh64_(hdr->replicator_ns);
-			uint64_t replicator_tx_ns = betoh64_(hdr->replicator_tx_ns);
-
-			uint64_t ulat = (rx_ns >= tx_ns) ? (rx_ns - tx_ns) : 0;
-			if (rx_ns < tx_ns) n_neg_total++;   /* clock skew: dest behind source */
-			latencies.push_back(ulat);
-			sum_lat += ulat;
-			received++;
-			if (ulat < min_lat) min_lat = ulat;
-			if (ulat > max_lat) max_lat = ulat;
-
-			if (replicator_ns != 0) {
-				has_replicator_ts = true;
-				uint64_t h1 = (replicator_ns >= tx_ns) ? (replicator_ns - tx_ns) : 0;
-				latencies_hop1.push_back(h1);
-				sum_lat1 += h1;  if (h1 < min_lat1) min_lat1 = h1;  if (h1 > max_lat1) max_lat1 = h1;
-
-				int64_t h2_signed = (int64_t)rx_ns - (int64_t)replicator_ns;
-				if (h2_signed <= 0) {
-					n_neg_h2++;
-				} else {
-					uint64_t h2 = (uint64_t)h2_signed;
-					latencies_hop2.push_back(h2);
-					sum_lat2 += h2;  if (h2 < min_lat2) min_lat2 = h2;  if (h2 > max_lat2) max_lat2 = h2;
-
-					/* hop2 sub-split — needs a sane replicator_tx_ns between
-					 * replicator_ns and rx_ns. proc = relay build+submit;
-					 * leg2 = wire + destination RX. */
-					if (replicator_tx_ns > replicator_ns && rx_ns >= replicator_tx_ns) {
-						has_tx_ts = true;
-						latencies_proc.push_back(replicator_tx_ns - replicator_ns);
-						latencies_leg2.push_back(rx_ns - replicator_tx_ns);
-					}
-				}
-			}
-
-			int64_t iseq = (int64_t)seq;
-			if (last_seq >= 0) {
-				if (iseq < last_seq)          ooo++;
-				else if (iseq > last_seq + 1) lost += (int)(iseq - last_seq - 1);
-			}
-			if (iseq > last_seq) last_seq = iseq;
-
-			if (received % 100 == 0) {
-				uint64_t avg100 = 0;
-				int start = (int)latencies.size() - 100;
-				if (start < 0) start = 0;
-				for (size_t j = (size_t)start; j < latencies.size(); j++)
-					avg100 += latencies[j];
-				avg100 /= (latencies.size() - (size_t)start);
-				printf("  [%d/%d] last=%.1fus avg(100)=%.1fus\r",
-				       received, count,
-				       ulat / 1000.0, avg100 / 1000.0);
-				fflush(stdout);
-			}
+			record_sample(st, hdr, rx_ns, count);
 			}
 next:
 			/* return frame to fill ring */
@@ -508,130 +910,8 @@ next:
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
 
-	if (received == 0) { printf("\nNo packets received.\n"); return 1; }
-
-	std::sort(latencies.begin(), latencies.end());
-	std::sort(latencies_hop1.begin(), latencies_hop1.end());
-	std::sort(latencies_hop2.begin(), latencies_hop2.end());
-	std::sort(latencies_proc.begin(), latencies_proc.end());
-	std::sort(latencies_leg2.begin(), latencies_leg2.end());
-	uint64_t avg_lat = sum_lat / (uint64_t)received;
-
-	static const int pcts[] = {0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99};
-
-	printf("\n\n");
-	printf("==================================================\n");
-	printf("  Multicast Latency Report (AF_XDP)\n");
-	printf("==================================================\n");
-	printf("  Interface:     %s  queue %d\n", iface, queue);
-	printf("  Received:      %d/%d packets (%.1fs)\n", received, count, elapsed);
-	printf("  Lost:          %d packets\n", lost);
-	printf("  Out of order:  %d\n", ooo);
-
-	if (has_replicator_ts) {
-		uint64_t n1 = (uint64_t)latencies_hop1.size();
-		uint64_t n2 = (uint64_t)latencies_hop2.size();
-
-		printf("\n  Hop 1 — Exchange → Feeder (usec):\n");
-		printf("    Min: %8.1f   Avg: %8.1f   Max: %8.1f\n",
-		       min_lat1 / 1000.0, (n1 ? sum_lat1 / n1 : 0) / 1000.0, max_lat1 / 1000.0);
-		for (int p : pcts)
-			printf("    P%-3d  %8.1f\n", p, pct(latencies_hop1, p) / 1000.0);
-
-		printf("\n  Hop 2 — Feeder → Destination (usec):\n");
-		if (n_neg_h2 > 0) {
-			int total_h2 = n_neg_h2 + (int)latencies_hop2.size();
-			printf("    [!] %d/%d samples negative (replicator clock leads destination by > transit time)\n",
-			       n_neg_h2, total_h2);
-			printf("        Ensure refclock PHC /dev/ptp0 is active on all nodes (phc_enable=1).\n");
-		}
-		if (!latencies_hop2.empty()) {
-			printf("    Min: %8.1f   Avg: %8.1f   Max: %8.1f\n",
-			       min_lat2 / 1000.0, (n2 ? sum_lat2 / n2 : 0) / 1000.0, max_lat2 / 1000.0);
-			for (int p : pcts)
-				printf("    P%-3d  %8.1f\n", p, pct(latencies_hop2, p) / 1000.0);
-		} else {
-			printf("    No valid samples — all negative (clock skew > hop2 transit time)\n");
-		}
-
-		if (has_tx_ts && !latencies_proc.empty()) {
-			printf("\n  Hop 2 split (a) — Feeder processing: parse+build+submit (usec):\n");
-			for (int p : pcts)
-				printf("    P%-3d  %8.1f\n", p, pct(latencies_proc, p) / 1000.0);
-			printf("\n  Hop 2 split (b) — wire + destination RX (usec):\n");
-			for (int p : pcts)
-				printf("    P%-3d  %8.1f\n", p, pct(latencies_leg2, p) / 1000.0);
-		}
-	}
-
-	printf("\n  Total — Exchange → Destination (usec):%s\n",
-	       has_replicator_ts ? "" : "  (no replicator timestamps; single-hop view)");
-	printf("    Min: %8.1f   Avg: %8.1f   Max: %8.1f\n",
-	       min_lat / 1000.0, avg_lat / 1000.0, max_lat / 1000.0);
-	for (int p : pcts)
-		printf("    P%-3d  %8.1f\n", p, pct(latencies, p) / 1000.0);
-	if (n_neg_total > 0)
-		printf("  ** CLOCK SKEW: %d/%d samples had rx<tx (clamped to 0) — the destination\n"
-		       "     clock is BEHIND the source; one-way latency is INVALID. Re-sync chrony\n"
-		       "     (chronyc makestep) on both nodes and re-run. (This is NOT a datapath fault.)\n",
-		       n_neg_total, received);
-	printf("==================================================\n");
-
-	// Emit a JSON result compatible with report/gen/report.py (service_rtt_us
-	// schema). The primary metric is the one-way source->destination latency;
-	// hop1/hop2 are included as extras (ignored by the matrix builder).
-	if (json_path) {
-		FILE *jf = fopen(json_path, "w");
-		if (!jf) {
-			fprintf(stderr, "warning: cannot open %s: %s\n", json_path, strerror(errno));
-		} else {
-			uint64_t p999 = latencies.empty() ? 0
-			              : latencies[(latencies.size() - 1) * 999 / 1000];
-			int total_pkts = received + lost;
-			double loss_pct = total_pkts > 0 ? 100.0 * lost / total_pkts : 0.0;
-			fprintf(jf, "{\n");
-			fprintf(jf, "  \"messages\": %d,\n", received);
-			fprintf(jf, "  \"lost\": %d,\n", lost);
-			fprintf(jf, "  \"loss_pct\": %.4f,\n", loss_pct);
-			fprintf(jf, "  \"clock_skew_samples\": %d,\n", n_neg_total);
-			fprintf(jf, "  \"timestamp_rx\": \"xdp_afxdp\",\n");
-			fprintf(jf, "  \"timestamp_tx\": \"clock_realtime\",\n");
-			fprintf(jf, "  \"service_rtt_us\": {\n");
-			fprintf(jf, "    \"min\": %" PRIu64 ",\n", min_lat / 1000);
-			fprintf(jf, "    \"mean\": %" PRIu64 ",\n", avg_lat / 1000);
-			fprintf(jf, "    \"p50\": %" PRIu64 ",\n", pct(latencies, 50) / 1000);
-			fprintf(jf, "    \"p90\": %" PRIu64 ",\n", pct(latencies, 90) / 1000);
-			fprintf(jf, "    \"p95\": %" PRIu64 ",\n", pct(latencies, 95) / 1000);
-			fprintf(jf, "    \"p99\": %" PRIu64 ",\n", pct(latencies, 99) / 1000);
-			fprintf(jf, "    \"p999\": %" PRIu64 ",\n", p999 / 1000);
-			fprintf(jf, "    \"max\": %" PRIu64 "\n", max_lat / 1000);
-			fprintf(jf, "  },\n");
-			if (has_replicator_ts && !latencies_hop1.empty()) {
-				fprintf(jf, "  \"hop1_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
-				        pct(latencies_hop1, 50) / 1000, pct(latencies_hop1, 99) / 1000);
-			}
-			if (has_replicator_ts && !latencies_hop2.empty()) {
-				fprintf(jf, "  \"hop2_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
-				        pct(latencies_hop2, 50) / 1000, pct(latencies_hop2, 99) / 1000);
-			}
-			if (has_tx_ts && !latencies_proc.empty()) {
-				fprintf(jf, "  \"hop2_proc_ns\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
-				        pct(latencies_proc, 50), pct(latencies_proc, 99));
-				fprintf(jf, "  \"hop2_wire_ns\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
-				        pct(latencies_leg2, 50), pct(latencies_leg2, 99));
-			}
-			fprintf(jf, "  \"received\": %d\n", received);
-			fprintf(jf, "}\n");
-			fclose(jf);
-			printf("  JSON results: %s\n", json_path);
-		}
-	}
-
-	if (raw) {
-		printf("\nRaw latencies (ns):\n");
-		for (size_t i = 0; i < latencies.size(); i++)
-			printf("  %zu: %" PRIu64 "\n", i, latencies[i]);
-	}
-
-	return 0;
+	char queue_desc[32];
+	snprintf(queue_desc, sizeof(queue_desc), "  queue %d", queue);
+	emit_report(st, iface, queue_desc, false, port, count, elapsed, json_path, raw);
+	return st.received > 0 ? 0 : 1;
 }
