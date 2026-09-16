@@ -1,6 +1,7 @@
 #  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: MIT-0
 
+#  Zero references anywhere; fully superseded by start_latency_test.yaml (same kill+tmux-restart pattern)
 ---
 - name: restart hft client
   hosts: aws_ec2

@@ -1,6 +1,11 @@
 #  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: MIT-0
 ---
+
+# Zero references anywhere; targets stale flat file paths (histogram.hlog, output.log) that don't match current nested-path conventions used by  
+# fetch_histogram_logs.yaml/run_hunting_benchmark.yaml
+
+
 - name: cleanup exchange clients
   hosts: aws_ec2
   collections:

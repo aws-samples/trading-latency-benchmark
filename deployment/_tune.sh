@@ -15,6 +15,9 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
+
+# Superseded by ansible/tune_os.yaml; zero references anywhere; contains malformed shell syntax
+
 # Disable hyperthreading
 for cpunum in $(cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | cut -s -d, -f2- | tr ',' '\n' | sort -un) do echo 0 > /sys/devices/system/cpu/cpu$cpunum/online
 done

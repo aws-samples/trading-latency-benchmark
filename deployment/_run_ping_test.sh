@@ -1,6 +1,9 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
+# Orphaned — no playbook references it, duplicates run_hunting_benchmark.yaml's ping-latency mode
+
+
 java -Xms8g -Xmx8g -XX:ConcGCThreads=4 -XX:+UseTransparentHugePages \
  -XX:+UnlockExperimentalVMOptions -XX:+UseZGC -XX:+TieredCompilation -XX:+UseLargePages \
  -XX:LargePageSizeInBytes=2m -XX:+UnlockDiagnosticVMOptions \

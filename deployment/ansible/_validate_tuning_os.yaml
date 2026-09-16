@@ -1,3 +1,6 @@
+# Zero references anywhere; hardcodes isolated_cores="2-15"/housekeeping_cores="0-1" while tune_os.yaml now computes these dynamically per vCPU count — 
+# would validate against the wrong values on most instance sizes
+
 ---
 # ultra_low_latency_trading_validation.yml - Amazon Linux 2023
 - name: Validate Ultra-Low Latency Trading System Configuration
