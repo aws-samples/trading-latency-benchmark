@@ -82,43 +82,6 @@ struct {
     __type(value, struct unicast_config);
 } config_map SEC(".maps");
 
-// In-kernel forward target (REPLICATOR_FWD_MODE=bpf_tx). When enabled != 0 for
-// a matched config slot, the XDP program rewrites the frame's L2/L3/L4 headers for
-// this destination, stamps replicator_ns, and XDP_TX's it back out the NIC —
-// forwarding the packet entirely in the kernel, no AF_XDP/userspace round-trip.
-// Populated from userspace (Replicator) on join when in bpf_tx mode. Parallel to
-// config_map (same slot index). All addresses network byte order.
-struct fwd_target {
-    __u8  dmac[6];   // destination MAC
-    __u8  smac[6];   // replicator (source) MAC
-    __u32 dip;       // destination IP
-    __u32 sip;       // replicator (source) IP
-    __u16 dport;     // destination UDP port
-    __u16 sport;     // replicator (source) UDP port
-    __u8  enabled;   // 0 = redirect to XSK (default); 1 = in-kernel XDP_TX forward
-    __u8  pad[3];
-};
-
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, MAX_GROUPS);
-    __type(key, __u32);
-    __type(value, struct fwd_target);
-} fwd_map SEC(".maps");
-
-// Update statistics counter
-static inline void increment_counter(int index)
-{
-    __u32 key = index;
-    __u64 *value, init_val = 1;
-
-    value = bpf_map_lookup_elem(&stats, &key);
-    if (value)
-        (*value)++;
-    else
-        bpf_map_update_elem(&stats, &key, &init_val, BPF_ANY);
-}
-
 SEC("xdp")
 int mcast(struct xdp_md *ctx)
 {
@@ -185,48 +148,6 @@ int mcast(struct xdp_md *ctx)
 
     if (matched_idx < 0)
         return XDP_PASS;
-
-    // ── In-kernel forward (REPLICATOR_FWD_MODE=bpf_tx) ─────────────────────────
-    // If a forward target is enabled for the matched slot, rewrite the frame's
-    // headers for the destination and XDP_TX it back out the NIC — no AF_XDP or
-    // userspace round-trip.
-    //
-    // bpf_tx forward (REPLICATOR_FWD_MODE=bpf_tx): rewrite headers and XDP_TX.
-    // Userspace only enables this when exactly one destination is registered;
-    // fan-out to multiple destinations requires bpf_clone_redirect(), which is
-    // not used here. copy or inplace mode handles multi-destination workloads.
-    {
-        __u32 fk = (__u32)matched_idx;
-        struct fwd_target *ft = bpf_map_lookup_elem(&fwd_map, &fk);
-        if (ft && ft->enabled) {
-            // L2: dst = destination, src = replicator
-            __builtin_memcpy(eth->h_dest,   ft->dmac, 6);
-            __builtin_memcpy(eth->h_source, ft->smac, 6);
-            // L3: rewrite IPs + recompute the 20-byte IPv4 header checksum
-            iph->daddr = ft->dip;
-            iph->saddr = ft->sip;
-            iph->check = 0;
-            __u32 csum = 0;
-            __u16 *ipw = (__u16 *)iph;
-            #pragma unroll
-            for (int i = 0; i < 10; i++)
-                csum += ipw[i];
-            csum = (csum & 0xffff) + (csum >> 16);
-            csum = (csum & 0xffff) + (csum >> 16);
-            iph->check = (__u16)~csum;
-            // L4: rewrite ports, disable UDP checksum (optional for IPv4)
-            udp->dest   = ft->dport;
-            udp->source = ft->sport;
-            udp->check  = 0;
-            // NOTE: replicator_ns is NOT stamped here — BPF has no CLOCK_REALTIME
-            // helper (only MONOTONIC bpf_ktime_get_ns, a different epoch than the
-            // source/receiver's CLOCK_REALTIME). Left as the source's zero, so the
-            // receiver reports the valid one-way total and simply omits the hop
-            // split for kernel-forwarded packets (kernel proc time is ~0 anyway).
-            increment_counter(2);
-            return XDP_TX;
-        }
-    }
 
     // ── Default: redirect whole frame to AF_XDP (zero-copy on ENA) ───────────
     // The userspace reader (replicator / mcast_receive) strips Eth/IP/UDP + the

@@ -23,14 +23,14 @@ explained in detail in [Step-by-step](#step-by-step-the-datapath-explained) belo
 
 ![Replicator Workflow](../assets/replicator-workflow.svg)
 
-## Replication paths - bpf_tx / copy / zero-copy (and the flags that select them)
+## Replication paths - copy / zero-copy (and the flags that select them)
 
 "How a packet is replicated" is governed by **three independent flag axes**. Two
 words are overloaded, so read carefully:
 
-- **`--echo-mode` (CLI)** ≠ **`REPLICATOR_FWD_MODE=bpf_tx` (env)**. The former
-  turns AF_XDP *off entirely* (a plain-UDP echo backend); the latter is an
-  *in-kernel XDP_TX forward* that still uses the XDP datapath. Don't confuse
+- **`--echo-mode` (CLI)** ≠ **`REPLICATOR_FWD_MODE` (env)**. The former
+  turns AF_XDP *off entirely* (a plain-UDP echo backend); the latter selects
+  how the AF_XDP datapath forks copies for fan-out. Don't confuse
   either with `REPLICATOR_MODE=echo` (also `--echo-mode`, plain sockets) or
   `rtt`'s `kernel` variation (also plain sockets, but named for a different
   axis - the client's TX/RX transport, not the replicator's mode).
@@ -59,9 +59,8 @@ Resolved in `Init.cpp` into the XDP bind/attach flags - this controls the
 ### Axis 3 - **replication / forward mode** (env `REPLICATOR_FWD_MODE`, `Init.cpp`)
 
 This is the axis the question is really about: once a packet is **matched at the
-XDP hook [2]**, how are the K copies produced? The frame forks three ways
-(`bpf_tx` is mcast-only - it needs `mcast.o`'s `fwd_map`). A fourth value,
-`kernel`, sits outside this fork entirely - see below the table.
+XDP hook [2]**, how are the K copies produced? The frame forks two ways.
+A third value, `kernel`, sits outside this fork entirely - see below the table.
 
 ![Datapath Modes](../assets/datapaths.svg)
 
@@ -74,22 +73,21 @@ MAC and restores the fast path.
 |------|-------------|:---:|------|------|
 | `copy` *(default / unset)* | [1]→[11] full | **K** | step [9], per destination | any K; most robust |
 | `inplace` (zero-copy) | [1]→[8], then [9] split | **K−1** | step [9]: last dest reuses RX frame | any K; RX frame spent on last dest |
-| `bpf_tx` (XDP_TX) | [1]→[2] only | **0** | step [2] in `mcast.o` | **mcast only**; 1 dest/group; no `replicator_ns` split |
-| `kernel` (plain sockets) | none of [1]–[11] - no AF_XDP/eBPF at all | **K** | one `recvfrom()`/`sendto()` loop, `processMcastKernelRx` | **mcast only**; unlimited dests; apples-to-apples baseline for the other three |
+| `kernel` (plain sockets) | none of [1]–[11] - no AF_XDP/eBPF at all | **K** | one `recvfrom()`/`sendto()` loop, `processMcastKernelRx` | **mcast only**; unlimited dests; apples-to-apples baseline for the other two |
 
-**`kernel` is not a fourth fork of the XDP hook - it never reaches one.**
-`copy`/`inplace`/`bpf_tx` all still require `mcast.o` loaded and the AF_XDP
+**`kernel` is not a third fork of the XDP hook - it never reaches one.**
+`copy`/`inplace` both still require `mcast.o` loaded and the AF_XDP
 datapath present; `kernel` skips `loadXdpProgram()`/`configureXdpProgram()`
 entirely (`Init.cpp`) and runs the whole RX→fan-out→TX path over a single plain
 `AF_INET`/`SOCK_DGRAM` socket (`DataPath.cpp`'s `processMcastKernelRx`). It
-exists specifically to give the other three modes a same-binary, same-control-
+exists specifically to give the other two modes a same-binary, same-control-
 protocol baseline against "no kernel bypass at all" - the AF_XDP-vs-plain-socket
 comparison this project's benchmarks are built around, applied to the
 *replicator* rather than only to the endpoints (`rtt`'s own `kernel` variation,
 `mcast_send -k`/`mcast_receive -k`). Group join/leave (`CTRL_MCAST_JOIN`/
 `CTRL_MCAST_LEAVE`) is unchanged - it was never IGMP for any mode - but this mode
 has no `MAX_GROUPS=16` ceiling (no `config_map` slot is ever allocated for it),
-so it can host more concurrent groups per replicator than the other three.
+so it can host more concurrent groups per replicator than the other two.
 Socket tuning matches the AF_XDP RX path's busy-poll parity
 (`SO_BUSY_POLL`/`SO_PREFER_BUSY_POLL`/`SO_BUSY_POLL_BUDGET`) plus `SO_RCVBUF` and
 kernel-software RX timestamping (`SO_TIMESTAMPING`) - **not** `SCHED_FIFO`, which
@@ -116,16 +114,7 @@ becomes the backpressure point in a way the AF_XDP ring does not.
   completes, returned via completion polling), which *raised* the floor in the
   matrix (min 40 vs 26, p50 55 vs 42). *Use for:* **large K and/or large payloads**
   where avoiding K−1 memcpys per packet relieves a CPU/memory-bandwidth bottleneck.
-- **`bpf_tx` (XDP_TX) - best tail latency; single dest per group.** `mcast.o`
-  rewrites L2/L3/L4 from `fwd_map` and re-transmits in the kernel - steps [3]–[11]
-  and all of userspace are skipped, so there is no RX-ring dequeue, fan-out, or
-  TX-ring hop to jitter. **Limited to one destination per group** (one `fwd_target`
-  slot) and it cannot stamp `replicator_ns` (BPF has no `CLOCK_REALTIME`), so the
-  receiver reports total one-way only (no hop split). *Use for:* **1→1 relay / point
-  forwarding where tail latency is paramount.** In the matrix it had the tightest
-  tail (p99 55, p99.9 60, max 153) at a p50 (43) on par with copy.
-
-Rule of thumb: **K=1 & tail-critical → `bpf_tx`; K=1 & simplest → `copy`;
+Rule of thumb: **K=1 & simplest → `copy`;
 K≫1 (or large payloads) → `inplace`; comparing against no kernel bypass at
 all → `kernel`.**
 
@@ -192,10 +181,6 @@ zero-copy. Both programs:
      is how SSH keeps working). `ucast.o` has a side-path here: if the payload
      carries the `rtt --xdp-rx` magic it stamps `bpf_ktime_get_ns()` into the
      payload and zeroes the UDP checksum before passing up.
-   - **Match + `fwd_map[slot].enabled` (mcast `bpf_tx` mode) →** rewrite L2 (dst/src
-     MAC), L3 (dst/src IP + recomputed 20-byte IPv4 checksum), L4 (ports, UDP
-     csum=0) from the `fwd_target`, then **`XDP_TX`** - the NIC re-transmits the
-     frame; userspace is never involved.
    - **Match (default) →** `bpf_redirect_map(&xsks_map, ctx->rx_queue_index, …)`.
 
 ### [3] AF_XDP redirect into the RX ring (zero-copy)
@@ -322,19 +307,18 @@ K unicast frames leave the ENA NIC, one per destination.
 
 1. **Startup:** `--mcast` → load **`mcast.o`**; `initialize()` seeds the inner group
    into `config_map` immediately (`addGroupDynamic(listen_ip_nbo_)`) so the BPF
-   filter matches before any join. `REPLICATOR_FWD_MODE` selects copy/inplace/bpf_tx.
+   filter matches before any join. `REPLICATOR_FWD_MODE` selects copy/inplace.
    **`kernel` fwd mode skips this whole step** - no `mcast.o`, no `config_map`;
    `initialize()` instead binds one plain UDP socket to `listen_port_` and returns
    (see "Axis 3" above).
 2. **Join** (`Control.cpp`): each destination sends `CTRL_MCAST_JOIN [0x04][4B group]`;
    the replicator infers the destination IP from the UDP source address, ARP-resolves
    it, `addGroupDynamic(group)` (allocates a `config_map` slot, ref-counted), and adds
-   it to `group_destinations_[group]`. In `bpf_tx` mode it also writes the
-   `fwd_target` into `fwd_map[slot]` (`updateBpfTxFwdTarget`). **`kernel` fwd mode**
+   it to `group_destinations_[group]`. **`kernel` fwd mode**
    runs the identical join handshake but `addGroupDynamic` only ref-counts - there
    is no `config_map` slot to allocate.
 3. **Source stream:** `mcast_send` emits `m2u`-tagged unicast to the replicator.
-4. **Datapath:** steps [1]–[11] (`copy`/`inplace`) or [1]–[2] (`bpf_tx`, `XDP_TX`).
+4. **Datapath:** steps [1]–[11] (`copy`/`inplace`).
    `group_nbo` comes from the m2u tag; fan-out is per-group from
    `group_destinations_`. **`kernel` fwd mode** runs none of these steps: one
    thread (`processMcastKernelRx`) loops `recvfrom()` → shared `processMcastFrame`
@@ -363,7 +347,7 @@ producer - decoupling destination-side control from the producer's location.
 | `Main.cpp` | Entry point. CLI parse (`interface listen_ip port [zero_copy] [--mcast] [--ctrl] [--producer]`), root check, mode dispatch, signal handling, the 10 s stats loop, and the `--echo-mode` branch (calls `run_echo_mode`). |
 | `Core.cpp` | Object lifecycle (ctor/dtor/move), `start()`/`stop()` (spawns/joins the per-queue processor threads + control + upstream threads), `isRunning`, `getStatistics`/`printStatistics`, and CPU affinity (`setCpuAffinity`, `initializeCpuCores`). |
 | `Init.cpp` | One-time setup: resolve `REPLICATOR_FWD_MODE` first, then either bind the `kernel` fwd mode's plain UDP RX socket and return (no AF_XDP/eBPF at all), or pick + `loadXdpProgram` (`ucast.o`/`mcast.o`), create/bind/register one `XdpSocket` per queue, open control + fallback sockets, cache interface IP/MAC; `configureXdpProgram()` seeds `config_map` and the free-slot pool (AF_XDP fwd modes only). |
-| `Groups.cpp` | Dynamic multicast group lifecycle against `config_map` - `addGroupDynamic`/`removeGroupDynamic` (ref-counted slot alloc/free under `group_mutex_`; skips the BPF slot for `kernel` fwd mode - no `config_map` exists) - and `updateBpfTxFwdTarget` (writes `fwd_map` for `bpf_tx` mode). |
+| `Groups.cpp` | Dynamic multicast group lifecycle against `config_map` - `addGroupDynamic`/`removeGroupDynamic` (ref-counted slot alloc/free under `group_mutex_`; skips the BPF slot for `kernel` fwd mode - no `config_map` exists). |
 | `Control.cpp` | The binary UDP control protocol: `handleControlProtocol` (recv loop) + `processControlMessage` (ADD/REMOVE/LIST/MCAST_JOIN/MCAST_LEAVE), plus upstream forwarding (`setUpstreamControl`, `joinControlMulticastGroup`, `handleUpstreamControl`). |
 | `Destinations.cpp` | The `Destination` type (ctor validates IP, defaults MAC to broadcast; `operator<`), the canonical registry (`addDestination`/`removeDestination`/`getDestinations`), and the thread-local fan-out cache (`dest_cache_` definition, `getCachedGroupDestinations`, `updateDestinationCache`). |
 | `DataPath.cpp` | The hot path: `processPacketsForQueue` (RX busy-poll loop), `replicatePacket` (RX stamp → parse → fan-out → TX), `extractUdpPayload`/`extractUdpPayloadMulticast`, `sendToDestinationWithQueue`/`sendToDestinationFallback`, `sendSinglePacketDirect`, `createUdpPacket`, `patchHeadersInPlace`. |
@@ -414,9 +398,7 @@ Shared header used across the engine and `tools/`: `src/common/ControlPort.hpp`
 | (frame off 74) | `replicator_tx_ns` | replicator just before submit ([9]) | `CLOCK_REALTIME` |
 
 Receiver computes **hop-1** = `replicator_ns − ts_ns`, **hop-2** =
-`rx_ns − replicator_tx_ns`, **total** = `rx_ns − ts_ns`. (In `bpf_tx` forward mode
-`replicator_ns` is left as the source's zero - BPF has only `CLOCK_MONOTONIC` - so
-only the total is reported.)
+`rx_ns − replicator_tx_ns`, **total** = `rx_ns − ts_ns`.
 
 ## Threading & CPU model
 

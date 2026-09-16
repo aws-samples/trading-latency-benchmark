@@ -56,6 +56,7 @@
           - "--exclude=/mcast_receive"
           - "--exclude=/replicator_ctl"
           - "--exclude=/udp_send"
+          - "--exclude=/phcsample"
           - "--checksum"
 
     # ── Control-plane path: no C++ toolchain on this host at all - rebuild the
@@ -168,7 +169,7 @@
     - name: Install binaries to /opt/af-xdp
       ansible.builtin.shell: |
         cd {{ af_xdp_path }}
-        cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/
+        cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send phcsample /opt/af-xdp/
         cp -f src/xdp/*.o /opt/af-xdp/xdp/
       when: not is_control_plane
 

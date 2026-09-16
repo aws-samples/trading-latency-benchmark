@@ -38,11 +38,11 @@ type measurementRow struct {
 	// Hop1/Hop2: mcast one-way path split (source->replicator,
 	// replicator->destination). nil for ucast and for any mcast result whose
 	// wire header carried no replicator timestamp.
-	Hop1P50 *int64
-	Hop1P99 *int64
+	Hop1P50  *int64
+	Hop1P99  *int64
 	Hop1P999 *int64
-	Hop2P50 *int64
-	Hop2P99 *int64
+	Hop2P50  *int64
+	Hop2P99  *int64
 	Hop2P999 *int64
 	// AchievedPps/RequestedPps/RateShortfall: offered vs. sustained load for
 	// this run (dev/roadmap/fix.md's "Report achieved vs requested rate" item). 0/nil
@@ -50,9 +50,9 @@ type measurementRow struct {
 	// field) - RateShortfall is a *bool (not bool) so "not computed" is
 	// distinguishable from "computed false", the same NULL-vs-zero distinction
 	// migrateAddHopColumns' own comment calls out for hop1/hop2.
-	AchievedPps    *float64
-	RequestedPps   *float64
-	RateShortfall  *bool
+	AchievedPps   *float64
+	RequestedPps  *float64
+	RateShortfall *bool
 }
 
 // Store provides SQLite persistence for measurement history.
@@ -405,39 +405,104 @@ func (s *Store) FinishRun(runID int64, pairsOK int) {
 		time.Now().Unix(), pairsOK, runID)
 }
 
+// MergeRunParams adds extra key/value pairs to a run's stored params JSON,
+// for data that only becomes available AFTER InsertRun has already opened
+// the row - e.g. the wander sampler's collected CSVs/reduced fields
+// (wander-sampler-lifecycle-design.md §3 step 9), which are only ready once
+// the run's settle+run window has finished, well after InsertRun ran at the
+// top of the mode loop. Existing keys are overwritten by extra on conflict;
+// nothing is removed. A run with no existing params (paramsJSON NULL) starts
+// from an empty object rather than failing, since a run created before this
+// method existed should still be mergeable into.
+func (s *Store) MergeRunParams(runID int64, extra map[string]any) error {
+	if s == nil || runID <= 0 || len(extra) == 0 {
+		return nil
+	}
+	var existing sql.NullString
+	if err := s.db.QueryRow("SELECT params FROM runs WHERE id=?", runID).Scan(&existing); err != nil {
+		return err
+	}
+	merged := map[string]any{}
+	if existing.Valid && existing.String != "" {
+		if err := json.Unmarshal([]byte(existing.String), &merged); err != nil {
+			return err
+		}
+	}
+	for k, v := range extra {
+		merged[k] = v
+	}
+	b, err := json.Marshal(merged)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec("UPDATE runs SET params=? WHERE id=?", string(b), runID)
+	return err
+}
+
+// RunParams returns a run's full stored params map, for callers that need to
+// read back arbitrary keys (e.g. the wander sampler's per-node
+// "wander_<ip>_<field>" fields, dev/roadmap/precision/wander-band-design.md
+// §4) that aren't part of MeasurementRow's fixed column set and so cannot go
+// through LatestMeasurements' json_extract projection, which needs a static
+// key path known at query time. Returns (nil, nil) - not an error - for a
+// run with no params or a run that does not exist, since "nothing to show"
+// and "lookup failed" are different outcomes for a caller deciding whether
+// to render a wander band.
+func (s *Store) RunParams(runID int64) (map[string]any, error) {
+	if s == nil || runID <= 0 {
+		return nil, nil
+	}
+	var paramsJSON sql.NullString
+	err := s.db.QueryRow("SELECT params FROM runs WHERE id=?", runID).Scan(&paramsJSON)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !paramsJSON.Valid || paramsJSON.String == "" {
+		return nil, nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(paramsJSON.String), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // McastReplicatorResult is one (replicator, mode, destination) measurement
 // row for the multi-replicator mcast report. Replicator identity/PG/AZ comes
 // from the owning run's params JSON (set by RunMcastMatrix), since the
 // Telemetry wire message itself only carries src/dst IPs.
 type McastReplicatorResult struct {
-	RunID         int64   `json:"run_id"`
-	StartedAt     int64   `json:"started_at"`
-	Mode          string  `json:"mode"`
-	ReplicatorID  string  `json:"replicator_id"`
-	ReplicatorIP  string  `json:"replicator_ip"`
-	ReplicatorPG  string  `json:"replicator_pg"`
-	ReplicatorAZ  string  `json:"replicator_az"`
-	ReplicatorVPC string  `json:"replicator_vpc"`
+	RunID         int64  `json:"run_id"`
+	StartedAt     int64  `json:"started_at"`
+	Mode          string `json:"mode"`
+	ReplicatorID  string `json:"replicator_id"`
+	ReplicatorIP  string `json:"replicator_ip"`
+	ReplicatorPG  string `json:"replicator_pg"`
+	ReplicatorAZ  string `json:"replicator_az"`
+	ReplicatorVPC string `json:"replicator_vpc"`
 	// Size is the mcast_send payload size in bytes for this run (0 => tool
 	// default was used; see McastMatrixParams.Size).
-	Size          int     `json:"size,omitempty"`
-	SrcIP         string  `json:"src_ip"`
-	DstIP         string  `json:"dst_ip"`
-	P50           int64   `json:"p50"`
-	P90           int64   `json:"p90"`
-	P99           int64   `json:"p99"`
-	P999          int64   `json:"p999"`
-	Max           int64   `json:"max"`
-	LossPct       float64 `json:"loss_pct"`
-	Unix          int64   `json:"unix"`
+	Size    int     `json:"size,omitempty"`
+	SrcIP   string  `json:"src_ip"`
+	DstIP   string  `json:"dst_ip"`
+	P50     int64   `json:"p50"`
+	P90     int64   `json:"p90"`
+	P99     int64   `json:"p99"`
+	P999    int64   `json:"p999"`
+	Max     int64   `json:"max"`
+	LossPct float64 `json:"loss_pct"`
+	Unix    int64   `json:"unix"`
 	// Hop1/Hop2: source->replicator and replicator->destination legs of this
 	// one-way measurement. nil when the underlying telemetry had no
 	// replicator timestamp (see proto.Metrics.Hop1/Hop2).
-	Hop1P50 *int64 `json:"hop1_p50,omitempty"`
-	Hop1P99 *int64 `json:"hop1_p99,omitempty"`
+	Hop1P50  *int64 `json:"hop1_p50,omitempty"`
+	Hop1P99  *int64 `json:"hop1_p99,omitempty"`
 	Hop1P999 *int64 `json:"hop1_p999,omitempty"`
-	Hop2P50 *int64 `json:"hop2_p50,omitempty"`
-	Hop2P99 *int64 `json:"hop2_p99,omitempty"`
+	Hop2P50  *int64 `json:"hop2_p50,omitempty"`
+	Hop2P99  *int64 `json:"hop2_p99,omitempty"`
 	Hop2P999 *int64 `json:"hop2_p999,omitempty"`
 }
 
@@ -565,26 +630,26 @@ type MeasurementRow struct {
 	// Endpoint topology, joined from the nodes table. Best-effort: a node no
 	// longer registered under this IP simply leaves these blank rather than
 	// failing the row — the measurement itself is still valid.
-	SrcRole   string `json:"src_role,omitempty"`
-	DstRole   string `json:"dst_role,omitempty"`
-	SrcAZ     string `json:"src_az,omitempty"`
-	DstAZ     string `json:"dst_az,omitempty"`
-	SrcVPC    string `json:"src_vpc,omitempty"`
-	DstVPC    string `json:"dst_vpc,omitempty"`
-	SrcPG     string `json:"src_pg,omitempty"`
-	DstPG     string `json:"dst_pg,omitempty"`
-	SrcRegion string `json:"src_region,omitempty"`
-	DstRegion string `json:"dst_region,omitempty"`
+	SrcRole    string `json:"src_role,omitempty"`
+	DstRole    string `json:"dst_role,omitempty"`
+	SrcAZ      string `json:"src_az,omitempty"`
+	DstAZ      string `json:"dst_az,omitempty"`
+	SrcVPC     string `json:"src_vpc,omitempty"`
+	DstVPC     string `json:"dst_vpc,omitempty"`
+	SrcPG      string `json:"src_pg,omitempty"`
+	DstPG      string `json:"dst_pg,omitempty"`
+	SrcRegion  string `json:"src_region,omitempty"`
+	DstRegion  string `json:"dst_region,omitempty"`
 	SrcTenancy string `json:"src_tenancy,omitempty"`
 	DstTenancy string `json:"dst_tenancy,omitempty"`
 	// Hop1/Hop2: mcast one-way path split (source->replicator,
 	// replicator->destination). nil for ucast and for any mcast result whose
 	// telemetry carried no replicator timestamp.
-	Hop1P50 *int64 `json:"hop1_p50,omitempty"`
-	Hop1P99 *int64 `json:"hop1_p99,omitempty"`
+	Hop1P50  *int64 `json:"hop1_p50,omitempty"`
+	Hop1P99  *int64 `json:"hop1_p99,omitempty"`
 	Hop1P999 *int64 `json:"hop1_p999,omitempty"`
-	Hop2P50 *int64 `json:"hop2_p50,omitempty"`
-	Hop2P99 *int64 `json:"hop2_p99,omitempty"`
+	Hop2P50  *int64 `json:"hop2_p50,omitempty"`
+	Hop2P99  *int64 `json:"hop2_p99,omitempty"`
 	Hop2P999 *int64 `json:"hop2_p999,omitempty"`
 	// AchievedPps/RequestedPps/RateShortfall: offered vs. sustained load for
 	// this run (dev/roadmap/fix.md's "Report achieved vs requested rate" item), read

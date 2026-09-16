@@ -14,6 +14,7 @@ import (
 	"afxdp-cp/backend/pairs"
 	"afxdp-cp/backend/registry"
 	"afxdp-cp/backend/store"
+	"afxdp-cp/backend/wander"
 	"afxdp-cp/proto"
 
 	"github.com/nats-io/nats.go"
@@ -534,6 +535,82 @@ func firstErr(err error, s string) string {
 	return s
 }
 
+// nicTuningBaseline is the tuning bake-ami.sh applies fleet-wide, and the only
+// state under which the measured error terms in dev/roadmap's precision
+// design (e.g. b_rx ~107ns) are valid. Off this baseline, ENA's ingress path
+// reverts to interrupt-driven delivery and untuned figures on the same
+// hardware class were measured at -12 to -390us - two to four orders of
+// magnitude larger, and NOT comparable to a tuned run.
+//
+// "" for a key means: accept any non-empty value (covers rx_queues_current/
+// tx_queues_current, which report "n/a" by design on ENA - see NicTuning's
+// own comment - and combined_queues_current, whose expected value is
+// instance-size-dependent rather than fixed).
+var nicTuningBaseline = map[string]string{
+	"napi_defer_hard_irqs": "2",
+	"gro_flush_timeout":    "10000",
+	"rx_usecs":             "0",
+	"tx_usecs":             "0",
+	"adaptive_rx":          "off",
+}
+
+// nicTuningViolations compares one node's NicTuning reading against
+// nicTuningBaseline and returns a human-readable violation per mismatched
+// key, prefixed with role and IP so a multi-node report attributes each
+// drift to its node. A key ABSENT from tuning (agent didn't report it) is
+// not a violation - that is the older-agent best-effort path, distinct from
+// a CURRENT agent reporting a value that differs from baseline.
+func nicTuningViolations(role, ip string, tuning map[string]string) []string {
+	var out []string
+	for key, want := range nicTuningBaseline {
+		got, present := tuning[key]
+		if !present {
+			continue
+		}
+		if got != want {
+			out = append(out, fmt.Sprintf("%s(%s) %s=%q want %q", role, ip, key, got, want))
+		}
+	}
+	return out
+}
+
+// wanderTargets returns the nodes a wander sampler should run on for one
+// (replicator, mode) run, per wander-sampler-lifecycle-design.md §3 step 2:
+// source, replicator, and every destination in modeDests - not just the
+// reduced tuningNodes sample the NIC-tuning gate uses, since the wander band
+// needs per-node coverage for whichever nodes' clocks are relevant to the
+// reported figure. Deduplicated by InstanceID so a degenerate topology
+// (source==replicator, or a destination list containing the source) never
+// dispatches two wander_start commands to the same node.
+func wanderTargets(source, replicator registry.Node, modeDests []registry.Node) []registry.Node {
+	seen := map[string]bool{}
+	var out []registry.Node
+	add := func(n registry.Node) {
+		if seen[n.InstanceID] {
+			return
+		}
+		seen[n.InstanceID] = true
+		out = append(out, n)
+	}
+	add(source)
+	add(replicator)
+	for _, d := range modeDests {
+		add(d)
+	}
+	return out
+}
+
+// wanderRunSeconds is the sampler's own lifetime bound for one settle+run
+// attempt, per wander-band-design.md §3's "campaign duration + 30s margin"
+// (the margin itself is applied inside StartWander/Runner - this is only the
+// "campaign duration" half, i.e. the run's own worst-case wall-clock span).
+// TimeoutSec bounds mcast_receive; the retry/settle overhead on top of it is
+// small and constant, so a flat +10s covers it without needing a second
+// configurable parameter.
+func wanderRunSeconds(timeoutSec int) int {
+	return timeoutSec + 10
+}
+
 // max64 guards a division by zero in the timing percentage.
 func max64(a, b int64) int64 {
 	if a > b {
@@ -544,7 +621,7 @@ func max64(a, b int64) int64 {
 
 // McastMatrixParams configures a multicast fan-out campaign across fwd modes.
 type McastMatrixParams struct {
-	Modes      []string `json:"modes"` // subset of copy|inplace|bpf_tx|kernel (default: all)
+	Modes      []string `json:"modes"` // subset of copy|inplace|kernel (default: all)
 	Group      string   `json:"group"`
 	DataPort   int      `json:"data_port"`
 	Count      int      `json:"count"`
@@ -561,6 +638,14 @@ type McastMatrixParams struct {
 	// RxQueue overrides mcast_receive's AF_XDP/XDP queue index (mirrors `-q`).
 	// 0 is both "unset" and the tool default.
 	RxQueue int `json:"rx_queue,omitempty"`
+
+	// WanderSample toggles the clock-wander sampler (dev/roadmap/precision/
+	// wander-band-design.md, wander-sampler-lifecycle-design.md) for this
+	// campaign. Default false: the sampler is opt-in, per-run, and never a
+	// persistent background process - see wander-sampler-lifecycle-design.md
+	// §2.4/§4 for why it is scoped to exactly one (replicator, mode) run's
+	// settle+run window rather than running continuously.
+	WanderSample bool `json:"wander_sample,omitempty"`
 }
 
 // RunMcastMatrix drives the source -> replicator -> destination fan-out for each
@@ -585,7 +670,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 	atomic.StoreInt32(&o.cancel, 0)
 
 	if len(p.Modes) == 0 {
-		p.Modes = []string{"copy", "inplace", "bpf_tx"}
+		p.Modes = []string{"copy", "inplace"}
 	}
 	if p.Group == "" {
 		p.Group = "224.0.31.50"
@@ -690,17 +775,7 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 			log.Printf("campaign mcast cancelled (replicator=%s)", replicator.PrivateIP)
 			return
 		}
-		// bpf_tx (XDP_TX) mode is a single-destination passthrough - it cannot
-		// fan out to multiple receivers. Use only the first destination as the
-		// representative measurement; copy/inplace test the full fan-out.
 		modeDests := dests
-		if mode == "bpf_tx" && len(dests) > 1 {
-			modeDests = dests[:1]
-			o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
-				"replicator": replicator.PrivateIP,
-				"msg": fmt.Sprintf("bpf_tx mode: single-destination only (XDP_TX passthrough) - using %s", dests[0].PrivateIP)})
-			log.Printf("mcast/bpf_tx: limiting to 1 destination (%s) - XDP_TX is single-dest passthrough", dests[0].PrivateIP)
-		}
 
 		// Anchor this (replicator, mode) combination in the runs table so its
 		// measurements are attributable to the replicator path that produced
@@ -711,55 +786,98 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 			"replicator_id": replicator.InstanceID, "replicator_ip": replicator.PrivateIP,
 			"replicator_pg": replicator.PlacementGroup, "replicator_az": replicator.AZ,
 			"replicator_vpc": replicator.VpcID,
-			"group": p.Group, "count": p.Count, "interval_us": p.IntervalUs,
+			"group":          p.Group, "count": p.Count, "interval_us": p.IntervalUs,
 			"size": p.Size, "tx_queue": p.TxQueue, "rx_queue": p.RxQueue,
 		}
-		// NIC tuning state (dev/roadmap/fix.md's "Record the NIC tuning state in run
-		// metadata" item): read from source/replicator/first destination -
+		// NIC tuning state (dev/roadmap precision design P11: "promote from
+		// metadata to gate"). Read from source/replicator/first destination -
 		// enough to catch a fleet node that drifted from the baked baseline
-		// (napi_defer_hard_irqs=2, gro_flush_timeout=10000, rx/tx-usecs=0)
 		// without dispatching to every destination in a large fan-out. Prefix
 		// each node's keys with its role so all three show up distinctly in
-		// one flat params map instead of colliding. Best-effort: a node that
-		// doesn't answer (agent busy, older agent build predating
-		// CmdNicTuning) simply contributes no keys rather than failing the
-		// run - this is diagnostic metadata, not something to gate on.
+		// one flat params map instead of colliding.
 		tuningNodes := map[string]registry.Node{"src": source, "repl": replicator}
 		if len(modeDests) > 0 {
 			tuningNodes["dst"] = modeDests[0]
 		}
 		var tuningWG sync.WaitGroup
 		var tuningMu sync.Mutex
+		var tuningViolations []string
 		for role, n := range tuningNodes {
 			tuningWG.Add(1)
 			go func(role string, n registry.Node) {
 				defer tuningWG.Done()
 				res, err := o.DispatchAgent(n.InstanceID, proto.Command{Type: proto.CmdNicTuning}, runSetup)
 				if err != nil || !res.OK || res.NicTuning == nil {
+					// Best-effort for OLDER agents that predate CmdNicTuning:
+					// contribute no keys and no violation, rather than failing
+					// a run whose agent simply doesn't answer this command.
+					// This does NOT cover a CURRENT agent reporting drifted
+					// values - that path below always evaluates the gate.
 					return
 				}
 				tuningMu.Lock()
 				for k, v := range res.NicTuning {
 					params["nic_"+role+"_"+k] = v
 				}
+				if v := nicTuningViolations(role, n.PrivateIP, res.NicTuning); len(v) > 0 {
+					tuningViolations = append(tuningViolations, v...)
+				}
 				tuningMu.Unlock()
 			}(role, n)
 		}
 		tuningWG.Wait()
+		// Gate: a node whose NIC tuning drifted from the baked baseline has a
+		// different bias profile (b_rx is a property of the tuning, not the
+		// NIC - untuned measured -12 to -390us vs ~107ns tuned) and its
+		// measurements are not comparable to a correctly-tuned run. Reject
+		// rather than record a plausible-looking but incomparable result.
+		if len(tuningViolations) > 0 {
+			o.hub.Emit("job", map[string]any{"status": "error", "mode": mode,
+				"stage": "nic_tuning_gate", "replicator": replicator.PrivateIP,
+				"err": strings.Join(tuningViolations, "; ")})
+			log.Printf("campaign mcast/%s REJECTED (replicator=%s): nic tuning drift: %s",
+				mode, replicator.PrivateIP, strings.Join(tuningViolations, "; "))
+			continue
+		}
 		runID, rErr := o.store.InsertRun("mcast", mode, "", "", len(modeDests), params)
 		if rErr != nil {
 			log.Printf("store: could not open run row for mcast/%s replicator=%s: %v", mode, replicator.PrivateIP, rErr)
 		}
 		o.store.SetCurrentRun(runID)
 
-		// Clock sync does not depend on the replicator, so run it concurrently
-		// with the mode switch (which restarts the replicator) instead of after.
+		// Clock sync runs concurrently with the mode switch (which restarts the
+		// replicator) rather than after it, since chronyd is independent of
+		// replicator.service. clockWG is waited on before any traffic starts.
+		//
+		// The REPLICATOR MUST BE INCLUDED here. It stamps replicator_ns (the hop1
+		// endpoint) and replicator_tx_ns (the hop2 start), i.e. two of the four
+		// timestamps in a one-way mcast measurement. Leaving it unsynced was a real
+		// defect: a freshly started node can sit ~0.6-0.9 s off the PHC because
+		// chrony's `makestep 1.0 3` declines to step a sub-1s offset and slews it
+		// off at maxslewrate 500 instead (~27 min to converge). With the replicator
+		// skipped that produced the bogus hop1=0 / hop2~=665000us runs recorded in
+		// dev/roadmap/fix.md. CmdClockSync issues an explicit `chronyc makestep`,
+		// which ignores the 1.0 s threshold. See dev/roadmap/precision.md Finding 2.
 		var clockWG sync.WaitGroup
-		for _, n := range append([]registry.Node{source}, modeDests...) {
+		for _, n := range append([]registry.Node{source, replicator}, modeDests...) {
 			clockWG.Add(1)
 			go func(n registry.Node) {
 				defer clockWG.Done()
-				o.DispatchAgent(n.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
+				// Surface a failed convergence instead of discarding it. ClockSync
+				// now gates on `chronyc tracking` System time (see clockOffsetMaxUs
+				// in agent/runner.go), so a non-OK result here means this node's
+				// clock did not converge and its timestamps cannot be trusted for a
+				// one-way split. Emitted as a warning rather than aborting the mode:
+				// the per-destination clock-skew gate in RunMcastReceive is the hard
+				// stop, and this tells the operator which node to look at first.
+				res, err := o.DispatchAgent(n.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
+				if err != nil || !res.OK {
+					detail := firstErr(err, res.Err)
+					log.Printf("clock_sync: node %s (%s) did not converge: %s",
+						n.PrivateIP, n.InstanceID, detail)
+					o.hub.Emit("job", map[string]any{"status": "warn", "kind": "mcast", "mode": mode,
+						"stage": "clock_sync", "node": n.PrivateIP, "err": detail})
+				}
 			}(n)
 		}
 
@@ -788,7 +906,7 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 		msMSetMode += time.Since(tMode).Milliseconds()
 		o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
 			"replicator": replicator.PrivateIP,
-			"msg": "replicator in mcast/" + mode + " - destinations joining group + clock sync"})
+			"msg":        "replicator in mcast/" + mode + " - destinations joining group + clock sync"})
 		tJoin := time.Now()
 		// Destinations (re)join the group behind the replicator. Joins need the
 		// replicator listening so they follow the mode switch, but they are
@@ -819,7 +937,17 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 		}
 		o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
 			"replicator": replicator.PrivateIP,
-			"msg": fmt.Sprintf("sending %d packets source→replicator→%d dest(s)", p.Count, len(modeDests))})
+			"msg":        fmt.Sprintf("sending %d packets source→replicator→%d dest(s)", p.Count, len(modeDests))})
+
+		// Wander sampler targets for this mode's attempts (wander-sampler-
+		// lifecycle-design.md §3 step 2) - computed once per mode since
+		// modeDests is fixed across retries. Empty/unused entirely when
+		// p.WanderSample is false: StartWander/StopWander are only ever
+		// dispatched inside the `if p.WanderSample` guards below, so a
+		// campaign with the flag off issues zero wander_start/wander_stop
+		// commands and pays zero extra NATS round-trips.
+		wanderNodes := wanderTargets(source, replicator, modeDests)
+		wanderSeconds := wanderRunSeconds(p.TimeoutSec)
 
 		// Run (retryable): start each destination receiver (blocks in-agent until
 		// count/timeout), fire the source send, await. On failure, retry the batch
@@ -832,6 +960,18 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 		}
 		ok := false
 		var results []rr
+		// wanderCSVs accumulates the LAST attempt's collected sampler output
+		// per node - overwritten (not appended) on each retry so a failed
+		// first attempt's stale CSV never gets merged alongside a
+		// successful second attempt's; only the attempt that actually
+		// produced the stored run's results should contribute wander data.
+		// wanderStartSnap/wanderEndSnap hold G4/G5's per-node evidence from
+		// the SAME attempt as wanderCSVs, for the same reason.
+		wanderCSVs := map[string]string{}
+		wanderStartSnap := map[string]wander.PhcCounterSnapshot{}
+		wanderEndSnap := map[string]wander.PhcCounterSnapshot{}
+		wanderRefclockOK := map[string]bool{}  // per node: G5's ok (agent answered at all)
+		wanderRefclockSel := map[string]bool{} // per node: G5's selected value
 		for attempt := 1; attempt <= 2 && !ok; attempt++ {
 			if o.cancelled() {
 				break
@@ -839,6 +979,53 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 			tRun := time.Now()
 			var wg sync.WaitGroup
 			results = make([]rr, len(modeDests))
+
+			// Start the wander sampler BEFORE the settle-phase readiness poll
+			// below, per wander-sampler-lifecycle-design.md §2.2/§3: it must
+			// span settle+run, not just run, so the samples nearest the
+			// start of the attempt (while receivers are still confirming
+			// readiness) still have concurrent clock evidence. Best-effort
+			// per node - a node whose agent predates CmdWanderStart, or
+			// whose PTP device is unavailable, must not fail the traffic
+			// run; the reduction stage's own gates (G1-G5) are what reject
+			// an unusable sampler window, not this dispatch.
+			if p.WanderSample {
+				var startWG sync.WaitGroup
+				var startMu sync.Mutex
+				for _, n := range wanderNodes {
+					n := n
+					startWG.Add(1)
+					go func() {
+						defer startWG.Done()
+						res, err := o.DispatchAgent(n.InstanceID, proto.Command{Type: proto.CmdWanderStart,
+							Wander: &proto.WanderParams{Seconds: wanderSeconds}}, runSetup)
+						if err != nil || !res.OK {
+							log.Printf("wander_start: node %s (%s) did not start: %s",
+								n.PrivateIP, n.InstanceID, firstErr(err, res.Err))
+						}
+						// Capture G4/G5 evidence regardless of whether the
+						// sampler itself started - a failed start is still
+						// useful to correlate against a bad refclock/counter
+						// state, and the gates fail closed on missing data
+						// either way.
+						startMu.Lock()
+						if res.PhcCounters != nil {
+							wanderStartSnap[n.PrivateIP] = wander.PhcCounterSnapshot(res.PhcCounters)
+						}
+						if res.RefclockPhcSelected != nil {
+							wanderRefclockOK[n.PrivateIP] = true
+							wanderRefclockSel[n.PrivateIP] = *res.RefclockPhcSelected
+						}
+						startMu.Unlock()
+					}()
+				}
+				// Awaited (not fire-and-forget) so G4/G5's window-start
+				// evidence is guaranteed captured before the settle phase
+				// begins - a race here would mean a node's start-snapshot
+				// might arrive after its stop-snapshot, corrupting the
+				// bracket the gate is supposed to check.
+				startWG.Wait()
+			}
 			// Cancel watcher: if a cancel arrives mid-measurement, kill the in-flight
 			// mcast_receive/mcast_send (cleanup) so the blocking dispatches return.
 			stopWatch := make(chan struct{})
@@ -910,6 +1097,39 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 					Count: p.Count, IntervalUs: p.IntervalUs, Size: p.Size, TxQueue: p.TxQueue, Variation: mode}}, recvT)
 			wg.Wait()
 			atomic.AddInt64(&msMRun, time.Since(tRun).Milliseconds())
+			// Stop the wander sampler right after the run phase closes -
+			// wander-sampler-lifecycle-design.md §3 step 8. Collected here
+			// (not deferred to after the retry loop) so a RETRIED attempt's
+			// stale CSV is overwritten by this attempt's, matching the
+			// "last attempt wins" comment on wanderCSVs above. Best-effort:
+			// a node that never started (agent too old, PTP unavailable) or
+			// whose stop call fails just contributes no CSV for this
+			// attempt - it does not fail the traffic run, which has
+			// already completed by this point regardless.
+			if p.WanderSample {
+				var wanderWG sync.WaitGroup
+				var wanderMu sync.Mutex
+				for _, n := range wanderNodes {
+					n := n
+					wanderWG.Add(1)
+					go func() {
+						defer wanderWG.Done()
+						res, err := o.DispatchAgent(n.InstanceID, proto.Command{Type: proto.CmdWanderStop}, runSetup)
+						if err != nil || !res.OK {
+							log.Printf("wander_stop: node %s (%s) failed: %s",
+								n.PrivateIP, n.InstanceID, firstErr(err, res.Err))
+							return
+						}
+						wanderMu.Lock()
+						wanderCSVs[n.PrivateIP] = res.WanderCSV
+						if res.PhcCounters != nil {
+							wanderEndSnap[n.PrivateIP] = wander.PhcCounterSnapshot(res.PhcCounters)
+						}
+						wanderMu.Unlock()
+					}()
+				}
+				wanderWG.Wait()
+			}
 			close(stopWatch)
 			if o.cancelled() {
 				ok = false
@@ -950,6 +1170,124 @@ func (o *Orchestrator) runMcastForReplicator(p McastMatrixParams, source, replic
 				"ok": pairOK, "err": firstErr(r.err, r.res.Err)})
 		}
 		o.store.FinishRun(runID, pairsOK)
+		// Reduce + gate the wander sampler's collected CSVs, if any
+		// (wander-sampler-lifecycle-design.md §3 step 9, wander-band-design.md
+		// §4/§5). MergeRunParams rather than a second InsertRun call - the
+		// run row and its params were already opened at the top of this
+		// mode, before the sampler's data existed. Both the raw CSV and the
+		// reduced+gated fields are stored: raw so the band can be
+		// recomputed under a different model without re-running (§4), and
+		// reduced so a reader does not have to re-parse CSV text to see the
+		// figures. Keyed "wander_csv_<ip>"/"wander_<ip>_<field>" per node.
+		if p.WanderSample && len(wanderCSVs) > 0 {
+			extra := make(map[string]any, len(wanderCSVs)*8)
+			// reducedByIP holds each node's Reduce() output (keyed by IP) so
+			// the pairwise band (wander-band-design.md §4's PairwiseBand,
+			// sqrt(madA^2+madC^2)) can be computed for source<->destination
+			// pairs after every node's own fields are known - PairwiseBand
+			// needs two nodes' WanderMadScaledNs together, not one node's
+			// fields in isolation, so it cannot be computed inside the
+			// per-node loop below.
+			reducedByIP := make(map[string]wander.Fields, len(wanderCSVs))
+			rejectedByIP := make(map[string]bool, len(wanderCSVs))
+			for ip, csv := range wanderCSVs {
+				extra["wander_csv_"+ip] = csv
+				samples, perr := wander.ParseCSV(strings.NewReader(csv))
+				if perr != nil {
+					extra["wander_"+ip+"_error"] = fmt.Sprintf("parse: %v", perr)
+					continue
+				}
+				f := wander.Reduce(samples)
+				reducedByIP[ip] = f
+				extra["wander_"+ip+"_med_ns"] = f.WanderMedNs
+				extra["wander_"+ip+"_mad_raw_ns"] = f.WanderMadRawNs
+				extra["wander_"+ip+"_mad_scaled_ns"] = f.WanderMadScaledNs
+				extra["wander_"+ip+"_mad_per_sqrt_sec_ns"] = f.WanderMadPerSqrtSecNs
+				extra["wander_"+ip+"_duration_sec"] = f.WanderDurationSec
+				extra["wander_"+ip+"_p1_ns"] = f.WanderP1Ns
+				extra["wander_"+ip+"_p99_ns"] = f.WanderP99Ns
+				extra["wander_"+ip+"_excursion_pct"] = f.WanderExcursionPct
+				extra["wander_"+ip+"_step_count"] = f.WanderStepCount
+				extra["wander_"+ip+"_bracket_med_ns"] = f.BracketMedNs
+				extra["wander_"+ip+"_eb_med_ns"] = f.EbMedNs
+				extra["wander_"+ip+"_sample_count"] = f.SampleCount
+				extra["wander_"+ip+"_sentinel_count"] = f.SentinelCount
+
+				// Gates G1-G6 (wander-band-design.md §5). A REJECT gate
+				// failing is recorded as a violation (surfaced the same way
+				// nic_tuning_gate violations are, via the job event and
+				// params, not by discarding the traffic result itself -
+				// the wander band is metadata about the measurement, and
+				// the design doc's own gates are reject-only for the BAND,
+				// never a retroactive correction of the recorded latency).
+				var violations []string
+				if ok, reason := wander.GateSampleCoverage(f, wander.ExpectedSamples(10, wander.ActualDurationSec(samples))); !ok {
+					violations = append(violations, reason)
+				}
+				if ok, reason := wander.GateSentinelRate(f); !ok {
+					violations = append(violations, reason)
+				}
+				if ok, reason := wander.GateNoStep(f); !ok {
+					violations = append(violations, reason)
+				}
+				if ok, reason := wander.GatePhcCountersClean(wanderStartSnap[ip], wanderEndSnap[ip]); !ok {
+					violations = append(violations, reason)
+				}
+				if ok, reason := wander.GateRefclockIsPhc(wanderRefclockSel[ip], wanderRefclockOK[ip]); !ok {
+					violations = append(violations, reason)
+				}
+				if flag, reason := wander.GateExcursionNorm(f); flag {
+					extra["wander_"+ip+"_excursion_flag"] = reason
+				}
+				if len(violations) > 0 {
+					extra["wander_"+ip+"_rejected"] = strings.Join(violations, "; ")
+					rejectedByIP[ip] = true
+					log.Printf("wander gates rejected node %s (mode=%s replicator=%s): %s",
+						ip, mode, replicator.PrivateIP, strings.Join(violations, "; "))
+				}
+			}
+
+			// Pairwise band (wander-band-design.md §4): for every source<->
+			// destination pair with BOTH nodes' wander evidence gate-clean,
+			// combine their scaled MADs in quadrature. Only source<->dest
+			// pairs are computed, not source<->replicator or replicator<->
+			// dest - the reported one-way figure this band qualifies is
+			// rx_ns-ts_ns (source to destination, end to end; src/README.md's
+			// "How multicast latency is measured"), so the band must describe
+			// noise on exactly that pair, not an intermediate hop. A pair with
+			// either side rejected is skipped entirely (PairwiseBand.md and
+			// wander.go's own doc comment: quadrature is only valid combining
+			// two genuine sigma-equivalent MADs; a rejected node's MAD is not
+			// trustworthy evidence and must not be silently folded in).
+			var maxBandNs float64
+			haveBand := false
+			if srcF, ok := reducedByIP[source.PrivateIP]; ok && !rejectedByIP[source.PrivateIP] {
+				for _, d := range modeDests {
+					dstF, ok := reducedByIP[d.PrivateIP]
+					if !ok || rejectedByIP[d.PrivateIP] {
+						continue
+					}
+					band := wander.PairwiseBand(srcF.WanderMadScaledNs, dstF.WanderMadScaledNs)
+					extra["wander_pairwise_band_"+source.PrivateIP+"_"+d.PrivateIP+"_ns"] = band
+					if !haveBand || band > maxBandNs {
+						maxBandNs = band
+						haveBand = true
+					}
+				}
+			}
+			if haveBand {
+				// wander_pairwise_band_max_ns is the single figure a reader
+				// wants at a glance for this run: the worst-case (largest)
+				// band across every gate-clean source<->destination pair,
+				// so a multi-destination run is never represented by an
+				// optimistic pair while a noisier one goes unnoticed.
+				extra["wander_pairwise_band_max_ns"] = maxBandNs
+			}
+			if err := o.store.MergeRunParams(runID, extra); err != nil {
+				log.Printf("store: could not merge wander data into run %d (mode=%s replicator=%s): %v",
+					runID, mode, replicator.PrivateIP, err)
+			}
+		}
 		o.store.SetCurrentRun(0)
 		tClean := time.Now()
 		for _, d := range modeDests { // release the queue for the next mode

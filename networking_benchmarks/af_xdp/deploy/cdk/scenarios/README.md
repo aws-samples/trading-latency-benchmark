@@ -10,6 +10,14 @@ Files are named `<datapath>-<size>`: `ucast-*` drive the `rtt` round-trip probe,
 `all-*` carries both role sets in one fleet. The trailing number is the instance
 count, so the file name alone tells you what a deploy will cost.
 
+> **Region and AZ caveat.** The primary region is **ap-northeast-1** (Tokyo) and the
+> secondary is **ap-southeast-1** (Singapore). Tokyo has **no `ap-northeast-1b`** - its
+> AZs are `a` (apne1-az4), `c` (apne1-az1) and `d` (apne1-az2). Any entry with
+> `"az": "b"` will fail to deploy there, which is why the cross-AZ entries below use
+> `d`. Singapore does **not** offer `m8a` or `m8azn` at all, so cross-region entries
+> pin an explicitly Singapore-available type (`c7a.2xlarge` virtual, `c7a.metal-48xl`
+> metal) rather than inheriting the `m8a.2xlarge` default.
+
 ## ucast/ - Unicast RTT benchmarks
 
 All nodes act as peers (role is irrelevant for ucast - the orchestrator uses all online nodes). Measures point-to-point latency.
@@ -24,7 +32,7 @@ replicator's `initializeCpuCores`), so the same AMI/code adapts to any size or v
 | File | Topology | Instances | Instance type | Notes |
 |------|----------|:---------:|---------------|-------|
 | `ucast-3.json` | Same AZ (a), single cluster PG `cpg-a` | 3 | `c7i.4xlarge` | Standard ucast triangle. Intel, SMT on - 16 vCPUs across 8 physical cores |
-| `ucast-metal-5.json` | 2 in AZ a cluster PG `cpg-a` + 1 in AZ a unplaced + 1 in AZ b + 1 in eu-west-1 | 5 | `m8azn.metal-12xl` | Bare metal placement matrix. The cross-region entry requires the AMI baked in eu-west-1. Comparable to the `mcast2ucast` DPDK benchmark's metal runs |
+| `ucast-metal-5.json` | 2 in AZ a cluster PG `cpg-a` + 1 in AZ a unplaced + 1 in AZ d + 1 in ap-southeast-1 | 5 | `m8azn.metal-12xl` (Singapore entry: `c7a.metal-48xl`) | Bare metal placement matrix. The cross-region entry requires the AMI baked in ap-southeast-1. Comparable to the `mcast2ucast` DPDK benchmark's metal runs |
 
 ## mcast/ - Multicast fan-out benchmarks
 
@@ -38,7 +46,7 @@ than the Intel equivalent's 4).
 | File | Topology | Instances | Instance type | Notes |
 |------|----------|:---------:|---------------|-------|
 | `mcast-3.json` | Same AZ (a), single cluster PG `cpg-a`: source + replicator + destination | 3 | `m8a.2xlarge` | Minimal mcast test - the mode-comparison baseline, since placement is held constant |
-| `mcast-8.json` | Source in AZ a cluster PG `cpg-a`; replicators in AZ a cluster PG `cpg-a` / AZ a unplaced / AZ b; destinations in AZ a cluster PG `cpg-a` / AZ a unplaced / AZ c / eu-west-1 AZ a | 8 | default (`m8a.2xlarge`) | 3-replicator x 4-destination matrix - see below |
+| `mcast-8.json` | Source in AZ a cluster PG `cpg-a`; replicators in AZ a cluster PG `cpg-a` / AZ a unplaced / AZ d; destinations in AZ a cluster PG `cpg-a` / AZ a unplaced / AZ c / ap-southeast-1 AZ a | 8 | default (`m8a.2xlarge`) (Singapore entry: `c7a.2xlarge`) | 3-replicator x 4-destination matrix - see below |
 
 ### `mcast-8.json` - the current mcast results scenario
 
@@ -50,8 +58,8 @@ It deliberately varies replicator and destination placement against a **fixed so
 | Role | Placements |
 |------|------------|
 | source | 1: AZ a, cluster PG `cpg-a` |
-| replicator | 3: cluster PG `cpg-a` / same-AZ-unplaced / cross-AZ (b) |
-| destination | 4: cluster PG `cpg-a` / same-AZ-unplaced / cross-AZ (c) / cross-region (eu-west-1 AZ a) |
+| replicator | 3: cluster PG `cpg-a` / same-AZ-unplaced / cross-AZ (d) |
+| destination | 4: cluster PG `cpg-a` / same-AZ-unplaced / cross-AZ (c) / cross-region (ap-southeast-1 AZ a) |
 
 One sweep therefore covers 3 x 4 = 12 source/replicator/destination combinations per
 forwarding mode, without redeploying the fleet between placement variants.
@@ -63,14 +71,11 @@ with multiple source, replicator, and destination placement strategies.
 
 | File | Topology | Instances | Instance type | Notes |
 |------|----------|:---------:|---------------|-------|
-| `all-11.json` | 2 source (`tenancy: host`) in AZ a cluster PG `cpg-a`; replicators in AZ a cluster PG `cpg-a` / AZ a unplaced / AZ b; 3 destinations in AZ a cluster PG `cpg-a` + 1 AZ a unplaced + 1 AZ b + 1 in eu-west-2 AZ a cluster PG | 11 | default (`m8a.2xlarge`) | Placement comparison. See the region warning and orchestrator note below |
+| `all-11.json` | 2 source (`tenancy: host`) in AZ a cluster PG `cpg-a`; replicators in AZ a cluster PG `cpg-a` / AZ a unplaced / AZ d; 3 destinations in AZ a cluster PG `cpg-a` + 1 AZ a unplaced + 1 AZ d + 1 in ap-southeast-1 AZ a cluster PG | 11 | default (`m8a.2xlarge`) (Singapore entry: `c7a.2xlarge`) | Placement comparison. See the orchestrator note below |
 
-> **Warning - `all-11.json` targets a different secondary region.** Its cross-region
-> destination is in **eu-west-2**, while both `mcast-8.json` and `ucast-metal-5.json`
-> target **eu-west-1**. Cross-region deployment requires the AMI to have been baked in the
-> secondary region, so `all-11.json` will fail unless an AMI exists in eu-west-2. This looks
-> like a leftover that probably wants changing to eu-west-1. The JSON has **not** been
-> changed - only this note was added.
+> **Resolved:** `all-11.json` previously targeted eu-west-2 while the other scenarios
+> targeted eu-west-1. All cross-region entries now consistently target **ap-southeast-1**
+> (the configured secondary), so only one secondary AMI bake is required.
 
 **Note on orchestrator behavior:** The control-plane `RunMcastMatrix` picks **one source**
 and **one replicator** (first online match) and fans out to **all destinations**. The extra
@@ -86,8 +91,8 @@ Create any JSON file with the `FleetEntry` schema:
 ```json
 [
   {"count": 2, "type": "m8a.2xlarge", "pgType": "cluster", "pgName": "group-a"},
-  {"count": 2, "type": "m8a.2xlarge", "pgType": "cluster", "pgName": "group-b", "az": "b"},
-  {"count": 3, "type": "m8a.2xlarge", "pgType": "spread", "region": "eu-west-1"}
+  {"count": 2, "type": "m8a.2xlarge", "pgType": "cluster", "pgName": "group-b", "az": "d"},
+  {"count": 3, "type": "c7a.2xlarge", "pgType": "spread", "region": "ap-southeast-1"}
 ]
 ```
 
@@ -98,7 +103,7 @@ Create any JSON file with the `FleetEntry` schema:
 | `type` | string | `m8a.2xlarge` | EC2 instance type |
 | `count` | number | `1` | Number of instances |
 | `role` | string | `destination` | `source`, `replicator`, or `destination` |
-| `az` | string | first AZ of region (`a`) | AZ suffix (e.g. `"b"`) or full name (e.g. `"eu-west-1a"`) |
+| `az` | string | first AZ of region (`a`) | AZ suffix (e.g. `"d"`) or full name (e.g. `"ap-northeast-1d"`). **See the AZ caveat above** |
 | `pgType` | string | none | `cluster`, `spread`, or `partition` |
 | `pgName` | string | auto | Group label. Entries sharing a name share one placement group. Also recorded per-node in the `FleetManifest` as a reporting/clustering label. |
 | `region` | string | stack region | Triggers cross-region deployment (max one secondary region) |
@@ -133,11 +138,11 @@ CDK validates at synth time:
 ```json
 [
   {"count": 1, "type": "m8a.2xlarge", "az": "a"},
-  {"count": 1, "type": "m8a.2xlarge", "az": "b"},
+  {"count": 1, "type": "m8a.2xlarge", "az": "d"},
   {"count": 2, "type": "m8a.2xlarge", "az": "a", "pgType": "cluster", "pgName": "cpg-a-2"},
-  {"count": 2, "type": "m8a.2xlarge", "az": "b", "pgType": "cluster", "pgName": "cpg-b-2"},
+  {"count": 2, "type": "m8a.2xlarge", "az": "d", "pgType": "cluster", "pgName": "cpg-d-2"},
   {"count": 2, "type": "m8a.2xlarge", "az": "a", "pgType": "spread", "pgName": "spg-a-1"},
-  {"count": 2, "type": "m8a.2xlarge", "az": "b", "pgType": "spread", "pgName": "spg-b-1"}
+  {"count": 2, "type": "m8a.2xlarge", "az": "d", "pgType": "spread", "pgName": "spg-d-1"}
 ]
 ```
 

@@ -147,6 +147,8 @@ struct RxStats {
 	uint64_t sum_lat2      = 0;
 	int      n_neg_h2      = 0;
 	int      n_neg_total   = 0;
+	int64_t  min_neg_h2_ns = 0;   // most-negative hop2 seen, 0 if none negative
+	int64_t  min_neg_total_ns = 0; // most-negative total seen, 0 if none negative
 	bool     has_replicator_ts = false;
 	bool     has_tx_ts     = false;
 
@@ -171,7 +173,14 @@ static void record_sample(RxStats &st, const pkt_hdr *hdr, uint64_t rx_ns, int c
 	uint64_t replicator_tx_ns = betoh64_(hdr->replicator_tx_ns);
 
 	uint64_t ulat = (rx_ns >= tx_ns) ? (rx_ns - tx_ns) : 0;
-	if (rx_ns < tx_ns) st.n_neg_total++;
+	// S4 (design doc §6.3): never clamp a negative sample silently - record its
+	// true signed magnitude too, so the bracket in min_neg_total_ns is a real
+	// bound on the differential clock offset rather than a discarded value.
+	if (rx_ns < tx_ns) {
+		st.n_neg_total++;
+		int64_t signed_total = (int64_t)rx_ns - (int64_t)tx_ns;
+		if (signed_total < st.min_neg_total_ns) st.min_neg_total_ns = signed_total;
+	}
 	st.latencies.push_back(ulat);
 	st.sum_lat += ulat;
 	st.received++;
@@ -191,6 +200,7 @@ static void record_sample(RxStats &st, const pkt_hdr *hdr, uint64_t rx_ns, int c
 		int64_t h2_signed = (int64_t)rx_ns - (int64_t)replicator_ns;
 		if (h2_signed <= 0) {
 			st.n_neg_h2++;
+			if (h2_signed < st.min_neg_h2_ns) st.min_neg_h2_ns = h2_signed;
 		} else {
 			uint64_t h2 = (uint64_t)h2_signed;
 			st.latencies_hop2.push_back(h2);
@@ -332,6 +342,12 @@ static void emit_report(RxStats &st, const char *iface_or_desc, const char *queu
 			fprintf(jf, "  \"lost\": %d,\n", st.lost);
 			fprintf(jf, "  \"loss_pct\": %.4f,\n", loss_pct);
 			fprintf(jf, "  \"clock_skew_samples\": %d,\n", st.n_neg_total);
+			fprintf(jf, "  \"clock_skew_hop2_samples\": %d,\n", st.n_neg_h2);
+			// One-sided brackets on the differential clock offset (design doc
+			// §1c/A.8), computed from the most-negative signed sample actually
+			// observed - never discarded, per S4. 0 means no negative samples.
+			fprintf(jf, "  \"min_neg_total_us\": %.3f,\n", st.min_neg_total_ns / 1000.0);
+			fprintf(jf, "  \"min_neg_hop2_us\": %.3f,\n", st.min_neg_h2_ns / 1000.0);
 			fprintf(jf, "  \"timestamp_rx\": \"%s\",\n", is_kernel ? "kernel_recvfrom" : "xdp_afxdp");
 			fprintf(jf, "  \"timestamp_tx\": \"clock_realtime\",\n");
 			// Achieved vs requested rate (dev/roadmap: "report achieved vs
@@ -363,14 +379,23 @@ static void emit_report(RxStats &st, const char *iface_or_desc, const char *queu
 			fprintf(jf, "    \"p999\": %" PRIu64 ",\n", p999 / 1000);
 			fprintf(jf, "    \"max\": %" PRIu64 "\n", st.max_lat / 1000);
 			fprintf(jf, "  },\n");
+			// min_total_us doubles as a one-sided bracket on the differential
+			// clock offset between source and destination (design doc §1c /
+			// A.8): the destination's minimum observed one-way total cannot be
+			// below the true physical transit floor for this topology, so a
+			// value at or near 0 - especially alongside clock_skew_samples>0 -
+			// indicates the offset is comparable to or exceeds that floor.
+			// Emitted unconditionally (not just when has_replicator_ts) since
+			// it's meaningful even on a single-hop path.
+			fprintf(jf, "  \"min_total_us\": %.3f,\n", st.min_lat / 1000.0);
 			if (st.has_replicator_ts && !st.latencies_hop1.empty()) {
-				fprintf(jf, "  \"hop1_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 ", \"p999\": %" PRIu64 " },\n",
-				        pct(st.latencies_hop1, 50) / 1000, pct(st.latencies_hop1, 99) / 1000,
+				fprintf(jf, "  \"hop1_us\": { \"min\": %.3f, \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 ", \"p999\": %" PRIu64 " },\n",
+				        st.min_lat1 / 1000.0, pct(st.latencies_hop1, 50) / 1000, pct(st.latencies_hop1, 99) / 1000,
 				        (st.latencies_hop1[(st.latencies_hop1.size() - 1) * 999 / 1000]) / 1000);
 			}
 			if (st.has_replicator_ts && !st.latencies_hop2.empty()) {
-				fprintf(jf, "  \"hop2_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 ", \"p999\": %" PRIu64 " },\n",
-				        pct(st.latencies_hop2, 50) / 1000, pct(st.latencies_hop2, 99) / 1000,
+				fprintf(jf, "  \"hop2_us\": { \"min\": %.3f, \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 ", \"p999\": %" PRIu64 " },\n",
+				        st.min_lat2 / 1000.0, pct(st.latencies_hop2, 50) / 1000, pct(st.latencies_hop2, 99) / 1000,
 				        (st.latencies_hop2[(st.latencies_hop2.size() - 1) * 999 / 1000]) / 1000);
 			}
 			if (st.has_tx_ts && !st.latencies_proc.empty()) {

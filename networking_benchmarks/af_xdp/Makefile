@@ -13,8 +13,16 @@ INCLUDES = -I./src -I/usr/local/include
 LDFLAGS = -L/usr/local/lib -Wl,-rpath,/usr/local/lib -Wl,--no-as-needed -Wl,-O1
 LDLIBS = -lxdp -lbpf -lelf -lpthread
 
+# phcsample is plain C with NO libxdp/libbpf dependency (see its own header
+# comment in tools/phcsample.c) - a separate, much simpler flag set than the
+# C++ tools above, and deliberately built with plain gcc rather than $(CXX)
+# so it keeps compiling even in echo-mode/CI environments that never install
+# libxdp at all.
+CC = gcc
+CFLAGS = -O2 -Wall
+
 # ── Targets ──────────────────────────────────────────────────────────────────
-CORE_TARGETS = replicator rtt replicator_ctl udp_send
+CORE_TARGETS = replicator rtt replicator_ctl udp_send phcsample
 MCAST_TARGETS = mcast_send mcast_receive
 XDP_PROGRAMS = src/xdp/ucast.o
 MCAST_XDP = src/xdp/mcast.o
@@ -44,7 +52,7 @@ mcast: $(MCAST_TARGETS) $(MCAST_XDP)
 # Builds replicator (echo-mode only) + tools without any libxdp/libbpf dependency.
 echo-mode:
 	$(MAKE) clean
-	$(MAKE) replicator rtt replicator_ctl udp_send \
+	$(MAKE) replicator rtt replicator_ctl udp_send phcsample \
 		CXXFLAGS="$(CXXFLAGS) -DECHO_MODE_ONLY" \
 		LDLIBS="-lpthread" \
 		REPLICATOR_OBJS="src/Replicator/KernelEcho.o"
@@ -82,6 +90,12 @@ replicator_ctl: tools/replicator_ctl.o
 
 udp_send: tools/udp_send.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+# phcsample: plain C, no libxdp/libbpf, no -lpthread needed either - a single
+# translation unit built directly with $(CC)/$(CFLAGS) rather than going
+# through the tools/%.o pattern rule (which is C++-specific).
+phcsample: tools/phcsample.c
+	$(CC) $(CFLAGS) -o $@ $<
 
 # ── Housekeeping ─────────────────────────────────────────────────────────────
 clean:

@@ -1,0 +1,18 @@
+# Local Go test harness for control_plane, matching the agent's deployment OS.
+#
+# Verifies the wander-sampler Stage 0/1 changes on Linux specifically: the
+# lifecycle test (TestWanderStartStopLifecycle) uses syscall.Signal(0) for an
+# OS-level process-liveness check, and exec.CommandContext's kill behavior on
+# context cancellation is a real kernel property worth confirming on the
+# actual target OS rather than trusting macOS's Unix-but-not-Linux semantics.
+#
+#   cd networking_benchmarks/af_xdp/control_plane
+#   docker build --platform linux/amd64 -f Dockerfile.test -t afxdp-cp-test .
+#   docker run --rm --platform linux/amd64 afxdp-cp-test
+
+FROM --platform=linux/amd64 golang:1.25-bookworm
+
+WORKDIR /src
+COPY . .
+
+CMD ["go", "test", "./...", "-v", "-count=1"]

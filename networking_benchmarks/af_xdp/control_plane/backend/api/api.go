@@ -39,6 +39,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/errors", s.handleErrors)
 	mux.HandleFunc("/api/mcast-replicators", s.handleMcastReplicators)
 	mux.HandleFunc("/api/measurements", s.handleMeasurements)
+	mux.HandleFunc("/api/run-params", s.handleRunParams)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	if s.Web != "" {
 		mux.Handle("/", http.FileServer(http.Dir(s.Web)))
@@ -266,6 +267,36 @@ func (s *Server) handleMeasurements(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": results, "since_unix": sinceUnix})
+}
+
+// GET /api/run-params?run_id=N — a single run's full stored params map, for
+// data that does not fit LatestMeasurements' fixed-column json_extract
+// projection - specifically the wander sampler's per-node
+// "wander_<ip>_<field>" fields (dev/roadmap/precision/wander-band-design.md
+// §4), which are keyed dynamically by node IP and so cannot be addressed by
+// a static json_extract path the way replicator_id/replicator_ip etc. are.
+// The frontend fetches this per-run to attach a wander band/floor to a
+// reported percentile (§6, W3) without requiring a schema change to make
+// every possible per-node field its own SQL column.
+func (s *Server) handleRunParams(w http.ResponseWriter, r *http.Request) {
+	if s.Store == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"params": map[string]any{}, "note": "persistence disabled"})
+		return
+	}
+	runID, err := strconv.ParseInt(r.URL.Query().Get("run_id"), 10, 64)
+	if err != nil || runID <= 0 {
+		http.Error(w, "run_id query param is required and must be a positive integer", http.StatusBadRequest)
+		return
+	}
+	params, err := s.Store.RunParams(runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if params == nil {
+		params = map[string]any{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"run_id": runID, "params": params})
 }
 
 // WebDirDefault finds a built frontend directory if present.

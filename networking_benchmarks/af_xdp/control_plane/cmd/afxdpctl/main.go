@@ -404,7 +404,7 @@ func cmdUp(args []string) error {
 	bake := fs.Bool("bake", false, "also (re)bake the AMI")
 	instType := fs.String("instance-type", "m8a.2xlarge", "AMI builder instance type")
 	cdkDir := fs.String("cdk-dir", "deploy/cdk", "path to the CDK app")
-	region := fs.String("region", "eu-central-1", "primary AWS region")
+	region := fs.String("region", "ap-northeast-1", "primary AWS region")
 	// Default "auto" resolves to the caller's own public IP/32 via
 	// detectCallerIP, so `up` opens 8080 (web/API) + 22 (SSH) to the caller
 	// without a separate manual `aws ec2 authorize-security-group-ingress` or
@@ -454,7 +454,7 @@ func cmdUp(args []string) error {
 func cmdSync(args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
 	key := fs.String("key", os.Getenv("SSH_KEY_FILE"), "SSH key file (or $SSH_KEY_FILE)")
-	region := fs.String("region", "us-east-1", "AWS region")
+	region := fs.String("region", "ap-northeast-1", "AWS region")
 	profile := fs.String("profile", os.Getenv("AWS_PROFILE"), "AWS profile")
 	dir := fs.String("ansible-dir", "dev/ansible", "path to the dev ansible dir")
 	fs.Parse(args)
@@ -489,7 +489,7 @@ func cmdDown(args []string) error {
 	key := fs.String("key", "x", "EC2 key pair name (context only)")
 	scenario := fs.String("scenario", "ucast-3", "scenario context (for fleet synth)")
 	cdkDir := fs.String("cdk-dir", "deploy/cdk", "path to the CDK app")
-	region := fs.String("region", "eu-central-1", "primary AWS region")
+	region := fs.String("region", "ap-northeast-1", "primary AWS region")
 	fs.Parse(args)
 	ctx := []string{"--context", "keyPairName=" + *key, "--context", "region=" + *region}
 	// Destroy in reverse dependency order; each is best-effort.

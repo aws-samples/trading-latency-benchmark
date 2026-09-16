@@ -25,33 +25,30 @@
 void Replicator::initialize(bool useZeroCopy) {
     std::cout << "Initializing Replicator with zero-copy: " << (useZeroCopy ? "enabled" : "disabled") << std::endl;
 
-    // Forward path selector (REPLICATOR_FWD_MODE): copy (default) | inplace | bpf_tx | kernel.
+    // Forward path selector (REPLICATOR_FWD_MODE): copy (default) | inplace | kernel.
     // Parsed BEFORE any AF_XDP setup below, because "kernel" skips AF_XDP/eBPF
     // entirely — there is nothing to load or attach for this mode.
-    // "bpf_tx" forwards via the in-kernel eBPF XDP_TX hook, never reaching
-    // userspace. "kernel" runs the whole mcast path over plain UDP sockets —
+    // "kernel" runs the whole mcast path over plain UDP sockets —
     // distinct from REPLICATOR_MODE=echo (plain UDP sockets, --echo-mode) and
     // rtt's "kernel" variation (also plain sockets): those are different
     // programs/tools, this is a fwd-mode of the same AF_XDP replicator binary.
     if (const char* fm = getenv("REPLICATOR_FWD_MODE")) {
         if      (strcmp(fm, "inplace") == 0) fwd_mode_ = 1;
-        else if (strcmp(fm, "bpf_tx")  == 0) fwd_mode_ = 2;
         else if (strcmp(fm, "kernel")  == 0) fwd_mode_ = 3;
         else                                 fwd_mode_ = 0;
     }
     if (fwd_mode_ == 3 && !mcast_mode_) {
         // kernel fwd mode only has meaning in mcast mode (CTRL_MCAST_JOIN drives
         // its destination registration); under unicast there is no equivalent
-        // join mechanism, so the setting is silently ignored — same behavior
-        // bpf_tx already has under unicast. Log it so it's discoverable rather
-        // than a silent no-op, consistent for every fwd-mode value, not just this one.
+        // join mechanism, so the setting is silently ignored. Log it so it's
+        // discoverable rather than a silent no-op, consistent for every
+        // fwd-mode value, not just this one.
         std::cout << "[fwd_mode] REPLICATOR_FWD_MODE=kernel requested under unicast mode; "
                      "ignored (kernel fwd mode is mcast-only). Falling back to copy." << std::endl;
         fwd_mode_ = 0;
     }
     std::cout << "Forward mode: "
               << (fwd_mode_ == 3 ? "kernel (plain UDP sockets)"
-                : fwd_mode_ == 2 ? "bpf_tx (XDP_TX)"
                 : fwd_mode_ == 1 ? "inplace (zero-copy)" : "copy")
               << std::endl;
 
@@ -60,7 +57,7 @@ void Replicator::initialize(bool useZeroCopy) {
         // UDP sockets. Bind the kernel RX socket here; processMcastKernelRx()
         // (spawned in Core.cpp's start()) polls it. group filtering happens in
         // userspace (getCachedGroupDestinations), not via a BPF config_map, so
-        // there is no config_map_fd_/fwd_map_fd_ to set up.
+        // there is no config_map_fd_ to set up.
         kernel_rx_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
         if (kernel_rx_socket_ < 0) {
             throw std::runtime_error("Failed to create kernel fwd-mode RX socket: " + std::string(strerror(errno)));
@@ -244,15 +241,6 @@ void Replicator::configureXdpProgram() {
     config_map_fd_ = XdpSocket::getXdpMapFd("config_map");
     if (config_map_fd_ < 0) {
         throw std::runtime_error("Could not find config_map in loaded XDP program — cannot configure filter");
-    }
-
-    // fwd_map is only used by REPLICATOR_FWD_MODE=bpf_tx; absence is non-fatal
-    // (an older mcast.o without it just can't do bpf_tx forward).
-    fwd_map_fd_ = XdpSocket::getXdpMapFd("fwd_map");
-    if (fwd_mode_ == 2 && fwd_map_fd_ < 0) {
-        std::cerr << "[mcast] REPLICATOR_FWD_MODE=bpf_tx but fwd_map not found in XDP program; "
-                     "falling back to userspace copy forward" << std::endl;
-        fwd_mode_ = 0;
     }
 
     struct unicast_config {

@@ -29,13 +29,39 @@
 import { fmtLat, cellColor, isCrossRegion, esc, LATENCY_BEST_COLOR } from './2d/palette.js';
 import { buildCompareHTML } from './report.js';
 
-/** Short per-mode badge: K/X for ucast kernel/xdp, C/I/BT/MK for mcast fwd modes. */
+/**
+ * Fetch GET /api/run-params for every distinct run_id present in
+ * measurementRows/mcastReplicatorResults, returning a run_id -> params Map
+ * for buildCombinedReportBody's wanderByRun option (wander-band-design.md
+ * §6 W3). Best-effort per run: a failed fetch for one run_id is skipped
+ * (logged to console) rather than rejecting the whole call - one bad run
+ * should not block wander bands for every other run in the report.
+ */
+export async function fetchWanderByRun(measurementRows, mcastReplicatorResults) {
+  const runIds = new Set();
+  for (const r of measurementRows || []) if (r.run_id != null) runIds.add(r.run_id);
+  for (const r of mcastReplicatorResults || []) if (r.run_id != null) runIds.add(r.run_id);
+  const out = new Map();
+  await Promise.all([...runIds].map(async (id) => {
+    try {
+      const resp = await fetch(`/api/run-params?run_id=${id}`);
+      if (!resp.ok) return;
+      const body = await resp.json();
+      if (body && body.params) out.set(id, body.params);
+    } catch (e) {
+      console.warn(`fetchWanderByRun: run_id=${id} failed:`, e);
+    }
+  }));
+  return out;
+}
+
+
+/** Short per-mode badge: K/X for ucast kernel/xdp, C/I/MK for mcast fwd modes. */
 export const MODE_BADGE = {
   'ucast/kernel': 'K',
   'ucast/xdp': 'X',
   'mcast/copy': 'C',
   'mcast/inplace': 'I',
-  'mcast/bpf_tx': 'BT',
   // 'MK' (not 'K') so it's visually distinct from ucast/kernel's badge in any
   // mixed ucast+mcast view — both are plain-kernel-socket baselines but for
   // different kinds.
@@ -85,13 +111,13 @@ function collate(measurementRows, mcastReplicatorResults) {
   const seenKeys = new Set();
 
   const pushRow = (kind, variation, replicatorIp, replicatorPg, replicatorAz, replicatorVpc, srcIp, dstIp, cell, unix,
-    srcRegion, dstRegion) => {
+    srcRegion, dstRegion, runId) => {
     const key = modeKey(kind, variation);
     const edgeKey = `${key}|${srcIp}|${dstIp}|${replicatorIp || ''}`;
     if (seenKeys.has(edgeKey)) return;
     seenKeys.add(edgeKey);
     const src = { private_ip: srcIp, region: srcRegion }, dst = { private_ip: dstIp, region: dstRegion };
-    rows.push({ key, kind, variation, replicatorIp, replicatorPg, replicatorAz, replicatorVpc, src, dst, cell, unix });
+    rows.push({ key, kind, variation, replicatorIp, replicatorPg, replicatorAz, replicatorVpc, src, dst, cell, unix, runId });
     const ck = `${srcIp}|${dstIp}`;
     const prev = best.get(ck);
     if (!prev || unix >= prev.unix) best.set(ck, { unix, key, cell, src, dst });
@@ -135,14 +161,14 @@ function collate(measurementRows, mcastReplicatorResults) {
       hop1_p50: r.hop1_p50, hop1_p99: r.hop1_p99, hop1_p999: r.hop1_p999,
       hop2_p50: r.hop2_p50, hop2_p99: r.hop2_p99, hop2_p999: r.hop2_p999 };
     pushRow(r.kind, r.variation, r.replicator_ip, r.replicator_pg, r.replicator_az, r.replicator_vpc,
-      r.src_ip, r.dst_ip, cell, r.unix, r.src_region, r.dst_region);
+      r.src_ip, r.dst_ip, cell, r.unix, r.src_region, r.dst_region, r.run_id);
   }
   for (const r of mcastReplicatorResults || []) {
     const cell = { p50: r.p50, p90: r.p90, p99: r.p99, p999: r.p999, max: r.max, loss: r.loss_pct ?? 0,
       hop1_p50: r.hop1_p50, hop1_p99: r.hop1_p99, hop1_p999: r.hop1_p999,
       hop2_p50: r.hop2_p50, hop2_p99: r.hop2_p99, hop2_p999: r.hop2_p999 };
     pushRow('mcast', r.mode, r.replicator_ip, r.replicator_pg, r.replicator_az, r.replicator_vpc,
-      r.src_ip, r.dst_ip, cell, r.unix);
+      r.src_ip, r.dst_ip, cell, r.unix, undefined, undefined, r.run_id);
   }
   return { rows, best };
 }
@@ -272,7 +298,8 @@ function methodology(kind, variation) {
   const detail = isMcast
     ? `<dt>Clock</dt><dd><code>CLOCK_REALTIME</code> on all three nodes \u2014 necessarily, since a one-way delay spans hosts. chrony disciplines each node to the <b>ENA PHC hardware clock</b> (<code>refclock PHC /dev/ptp0</code>); AWS Time Sync is the fallback. Observed RMS offset is tens of nanoseconds.</dd>
        <dt>Stamps</dt><dd><code>ts_ns</code> at the source before TX ring submit, <code>replicator_ns</code> at replicator RX, <code>rx_ns</code> at destination RX. One-way = <code>rx_ns \u2212 ts_ns</code>.</dd>
-       <dt>Fwd mode</dt><dd><code>${esc(variation)}</code>. <code>XDP_TX</code> (<code>xdp_tx</code>) is a single-destination passthrough, not a fan-out.</dd>`
+       <dt>Fwd mode</dt><dd><code>${esc(variation)}</code>. <code>XDP_TX</code> (<code>xdp_tx</code>) is a single-destination passthrough, not a fan-out.</dd>
+       <dt><b>Reporting policy \u2014 p90/p99/p99.9/max caveat</b></dt><dd>chrony's discipline of the system clock against the PHC wanders \u00b13-7us on a seconds timescale \u2014 the dominant remaining error term, well above apparatus noise. That wander is zero-mean, so <b>p50 is sound as reported</b>. A tail statistic (p90/p99/p99.9/max) from a single run may be substantially clock noise rather than transit time and is not yet per-run corrected; treat it as an upper-bound indicator, not a point estimate, until pooled across runs or per-sample corrected.</dd>`
     : `<dt>Clock</dt><dd>A single <code>CLOCK_REALTIME</code> domain on one host, so <b>no inter-node clock sync is required</b> and none of its error enters the result. No TSC and no PHC are used for RTT.</dd>
        <dt>Stamps</dt><dd>TX <code>CLOCK_REALTIME</code> immediately before the send; RX a kernel software timestamp recorded in the NAPI receive path, before the socket queue.</dd>
        <dt>Variation</dt><dd><code>${esc(variation)}</code>. <code>--xdp-rx</code> is instrumented kernel RX, NOT a bypass receive.</dd>`;
@@ -285,8 +312,18 @@ function methodology(kind, variation) {
 /** Combined latency table: every mode AND every replicator path, one table.
  * Column set adapts to what's actually in `rows`: replicator/hop1/hop2 are
  * mcast-only data (always empty for ucast) and are dropped entirely when the
- * report has no mcast rows, rather than shown as a wall of em-dashes. */
-function latencyTable(rows, tz) {
+ * report has no mcast rows, rather than shown as a wall of em-dashes.
+ *
+ * @param {Map<number, object>} [wanderByRun] - run_id -> that run's params
+ *   map (from GET /api/run-params), for the wander band this row's
+ *   destination carries (dev/roadmap/precision/wander-band-design.md §4/§6
+ *   W3). Absent/empty when the caller has no wander data to offer (e.g. the
+ *   fetch is still in flight, or WanderSample was off for every run in this
+ *   report) - wanderTailTitle then falls back to the generic caveat text
+ *   that existed before this parameter, so the report never regresses to
+ *   showing NO caveat at all on a mcast tail stat.
+ */
+function latencyTable(rows, tz, wanderByRun) {
   const hasMcast = rows.some((r) => r.kind === 'mcast');
   const head = '<tr><th>mode</th>'
     + (hasMcast ? '<th>replicator</th>' : '')
@@ -328,6 +365,65 @@ function latencyTable(rows, tz) {
   // ucast row, which has no replicator hop at all).
   const hop = (v) => (v == null ? '\u2014' : fmtLat(v));
 
+  // Reporting policy (dev/roadmap precision design, item #9; wander-band-
+  // design.md §6 W3): a one-way (mcast) tail statistic must carry a caveat
+  // at the point of reading. When this run's wander params are available
+  // for the destination, show the ACTUAL band/floor/gate-status; otherwise
+  // fall back to the generic "not yet computed" text so a report with no
+  // wander data never regresses to no caveat at all. RTT (ucast) rows get
+  // no title - a single-clock RTT has no inter-node offset to wander.
+  const GENERIC_WANDER_CAVEAT = 'One-way tail stat, not yet clock-wander-corrected (chrony wanders ' +
+    '+/-3-7us on a seconds timescale). Upper-bound indicator, not a point estimate - see mcast methodology.';
+  const tailTitle = (row) => {
+    if (row.kind !== 'mcast') return '';
+    const params = wanderByRun && row.runId != null ? wanderByRun.get(row.runId) : null;
+    if (!params) return ` title="${esc(GENERIC_WANDER_CAVEAT)}"`;
+    const srcIp = row.src && row.src.private_ip;
+    const dstIp = row.dst && row.dst.private_ip;
+    const rejected = dstIp != null ? params[`wander_${dstIp}_rejected`] : null;
+    if (rejected) {
+      return ` title="${esc('Wander gates REJECTED this node\'s clock evidence: ' + rejected +
+        ' - the tail figures for this row are not backed by validated clock data.')}"`;
+    }
+    // Real pairwise band (wander-band-design.md §4's PairwiseBand,
+    // sqrt(madSrc^2+madDst^2)), computed by the orchestrator once both this
+    // row's source AND destination have gate-clean wander evidence for the
+    // same run. Prefer it over the single-node MAD fallback below - the
+    // quadrature-combined figure is what the design doc actually specifies
+    // as "the pairwise band", not either node's MAD alone.
+    // Pairwise band (wander-band-design.md §4's PairwiseBand,
+    // sqrt(madSrc^2+madDst^2)) only applies to the TOTAL one-way row (true
+    // source -> destination). Hop1/hop2 rows swap src/dst to represent a
+    // single hop's endpoints (e.g. hop2's "src" is the replicator, not the
+    // measurement's actual source - see pushRow above), and the orchestrator
+    // only ever computes/stores a band keyed by the true source and
+    // destination IPs, never a replicator-involving pair. Looking the pair
+    // key up on a hop row would silently miss (a replicator-keyed key the
+    // orchestrator never wrote) and fall through to the single-node MAD
+    // fallback anyway, so gating explicitly on !isHop makes that fallthrough
+    // intentional rather than an unexplained miss.
+    const pairKey = !row.cell.isHop && srcIp != null && dstIp != null
+      ? `wander_pairwise_band_${srcIp}_${dstIp}_ns` : null;
+    const pairBand = pairKey != null ? params[pairKey] : null;
+    if (typeof pairBand === 'number') {
+      const bandUs = (pairBand / 1000).toFixed(1);
+      return ` title="${esc('One-way tail stat. Pairwise clock-wander band for this source/destination ' +
+        'pair: ~\u00b1' + bandUs + 'us (quadrature of both nodes\' scaled MAD - see wander-band-design.md ' +
+        '\u00a74). Zero-mean, so p50 is sound; a tail figure may be substantially this clock noise ' +
+        'rather than transit - treat as an upper-bound indicator.')}"`;
+    }
+    const madScaled = dstIp != null ? params[`wander_${dstIp}_mad_scaled_ns`] : null;
+    if (typeof madScaled !== 'number') return ` title="${esc(GENERIC_WANDER_CAVEAT)}"`;
+    // Pairwise band unavailable for this row (e.g. source's own evidence was
+    // gate-rejected, or this pair wasn't part of the sampled destinations) -
+    // fall back to the single-node scaled MAD as a floor on the band rather
+    // than fabricate a pairwise figure from data this row doesn't carry.
+    const bandUs = (madScaled / 1000).toFixed(1);
+    return ` title="${esc('One-way tail stat. Measured clock wander at this destination: scaled MAD ~' +
+      bandUs + 'us (see wander-band-design.md). Zero-mean, so p50 is sound; a tail figure may be ' +
+      'substantially this clock noise rather than transit - treat as an upper-bound indicator.')}"`;
+  };
+
   const body = sorted
     .map((r) => {
       const c = r.cell;
@@ -345,10 +441,10 @@ function latencyTable(rows, tz) {
         + `<td>${val(c.src_pg)}</td><td>${val(c.dst_pg)}</td>`
         + `<td${colourCell('min', c.min)}>${fmtLat(c.min)}</td>`
         + `<td${colourCell('p50', c.p50)}>${fmtLat(c.p50)}</td>`
-        + `<td${colourCell('p90', c.p90)}>${fmtLat(c.p90)}</td>`
-        + `<td${colourCell('p99', c.p99)}>${fmtLat(c.p99)}</td>`
-        + `<td${colourCell('p999', c.p999)}>${fmtLat(c.p999)}</td>`
-        + `<td${colourCell('max', c.max)}>${fmtLat(c.max)}</td>`
+        + `<td${colourCell('p90', c.p90)}${tailTitle(r)}>${fmtLat(c.p90)}</td>`
+        + `<td${colourCell('p99', c.p99)}${tailTitle(r)}>${fmtLat(c.p99)}</td>`
+        + `<td${colourCell('p999', c.p999)}${tailTitle(r)}>${fmtLat(c.p999)}</td>`
+        + `<td${colourCell('max', c.max)}${tailTitle(r)}>${fmtLat(c.max)}</td>`
         + `<td${colourCell('loss', c.loss ?? 0)}>${esc(c.loss ?? 0)}%</td>`
         + (hasMcast ? `<td>${hop(c.hop1_p50)}</td><td>${hop(c.hop1_p99)}</td><td>${hop(c.hop1_p999)}</td>`
             + `<td>${hop(c.hop2_p50)}</td><td>${hop(c.hop2_p99)}</td><td>${hop(c.hop2_p999)}</td>` : '')
@@ -521,14 +617,19 @@ export const REPORT_CSS = `
  *   results, for the "Per-replicator paths" section AND merged into every
  *   other table via collate() (see its docstring for why both are needed).
  * @param {string} tz
- * @param {{showRefresh?: boolean}} [opts] - showRefresh (default false) adds a
- *   "Refresh" button that dispatches a `afxdp-report-refresh` CustomEvent on
- *   `root` when clicked; only meaningful in the live app overlay (App.svelte
- *   listens for it and re-fetches). The downloaded standalone HTML has no
- *   backend to refresh against, so it omits the button by default.
+ * @param {{showRefresh?: boolean, wanderByRun?: Map<number, object>}} [opts] -
+ *   showRefresh (default false) adds a "Refresh" button that dispatches a
+ *   `afxdp-report-refresh` CustomEvent on `root` when clicked; only
+ *   meaningful in the live app overlay (App.svelte listens for it and
+ *   re-fetches). The downloaded standalone HTML has no backend to refresh
+ *   against, so it omits the button by default. wanderByRun (default none)
+ *   is a run_id -> params map, built by the caller from GET /api/run-params
+ *   per distinct run_id in measurementRows/mcastReplicatorResults (see
+ *   fetchWanderByRun below) - passed through to latencyTable so mcast tail
+ *   cells show the actual measured band instead of the generic caveat.
  */
 export function buildCombinedReportBody(measurementRows, mcastReplicatorResults, tz, opts) {
-  const { showRefresh = false } = opts || {};
+  const { showRefresh = false, wanderByRun } = opts || {};
   const { rows, best } = collate(measurementRows, mcastReplicatorResults);
   const gen = new Date().toISOString();
   if (!rows.length) {
@@ -604,7 +705,7 @@ export function buildCombinedReportBody(measurementRows, mcastReplicatorResults,
   ${replicatorPaths}
 
   <h2>All measurements</h2>
-  ${latencyTable(rows, tz)}`;
+  ${latencyTable(rows, tz, wanderByRun)}`;
 }
 
 /**
@@ -832,18 +933,29 @@ export function reportInteractions(root) {
  * Build the combined report as a self-contained HTML document (standalone
  * download - no live backend to refresh against, so the Refresh button is
  * omitted; see buildCombinedReportBody's opts.showRefresh for the live overlay).
+ *
+ * ASYNC as of the wander-band attachment (wander-band-design.md §6 W3): it
+ * fetches each distinct run_id's params via fetchWanderByRun before
+ * rendering, since a standalone download has no live backend to fetch
+ * against once saved - unlike the in-app overlay, which can fetch
+ * wanderByRun itself and pass it directly to buildCombinedReportBody. Every
+ * existing caller must now await this call; a caller that doesn't will
+ * receive a Promise instead of a string, which surfaces immediately as
+ * broken HTML rather than a silent stale/missing-caveat regression.
+ *
  * @param {Array<object>} measurementRows - GET /api/measurements results
  * @param {Array<object>} mcastReplicatorResults - GET /api/mcast-replicators results
  * @param {string} tz
  */
-export function buildCombinedReportHTML(measurementRows, mcastReplicatorResults, tz) {
+export async function buildCombinedReportHTML(measurementRows, mcastReplicatorResults, tz) {
   if (!measurementRows || !measurementRows.length) {
     return `<!doctype html><html><head><meta charset="utf-8"><title>Latency Report</title></head>`
       + `<body style="background:#0d1117;color:#e6edf3;font-family:system-ui;padding:24px">`
       + `<h1>Latency Report</h1><p>No measurements yet \u2014 run a campaign first.</p></body></html>`;
   }
 
-  const body = buildCombinedReportBody(measurementRows, mcastReplicatorResults, tz);
+  const wanderByRun = await fetchWanderByRun(measurementRows, mcastReplicatorResults);
+  const body = buildCombinedReportBody(measurementRows, mcastReplicatorResults, tz, { wanderByRun });
   const kindLabel = measurementRows[0].kind === 'mcast' ? 'multicast' : 'unicast';
   const docTitle = `Latency Report - ${kindLabel}`;
 

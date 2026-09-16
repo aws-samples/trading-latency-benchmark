@@ -15,7 +15,7 @@ sub-microsecond timing resolution.
 | `Replicator/Internal.hpp` | Shared internal header for the `Replicator/*.cpp` units (common includes + debug macros) |
 | `Replicator/Core.cpp` | Replicator impl - lifecycle (ctor/dtor/move), thread start/stop, statistics, CPU affinity |
 | `Replicator/Init.cpp` | Replicator impl - XDP program load, per-queue AF_XDP socket setup, `config_map` seeding |
-| `Replicator/Groups.cpp` | Replicator impl - dynamic BPF group slots (ref-counted) + in-kernel XDP_TX forward target (`bpf_tx` mode) |
+| `Replicator/Groups.cpp` | Replicator impl - dynamic BPF group slots (ref-counted) |
 | `Replicator/Control.cpp` | Replicator impl - control protocol thread + message handling + upstream forwarding |
 | `Replicator/Destinations.cpp` | Replicator impl - `Destination` type, destination registry, thread-local fan-out cache |
 | `Replicator/DataPath.cpp` | Replicator impl - RX busy-poll, replicate/fan-out, UDP/m2u parse, zero-copy TX, packet build |
@@ -139,7 +139,7 @@ to the replicator, intercepted by XDP. No kernel tunnel device is involved.
    AF_XDP/eBPF removed entirely: plain `AF_INET`/`SOCK_DGRAM` sockets on the
    replicator and both endpoints. No `config_map`, no `MAX_GROUPS` ceiling, no
    ring batching. Exists as an apples-to-apples "no kernel bypass" reference
-   point for the copy/inplace/bpf_tx measurements above - see
+   point for the copy/inplace measurements above - see
    `src/Replicator/README.md`'s "Axis 3" section for the full comparison.
 
 ## Latency-critical RX/TX paths

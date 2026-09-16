@@ -23,7 +23,7 @@
   <rect width="1256" height="672" fill="#f8fafc" rx="8"/>
   <text x="628" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="#1e293b">AF_XDP Replicator &#8212; Datapath Variants (REPLICATOR_FWD_MODE)</text>
   <rect x="30" y="50" width="890" height="90" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
-  <text x="475" y="70" text-anchor="middle" font-size="11" font-weight="bold" fill="#475569">COMMON INGRESS &#8212; AF_XDP modes only (bpf_tx / copy / inplace)</text>
+  <text x="475" y="70" text-anchor="middle" font-size="11" font-weight="bold" fill="#475569">COMMON INGRESS &#8212; AF_XDP modes only (copy / inplace)</text>
   <rect x="60" y="82" width="130" height="40" rx="4" fill="#fff" stroke="#64748b"/>
   <text x="125" y="100" text-anchor="middle" font-size="10" fill="#334155">NIC RX (ENA)</text>
   <text x="125" y="113" text-anchor="middle" font-size="9" fill="#64748b">DMA &#8594; descriptor</text>

@@ -128,7 +128,7 @@ Supported commands:
 | `reregister` | Re-publish Registration immediately |
 | `cleanup` | Kill mcast_send/mcast_receive + detach XDP from the NIC |
 | `clock_sync` | `chronyc makestep` + burst, return achieved offset µs |
-| `set_fwd_mode` | Set `REPLICATOR_FWD_MODE` (copy\|inplace\|bpf_tx\|kernel) in `/etc/default/replicator` + restart service |
+| `set_fwd_mode` | Set `REPLICATOR_FWD_MODE` (copy\|inplace\|kernel) in `/etc/default/replicator` + restart service |
 | `set_mode` | Set `REPLICATOR_MODE` (+ fwd) + restart service |
 | `replicator_svc` | `systemctl stop/start/restart replicator` |
 | `join_group` | `replicator_ctl <ip> mcast <group>` (join mcast group) |
@@ -344,15 +344,15 @@ The `kind` field selects the campaign type; remaining fields are campaign-specif
 ```json
 {
   "kind": "mcast",
-  "modes": ["copy", "inplace", "bpf_tx"],
+  "modes": ["copy", "inplace"],
   "count": 10000,
   "interval_us": 200,
   "timeout_sec": 30
 }
 ```
 
-- `modes`: subset of `copy` | `inplace` | `bpf_tx` | `kernel` (default: the
-  three AF_XDP fwd modes - `kernel` is a plain-socket, no-AF_XDP baseline and
+- `modes`: subset of `copy` | `inplace` | `kernel` (default: the
+  two AF_XDP fwd modes - `kernel` is a plain-socket, no-AF_XDP baseline and
   is **opt-in only**, never implied by an empty/omitted `modes` list or the
   web UI's "all" button).
 - `size` (optional): `mcast_send` payload bytes, mirrors the tool's `-s` and
@@ -451,7 +451,7 @@ replicator:
 
 1. Identify online nodes by role: `source`, every online `replicator`, all `destination`s.
 2. Stop the replicator service on source + destinations (free AF_XDP queue) - once, shared across all replicators.
-3. For each replicator, for each fwd mode (`copy`, `inplace`, `bpf_tx`):
+3. For each replicator, for each fwd mode (`copy`, `inplace`):
    - Open a `runs` row tagging this replicator's identity/PG/AZ (see [Multi-replicator mcast campaigns](#multi-replicator-mcast-campaigns)).
    - Set that replicator to `mcast/<mode>` (skipped if already set).
    - Destinations join the multicast group + clock-sync gate.
@@ -600,7 +600,7 @@ Driven from the web panel or `POST /api/run`.
 | `xdp` | AF_XDP zero-copy | kernel socket + XDP-stamped ts | removes the kernel TX stack (zero-copy TX) AND uses an **XDP-stamped** ingress ts on RX (NOT a kernel bypass on the RX side) - both together, driven by one `variation` value |
 
 **mcast (one-way source → replicator fan-out → dest), fwd modes:** `copy`,
-`inplace`, `bpf_tx` - set on the replicator per mode; one-way latency uses the
+`inplace` - set on the replicator per mode; one-way latency uses the
 XDP/PHC ingress stamp on the destination, gated on clock convergence.
 
 ---
@@ -662,7 +662,7 @@ full dev loop. Talks to `-cp` (default `$CP_URL` or `http://localhost:8080`).
 afxdpctl fleet                       # show online nodes + edge count
 afxdpctl run ucast kernel            # launch a ucast/kernel campaign (streams events to stdout)
 afxdpctl run ucast xdp               # ucast with AF_XDP zero-copy TX + XDP-stamped RX
-afxdpctl run mcast copy,inplace,bpf_tx  # multicast with all three fwd modes
+afxdpctl run mcast copy,inplace  # multicast with both fwd modes
 afxdpctl cancel                      # abort the running campaign
 afxdpctl report -o results.html      # download an HTML report from current data
 afxdpctl report -kind mcast          # filter report to mcast edges only

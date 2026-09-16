@@ -80,7 +80,6 @@ private:
     bool mcast_mode_;         // mcast mode: m2u-tagged unicast UDP carries the multicast group
     // Forward path (REPLICATOR_FWD_MODE env): 0=copy (build packet in a TX-pool frame),
     // 1=inplace (patch the RX frame's headers + TX that same UMEM frame — no payload copy),
-    // 2=bpf_tx (XDP program forwards via XDP_TX; userspace fan-out is bypassed),
     // 3=kernel (plain UDP sockets end-to-end; no XDP/eBPF anywhere in the mcast path).
     int  fwd_mode_ = 0;
 
@@ -97,7 +96,6 @@ private:
     // ── Dynamic group tracking (mcast mode) / static seed (unicast mode) ─────
     // config_map_fd_: BPF map fd retained after initialize() for runtime updates.
     int config_map_fd_{-1};
-    int fwd_map_fd_{-1};   // in-kernel XDP_TX forward targets (REPLICATOR_FWD_MODE=bpf_tx)
 
     // Per-group BPF state.  All maps keyed by group IP in network byte order,
     // protected by group_mutex_.  Used by mcast mode only.
@@ -453,14 +451,6 @@ private:
     size_t buildCopyFrame(const Destination& destination, const uint8_t* payload, size_t payloadLen,
                           uint8_t* buffer, size_t bufferSize,
                           uint32_t ipCsumBase, uint64_t txNsBe);
-
-    /**
-     * Populate/clear the in-kernel XDP_TX forward target (REPLICATOR_FWD_MODE=bpf_tx)
-     * for the config_map slot of `group_nbo`, so mcast.o forwards this group's
-     * frames to `dest` entirely in the kernel. No-op unless fwd_mode_ == bpf_tx.
-     */
-    void updateBpfTxFwdTarget(uint32_t group_nbo, const Destination& dest, bool enable);
-
 
     /**
      * Process control message

@@ -278,24 +278,8 @@ ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"
 WantedBy=multi-user.target
 EOF
 
-# ENA queue: redirect ALL RSS traffic to queue 0 (where AF_XDP socket is bound)
-# ENA doesn't support combined=1, so we set indirection table instead.
-cat > /etc/systemd/system/ena-xdp-queues.service <<'EOF'
-[Unit]
-Description=Set ENA RSS indirection to queue 0 for AF_XDP
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); ethtool -X "${IFACE:-eth0}" equal 1'
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# MTU 3498 for native XDP (ENA single-page frame requirement)
+# MTU 3498 for native XDP (ENA single-page frame requirement). Must run
+# BEFORE ena-xdp-queues.service (below) - see that unit's ordering comment.
 cat > /etc/systemd/system/ena-mtu.service <<'EOF'
 [Unit]
 Description=Set MTU 3498 for ENA native XDP
@@ -306,6 +290,37 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); ip link set "${IFACE:-eth0}" mtu 3498'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ENA queue: redirect ALL RSS traffic to queue 0 (where AF_XDP socket is bound)
+# ENA doesn't support combined=1, so we set indirection table instead.
+#
+# ORDERING: must run AFTER ena-mtu.service, not just after network-online.target.
+# Changing the interface MTU resets the RSS indirection table on ENA - live
+# verification (dev/roadmap/precision/live-verification-nrt/FINDINGS.md \u00a74.3)
+# found `ethtool -X ... equal 1` applied BEFORE the MTU change appeared to
+# succeed but was silently reverted by the MTU change, leaving `ethtool -x`
+# showing all 8 queues still populated; traffic then never reaches the
+# AF_XDP-bound queue 0. Both units previously only declared
+# `After=network-online.target`, an equal-priority ordering that let systemd
+# start them in either order (observed both ways across boots). `After=`/
+# `Requires=` on ena-mtu.service here forces this unit to run strictly after
+# the MTU change has already landed, so the indirection table it sets is the
+# one that survives.
+cat > /etc/systemd/system/ena-xdp-queues.service <<'EOF'
+[Unit]
+Description=Set ENA RSS indirection to queue 0 for AF_XDP
+After=network-online.target ena-mtu.service
+Requires=ena-mtu.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); ethtool -X "${IFACE:-eth0}" equal 1'
 
 [Install]
 WantedBy=multi-user.target

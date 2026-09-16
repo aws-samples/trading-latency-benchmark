@@ -10,7 +10,7 @@ import { ControlPlaneStack } from '../lib/control-plane';
 const app = new cdk.App();
 
 const keyPairName          = app.node.tryGetContext('keyPairName');
-const region               = app.node.tryGetContext('region') || 'us-east-1';
+const region               = app.node.tryGetContext('region') || 'ap-northeast-1';
 const secondaryKeyPairName = app.node.tryGetContext('secondaryKeyPairName');
 const amiId                = app.node.tryGetContext('amiId') || undefined;
 const secondaryAmiId       = app.node.tryGetContext('secondaryAmiId') || undefined;
