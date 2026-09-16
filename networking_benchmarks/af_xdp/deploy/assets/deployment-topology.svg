@@ -29,7 +29,7 @@
 
   <!-- Builder EC2 -->
   <rect x="50" y="85" width="120" height="50" rx="4" fill="#fff" stroke="#d97706" stroke-width="1"/>
-  <text x="110" y="107" text-anchor="middle" font-size="10" fill="#92400e">EC2 (c7i.4xlarge)</text>
+  <text x="110" y="107" text-anchor="middle" font-size="10" fill="#92400e">EC2 (m8a.2xlarge)</text>
   <text x="110" y="121" text-anchor="middle" font-size="9" fill="#78716c">bake-ami.sh</text>
 
   <!-- Lambda -->
@@ -56,7 +56,7 @@
 
   <!-- CP EC2 -->
   <rect x="340" y="85" width="130" height="60" rx="4" fill="#fff" stroke="#3b82f6" stroke-width="1"/>
-  <text x="405" y="103" text-anchor="middle" font-size="10" fill="#1e40af">EC2 (t3.small)</text>
+  <text x="405" y="103" text-anchor="middle" font-size="10" fill="#1e40af">EC2 (t3.medium)</text>
   <text x="405" y="117" text-anchor="middle" font-size="9" fill="#64748b">nats-server :4222</text>
   <text x="405" y="130" text-anchor="middle" font-size="9" fill="#64748b">backend :8080</text>
 
@@ -78,7 +78,7 @@
 
   <!-- VPC box (primary) -->
   <rect x="50" y="305" width="370" height="260" rx="4" fill="#fff" stroke="#16a34a" stroke-width="1"/>
-  <text x="235" y="322" text-anchor="middle" font-size="10" fill="#166534">VPC (us-east-1) — 10.61.0.0/16</text>
+  <text x="235" y="322" text-anchor="middle" font-size="10" fill="#166534">VPC (eu-central-1) — 10.61.0.0/16</text>
 
   <!-- Placement Group -->
   <rect x="65" y="335" width="160" height="105" rx="4" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1" stroke-dasharray="3,2"/>
@@ -86,9 +86,9 @@
 
   <!-- Nodes in PG -->
   <rect x="80" y="362" width="130" height="30" rx="3" fill="#fff" stroke="#7c3aed" stroke-width="0.8"/>
-  <text x="145" y="381" text-anchor="middle" font-size="9" fill="#374151">Node0 c7i.4xlarge</text>
+  <text x="145" y="381" text-anchor="middle" font-size="9" fill="#374151">Node0 m8a.2xlarge</text>
   <rect x="80" y="400" width="130" height="30" rx="3" fill="#fff" stroke="#7c3aed" stroke-width="0.8"/>
-  <text x="145" y="419" text-anchor="middle" font-size="9" fill="#374151">Node1 c7i.4xlarge</text>
+  <text x="145" y="419" text-anchor="middle" font-size="9" fill="#374151">Node1 m8a.2xlarge</text>
 
   <!-- Standalone node -->
   <rect x="245" y="362" width="160" height="30" rx="3" fill="#fff" stroke="#16a34a" stroke-width="0.8"/>
@@ -104,7 +104,7 @@
 
   <!-- Security Group -->
   <rect x="65" y="450" width="340" height="40" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="0.8"/>
-  <text x="235" y="467" text-anchor="middle" font-size="9" fill="#854d0e">Security Group: SSH + intra-fleet + UDP 5000 + TCP 12345</text>
+  <text x="235" y="467" text-anchor="middle" font-size="9" fill="#854d0e">Security Group: SSH (admin CIDR) + intra-fleet + UDP 5000 + TCP 12345</text>
   <text x="235" y="480" text-anchor="middle" font-size="8" fill="#92400e">+ cross-region peer CIDR if secondary exists</text>
 
   <!-- SSM AMI arrow into Fleet -->
@@ -118,13 +118,13 @@
 
   <!-- VPC box (secondary — optional) -->
   <rect x="520" y="305" width="330" height="210" rx="4" fill="#fff" stroke="#16a34a" stroke-width="1" stroke-dasharray="3,3"/>
-  <text x="685" y="322" text-anchor="middle" font-size="10" fill="#166534">VPC (eu-west-2, optional) — 10.62.0.0/16</text>
+  <text x="685" y="322" text-anchor="middle" font-size="10" fill="#166534">VPC (eu-west-1, optional) — 10.62.0.0/16</text>
 
   <!-- Cross-region node -->
   <rect x="540" y="362" width="160" height="30" rx="3" fill="#fff" stroke="#7c3aed" stroke-width="0.8"/>
-  <text x="620" y="381" text-anchor="middle" font-size="9" fill="#374151">Node3 c7i.4xlarge</text>
+  <text x="620" y="381" text-anchor="middle" font-size="9" fill="#374151">Node3 m8a.2xlarge</text>
   <rect x="540" y="400" width="160" height="30" rx="3" fill="#fff" stroke="#7c3aed" stroke-width="0.8"/>
-  <text x="620" y="419" text-anchor="middle" font-size="9" fill="#374151">Node4 c7i.4xlarge</text>
+  <text x="620" y="419" text-anchor="middle" font-size="9" fill="#374151">Node4 m8a.2xlarge</text>
 
   <!-- VPC Peering -->
   <line x1="420" y1="410" x2="518" y2="410" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrow-green)"/>

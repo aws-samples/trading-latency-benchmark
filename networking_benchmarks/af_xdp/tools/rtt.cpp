@@ -57,15 +57,10 @@
  *   many flows) where the stack saturates — not for a single unloaded ping-pong.
  *   The startup line prints "(zero-copy)" vs "(COPY/SKB fallback)" so the actual
  *   TX datapath is visible: if ENA can't do ZC TX, --xdp-tx is a copy path and is
- *   expected to be slower still.
- *
- *   MEASURED (cluster-PG c7i.2xlarge, QD=1): the earlier "xdp ~17us worse than
- *   kernel" was largely a SILENT COPY-MODE fallback — the bind flags requested
- *   only XDP_USE_NEED_WAKEUP, never XDP_ZEROCOPY, so ENA bound a copy path. With
- *   XDP_ZEROCOPY now forced, --xdp-tx binds true zero-copy and measures ~35us
- *   (min 28) vs kernel ~36us (min 31) — parity, and a lower floor. It is not
- *   dramatically FASTER because RX is still the kernel busy-poll socket (see
- *   above) and this is QD=1; the TX zero-copy only removes the TX-stack cost.
+ *   expected to be slower still. --xdp-tx binds XDP_ZEROCOPY (true zero-copy TX)
+ *   rather than only XDP_USE_NEED_WAKEUP, so its parity with the kernel baseline
+ *   reflects the TX-stack cost removed, not RX (which stays the kernel busy-poll
+ *   socket in every mode at QD=1).
  *
  * Design:
  *   - Lock-free preallocated slot array indexed by sequence ID (no map, no mutex)
@@ -198,21 +193,19 @@ public:
                                  &fq_unused_, &cq_, &ucfg);
         if (e) { err = std::string("xsk_umem__create: ") + strerror(-e); return false; }
 
-        // Prefer TRUE zero-copy native TX — that is what actually removes the
-        // kernel TX stack from the send leg. Requesting only XDP_USE_NEED_WAKEUP
-        // (as before) let the kernel silently pick copy mode on ENA, so the
-        // "zero-copy" path was often a copy path. Force ZC; fall back to copy
-        // (SKB) only if the driver can't (ENA ZC-TX support is version-dependent).
+        // Prefer true zero-copy native TX to remove the kernel TX stack from
+        // the send leg. Requesting only XDP_USE_NEED_WAKEUP lets the kernel
+        // silently pick copy mode on ENA, so force XDP_ZEROCOPY and fall back
+        // to copy (SKB) only if the driver can't (version-dependent on ENA).
         struct xsk_socket_config xcfg = {
             .rx_size = 0, .tx_size = TX_RING,
             .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
             .xdp_flags = XDP_FLAGS_DRV_MODE,
             .bind_flags = XDP_ZEROCOPY | XDP_USE_NEED_WAKEUP,
         };
-        // Retry the zero-copy bind: a prior run's XSK on this queue can still be
-        // tearing down (ENA releases it a few ms after the process exits), which
-        // makes the FIRST ZC bind fail spuriously. Retry with backoff so copy/SKB
-        // is only ever a true last resort, not a teardown-race artifact.
+        // Retry the zero-copy bind with backoff: a prior run's XSK on this
+        // queue can still be tearing down (ENA releases it a few ms after the
+        // process exits), which can make the first ZC bind fail spuriously.
         e = -1;
         for (int attempt = 0; attempt < 10 && e; ++attempt) {
             e = xsk_socket__create(&xsk_, iface.c_str(), (uint32_t)queue_, umem_,
@@ -477,27 +470,11 @@ static inline int64_t now_mono_ns() {
     return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
 }
 
-// Wait until an ABSOLUTE CLOCK_MONOTONIC deadline.
-//
-// This SLEEPS (clock_nanosleep TIMER_ABSTIME). A spin-wait was tried and REJECTED
-// — measured, not theorised:
-//
-//   Spinning the tail (200us window, `_mm_pause` on clock_gettime) raised the
-//   achievable send rate ~26k -> ~115k pps, but DESTROYED the measurement:
-//   p50 34us -> 5402us with 2273 failed sends at only 20k pps.
-//
-//   Why: in AF_XDP zero-copy the TX completion ring is filled by the driver's TX
-//   cleanup, which runs in NAPI/softirq context. clock_nanosleep() yields the core,
-//   which is what lets softirqs run there. A tight userspace spin never yields, so
-//   softirq/NAPI is starved on that core, completions are never reaped,
-//   `outstanding_` pins at NUM_FRAMES and the frame-recycle guard exhausts.
-//
-//   Net: the per-packet sleep is not merely pacing — it is also the yield point that
-//   keeps the zero-copy completion path alive. The ~30k pps ceiling it imposes is
-//   therefore NOT removable by making the wait cheaper. High-PPS load generation
-//   needs a separate batched generator process (see dev/rtt-kernel-vs-xdp-analysis.md).
-//
-// If the deadline is already past (sender behind), returns immediately.
+// Wait until an ABSOLUTE CLOCK_MONOTONIC deadline. Uses
+// clock_nanosleep(TIMER_ABSTIME) rather than a spin-wait: in AF_XDP
+// zero-copy, TX completions are reaped by the driver in NAPI/softirq
+// context, and sleeping (not spinning) yields the core so that can run.
+// Returns immediately if the deadline is already past.
 static inline void wait_until_ns(int64_t deadline_ns) {
     struct timespec d;
     d.tv_sec  = deadline_ns / 1000000000LL;
@@ -719,8 +696,6 @@ static void enable_realtime() {
 }
 
 // Safety alarm: auto-kill if stuck in RT spin loop (prevents system lockup).
-// It MUST say why: a silent _exit() here was misdiagnosed for a long time as an
-// earlier misdiagnosed as an "xdp crash" when it was the watchdog firing on a TX stall.
 // Signal-handler safe: write(2) only, no iostreams/malloc.
 static void alarm_handler(int) {
     static const char msg[] =
@@ -733,12 +708,10 @@ static void alarm_handler(int) {
 }
 
 static void set_safety_alarm(uint64_t total_msgs, uint64_t rate_per_sec) {
-    // Budget on an ACHIEVABLE rate, not the requested one. A single-threaded
-    // sender pays a few us per packet (frame build + submit + kick), so a request
-    // far above that cannot be met and the old `total/requested + 30` budget then
-    // killed a perfectly healthy run (misread for a long time as an "xdp crash").
-    // Assume no better than ASSUMED_MAX_PPS for the budget; the alarm still bounds
-    // a real hang.
+    // Budget on an achievable rate, not the requested one: a single-threaded
+    // sender pays a few us per packet (frame build + submit + kick), so a
+    // request far above that cannot be met. Assume no better than
+    // ASSUMED_MAX_PPS for the budget; the alarm still bounds a real hang.
     constexpr uint64_t ASSUMED_MAX_PPS = 50000;
     uint64_t eff = rate_per_sec < ASSUMED_MAX_PPS ? rate_per_sec : ASSUMED_MAX_PPS;
     unsigned int timeout_sec = static_cast<unsigned int>(total_msgs / (eff ? eff : 1)) + 30;
@@ -1151,7 +1124,7 @@ int main(int argc, char* argv[]) {
     if (use_xdp_tx) {
         std::cout << "\nAF_XDP TX diagnostics:"
                   << "\n  ring-full events:      " << xtx.ringFullEvents()
-                  << "\n  send give-ups (stall): " << xtx.txStalls() << " (bounded retry; was an unbounded livelock)"
+                  << "\n  send give-ups (stall): " << xtx.txStalls() << " (bounded retry)"
                   << "\n  kicks issued when needs_wakeup was clear: " << xtx.kicksWhenNotNeeded()
                   << "\n"
                   << std::endl;
@@ -1189,6 +1162,15 @@ int main(int argc, char* argv[]) {
         fprintf(jf, "  \"messages\": %lu,\n", measured);
         fprintf(jf, "  \"warmup\": %lu,\n", warmup);
         fprintf(jf, "  \"rate_mps\": %lu,\n", rate_per_sec);
+        // Achieved vs requested rate: elapsed_s/achieved_pps mirror the stdout
+        // "Rate achieved:" line above, written here too so the control-plane
+        // can read it back programmatically.
+        {
+            double secs = (double)(send_loop_end_ns - send_loop_start_ns) / 1e9;
+            double achieved = secs > 0 ? (double)slot_count / secs : 0.0;
+            fprintf(jf, "  \"elapsed_s\": %.6f,\n", secs);
+            fprintf(jf, "  \"achieved_pps\": %.1f,\n", achieved);
+        }
         fprintf(jf, "  \"lost\": %lu,\n", lost);
         fprintf(jf, "  \"loss_pct\": %.4f,\n", 100.0 * lost / measured);
         fprintf(jf, "  \"timestamp_rx\": \"%s\",\n",

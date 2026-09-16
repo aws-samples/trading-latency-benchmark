@@ -17,11 +17,11 @@ type NodeInfo struct {
 	// Strategy of PlacementGroup: cluster|spread|partition. IMDS exposes only the
 	// group name, so this comes from ec2:DescribePlacementGroups.
 	PlacementGroupStrategy string `json:"placement_group_strategy,omitempty"`
-	VpcID          string `json:"vpc_id,omitempty"`
-	SubnetID       string `json:"subnet_id,omitempty"`
-	Role           string `json:"role,omitempty"`            // source|replicator|destination
-	Stack          string `json:"stack,omitempty"`           // CFN stack name, if tagged
-	Hostname       string `json:"hostname,omitempty"`
+	VpcID                  string `json:"vpc_id,omitempty"`
+	SubnetID               string `json:"subnet_id,omitempty"`
+	Role                   string `json:"role,omitempty"`  // source|replicator|destination
+	Stack                  string `json:"stack,omitempty"` // CFN stack name, if tagged
+	Hostname               string `json:"hostname,omitempty"`
 	// EC2 tenancy: shared (default multi-tenant host), instance (Dedicated
 	// Instance), host (Dedicated Host). Self-reported via AGENT_TENANCY (the
 	// fleet stack knows the value it requested at launch; IMDS has no native
@@ -50,8 +50,8 @@ type Registration struct {
 type Heartbeat struct {
 	InstanceID     string  `json:"instance_id"`
 	Unix           int64   `json:"unix"`
-	State          string  `json:"state"`                    // idle|running|error
-	ReplicatorMode string  `json:"replicator_mode,omitempty"` // ucast|mcast|kernel
+	State          string  `json:"state"`                     // idle|running|error
+	ReplicatorMode string  `json:"replicator_mode,omitempty"` // ucast|mcast|echo
 	ReplicatorSvc  string  `json:"replicator_svc,omitempty"`  // active|inactive
 	ClockOffsetUs  float64 `json:"clock_offset_us"`
 	CurrentCmdID   string  `json:"current_cmd_id,omitempty"`
@@ -64,37 +64,51 @@ type Heartbeat struct {
 type CmdType string
 
 const (
-	CmdRunRTT       CmdType = "run_rtt"        // run rtt to a peer, return metrics
-	CmdMcastReceive CmdType = "mcast_receive"  // start mcast_receive (foreground), return when done
-	CmdMcastRxReady CmdType = "mcast_rx_ready" // is a local mcast_receive attached and listening?
-	CmdMcastSend    CmdType = "mcast_send"     // run mcast_send burst
-	CmdSetFwdMode   CmdType = "set_fwd_mode"   // set REPLICATOR_FWD_MODE + restart
-	CmdSetMode      CmdType = "set_mode"       // set REPLICATOR_MODE (+ fwd) + restart
+	CmdRunRTT        CmdType = "run_rtt"        // run rtt to a peer, return metrics
+	CmdMcastReceive  CmdType = "mcast_receive"  // start mcast_receive (foreground), return when done
+	CmdMcastRxReady  CmdType = "mcast_rx_ready" // is a local mcast_receive attached and listening?
+	CmdMcastSend     CmdType = "mcast_send"     // run mcast_send burst
+	CmdSetFwdMode    CmdType = "set_fwd_mode"   // set REPLICATOR_FWD_MODE + restart
+	CmdSetMode       CmdType = "set_mode"       // set REPLICATOR_MODE (+ fwd) + restart
 	CmdReplicatorSvc CmdType = "replicator_svc" // stop|start|restart replicator.service
-	CmdJoinGroup    CmdType = "join_group"     // replicator_ctl mcast <group>
-	CmdPurgeDests   CmdType = "purge_dests"    // remove stale ucast destinations from the local replicator
-	CmdEnsureHost   CmdType = "ensure_host"    // idempotently converge local host state to a measurement profile
-	CmdCleanup      CmdType = "cleanup"        // free AF_XDP queue (kill + detach XDP)
-	CmdClockSync    CmdType = "clock_sync"     // chronyc makestep + report offset
-	CmdStartStream  CmdType = "start_stream"   // continuous rtt --stream to a peer
-	CmdStopStream   CmdType = "stop_stream"    // stop the stream
-	CmdReregister   CmdType = "reregister"     // re-send Registration (backend restart recovery)
-	CmdPing         CmdType = "ping"           // liveness/echo
+	CmdJoinGroup     CmdType = "join_group"     // replicator_ctl mcast <group>
+	CmdPurgeDests    CmdType = "purge_dests"    // remove stale ucast destinations from the local replicator
+	CmdEnsureHost    CmdType = "ensure_host"    // idempotently converge local host state to a measurement profile
+	CmdCleanup       CmdType = "cleanup"        // free AF_XDP queue (kill + detach XDP)
+	CmdClockSync     CmdType = "clock_sync"     // chronyc makestep + report offset
+	CmdStartStream   CmdType = "start_stream"   // continuous rtt --stream to a peer
+	CmdStopStream    CmdType = "stop_stream"    // stop the stream
+	CmdReregister    CmdType = "reregister"     // re-send Registration (backend restart recovery)
+	CmdPing          CmdType = "ping"           // liveness/echo
+	CmdNicTuning     CmdType = "nic_tuning"     // read napi_defer_hard_irqs/gro_flush_timeout/ethtool coalescing state
+	CmdWanderStart   CmdType = "wander_start"   // start the bounded clock-wander sampler child process
+	CmdWanderStop    CmdType = "wander_stop"    // stop the sampler and return its collected CSV
 )
 
 // Command is addressed to an agent (via SubjectCmdAgent/Role/All). The agent
 // replies on SubjectResult(InstanceID) with a CommandResult carrying CmdID.
 type Command struct {
-	ID        CmdType      `json:"-"`      // ignored on wire; kept for readability
-	CmdID     string       `json:"cmd_id"` // unique per dispatch (result correlation + idempotency)
-	Type      CmdType      `json:"type"`
-	RTT       *RTTParams   `json:"rtt,omitempty"`
-	Mcast     *McastParams `json:"mcast,omitempty"`
-	FwdMode   string       `json:"fwd_mode,omitempty"`   // copy|inplace|kernel (set_fwd_mode / set_mode)
-	Mode      string       `json:"mode,omitempty"`       // ucast|mcast|kernel (set_mode)
-	SvcAction string       `json:"svc_action,omitempty"` // stop|start|restart (replicator_svc)
-	Group     string       `json:"group,omitempty"`      // for join_group
-	Host      *HostStateParams `json:"host,omitempty"`   // for ensure_host
+	ID        CmdType          `json:"-"`      // ignored on wire; kept for readability
+	CmdID     string           `json:"cmd_id"` // unique per dispatch (result correlation + idempotency)
+	Type      CmdType          `json:"type"`
+	RTT       *RTTParams       `json:"rtt,omitempty"`
+	Mcast     *McastParams     `json:"mcast,omitempty"`
+	FwdMode   string           `json:"fwd_mode,omitempty"`   // copy|inplace (set_fwd_mode / set_mode)
+	Mode      string           `json:"mode,omitempty"`       // ucast|mcast|echo (set_mode)
+	SvcAction string           `json:"svc_action,omitempty"` // stop|start|restart (replicator_svc)
+	Group     string           `json:"group,omitempty"`      // for join_group
+	Host      *HostStateParams `json:"host,omitempty"`       // for ensure_host
+	Wander    *WanderParams    `json:"wander,omitempty"`     // for wander_start
+}
+
+// WanderParams bounds a single wander_start invocation (Runner.SampleWander).
+// Seconds is the sampler's own lifetime cap - see wander-sampler-lifecycle-
+// design.md §2.2/§3: this spans one (replicator, mode) run's settle+run
+// window, never a whole campaign, and is always context-bounded so the child
+// process cannot outlive the command that started it (Stage 1 of the
+// implementation plan; the property under test in runner_test.go).
+type WanderParams struct {
+	Seconds int `json:"seconds"`
 }
 
 // HostProfile names the desired local host state for a measurement role. Applying
@@ -135,7 +149,7 @@ const (
 // HostStateParams asks the agent to converge local state to Profile.
 type HostStateParams struct {
 	Profile HostProfile `json:"profile"`
-	FwdMode string      `json:"fwd_mode"` // mcast-replicator only: copy|inplace|kernel
+	FwdMode string      `json:"fwd_mode"` // mcast-replicator only: copy|inplace
 
 	// NeedXdpStamp applies to HostClient: attach the standalone XDP program so
 	// rtt --xdp-rx can stamp at ingress. The kernel variation stamps via
@@ -153,8 +167,8 @@ type RTTParams struct {
 	Count      int    `json:"count"`
 	Rate       int    `json:"rate"`
 	Warmup     int    `json:"warmup"`
-	SendCPU    int    `json:"send_cpu"`  // -1 => derive from isolated set
-	RecvCPU    int    `json:"recv_cpu"`  // -1 => derive
+	SendCPU    int    `json:"send_cpu"` // -1 => derive from isolated set
+	RecvCPU    int    `json:"recv_cpu"` // -1 => derive
 	XdpTx      bool   `json:"xdp_tx"`
 	XdpTxQueue int    `json:"xdp_tx_queue"`
 	XdpRx      bool   `json:"xdp_rx"`
@@ -177,6 +191,19 @@ type McastParams struct {
 	IntervalUs   int    `json:"interval_us"`
 	TimeoutSec   int    `json:"timeout_sec"`
 	Variation    string `json:"variation,omitempty"` // fwd mode (copy|inplace|kernel) — tags telemetry
+
+	// Size is the mcast_send payload size in bytes (mirrors `-s`; tool minimum
+	// is 32 = WIRE_APP_HDR_LEN). 0 => runner/tool default (64B). mcast_receive
+	// has no payload-size flag — it reads whatever size mcast_send sent.
+	Size int `json:"size,omitempty"`
+	// TxQueue is mcast_send's AF_XDP TX queue (mirrors `-q`). 0 => runner/tool
+	// default (queue 1). Queue 0 is RSS-pinned; a ZC TX bind there can wedge
+	// the host NIC (see tools/README.md), so 0 is treated as "unset", not
+	// "explicitly queue 0".
+	TxQueue int `json:"tx_queue,omitempty"`
+	// RxQueue is mcast_receive's AF_XDP/XDP queue index (mirrors `-q`). 0 is
+	// both "unset" and the tool's own default, so it is always safe to pass.
+	RxQueue int `json:"rx_queue,omitempty"`
 }
 
 // CommandResult is the ack for a Command. Data carries command-specific output
@@ -188,6 +215,27 @@ type CommandResult struct {
 	Err        string   `json:"err,omitempty"`
 	Metrics    *Metrics `json:"metrics,omitempty"`
 	Text       string   `json:"text,omitempty"`
+	// NicTuning carries CmdNicTuning's result: napi_defer_hard_irqs,
+	// gro_flush_timeout, rx_usecs, tx_usecs, adaptive_rx, adaptive_tx,
+	// rx/tx/combined_queues_current, iface. See Runner.NicTuning in
+	// control_plane/agent/runner.go for exactly what's read and why.
+	NicTuning map[string]string `json:"nic_tuning,omitempty"`
+	// WanderCSV carries wander_stop's collected sampler output (phcsample's
+	// raw CSV rows: seq,wall_ns,phc_ns,sysmid_ns,offset_ns,bracket_ns,eb_ns).
+	// Reduction (median/MAD/percentiles) happens server-side per
+	// wander-band-design.md §4 - the agent returns raw rows only.
+	WanderCSV string `json:"wander_csv,omitempty"`
+	// PhcCounters carries G4's ethtool -S phc_* counter snapshot (wander-
+	// band-design.md §5) - present on both wander_start's result (window
+	// start) and wander_stop's result (window end), so the caller can diff
+	// the two without a third round trip. nil on an agent/driver that could
+	// not read the counters at all - treated as "cannot verify", not zero.
+	PhcCounters map[string]int64 `json:"phc_counters,omitempty"`
+	// RefclockPhcSelected carries G5's chronyc-sources check (wander-band-
+	// design.md §5), populated on wander_start's result only - refclock
+	// selection does not change mid-run in the way counters can, so one
+	// read at window start is sufficient.
+	RefclockPhcSelected *bool `json:"refclock_phc_selected,omitempty"`
 }
 
 // SetErr marks the result failed if err is non-nil.
@@ -241,6 +289,25 @@ type Metrics struct {
 	// replicator timestamp (mcast_receive.cpp's has_replicator_ts).
 	Hop1 *HopPct `json:"hop1_us,omitempty"`
 	Hop2 *HopPct `json:"hop2_us,omitempty"`
+
+	// ElapsedS/AchievedPps/RequestedPps report the offered vs. actually
+	// sustained load for this run. ElapsedS/AchievedPps come from the
+	// receiver's own wall-clock measurement (mcast_receive.cpp's
+	// elapsed_s/achieved_pps, or rtt's equivalent); RequestedPps is filled in
+	// by the caller (RunMcastReceive/RunRTT in runner.go) from the params it
+	// already has (interval_us or rate), since the receiver itself does not
+	// know what was requested. 0/omitted on any result these were not
+	// computed for.
+	ElapsedS     float64 `json:"elapsed_s,omitempty"`
+	AchievedPps  float64 `json:"achieved_pps,omitempty"`
+	RequestedPps float64 `json:"requested_pps,omitempty"`
+	// RateShortfall is true when AchievedPps fell below ~90% of
+	// RequestedPps - the run was saturated/under-rate and its percentiles
+	// may reflect queueing rather than the per-packet cost under test. False
+	// (the zero value) when both are 0 (not computed) as well as when the
+	// rate was actually met, so this can only be trusted as a genuine "load
+	// was met" signal when RequestedPps > 0.
+	RateShortfall bool `json:"rate_shortfall,omitempty"`
 }
 
 // ErrorEvent is published proactively by an agent when a command fails or an
@@ -260,7 +327,7 @@ type ErrorEvent struct {
 type Telemetry struct {
 	InstanceID string  `json:"instance_id"` // producer (sender)
 	Unix       int64   `json:"unix"`
-	Kind       string  `json:"kind"`   // ucast|mcast
+	Kind       string  `json:"kind"` // ucast|mcast
 	SrcIP      string  `json:"src_ip"`
 	DstIP      string  `json:"dst_ip"`
 	Variation  string  `json:"variation,omitempty"` // kernel|xdp|copy|inplace

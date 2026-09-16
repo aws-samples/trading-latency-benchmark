@@ -13,6 +13,11 @@ export interface AmiBuilderStackProps extends cdk.StackProps {
   instanceType?: string;
   gitRepo?: string;
   gitRef?: string;
+  /** CIDR allowed to SSH into the builder instance. Omitted: SSH is open to
+   *  0.0.0.0/0 - only rely on that fallback for throwaway/local testing.
+   *  `afxdpctl up` always supplies this (auto-detected caller IP by
+   *  default). */
+  adminCidr?: string;
 }
 
 export class AmiBuilderStack extends cdk.Stack {
@@ -21,7 +26,11 @@ export class AmiBuilderStack extends cdk.Stack {
   constructor(scope: cdk.App, id: string, props: AmiBuilderStackProps) {
     super(scope, id, props);
 
-    const instanceType = props.instanceType ?? 'c7i.xlarge';
+    // Builder instance type only affects bake time, not the resulting binary's
+    // portability - the Makefile targets -march=x86-64-v3 (not -march=native),
+    // so a binary built here runs correctly on both Intel and AMD fleet nodes
+    // regardless of which vendor this builder happens to be.
+    const instanceType = props.instanceType ?? 'm8a.2xlarge';
     const gitRepo = props.gitRepo ?? 'https://github.com/aws-samples/trading-latency-benchmark.git';
     const gitRef = props.gitRef ?? 'main';
 
@@ -43,7 +52,11 @@ export class AmiBuilderStack extends cdk.Stack {
       description: 'AMI builder: SSH debug + outbound',
       allowAllOutbound: true,
     });
-    sg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), 'SSH debug');
+    if (props.adminCidr) {
+      sg.addIngressRule(ec2.Peer.ipv4(props.adminCidr), ec2.Port.tcp(22), 'SSH debug (admin)');
+    } else {
+      sg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), 'SSH debug');
+    }
 
     // ── IAM Role ─────────────────────────────────────────────────────────────
     const role = new iam.Role(this, 'Role', {

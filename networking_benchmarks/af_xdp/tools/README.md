@@ -117,8 +117,14 @@ loss itself.
   `Eth|IPv4(proto 17)|UDP|m2u{magic "M2CU"=0x4D324355, group}|AppHdr` as a
   **plain unicast** frame to the replicator's private IP (`-D`); the multicast
   group lives only in the m2u tag (ENA has no L2 multicast).
-- **[M2] Pacing** - `clock_nanosleep(TIMER_ABSTIME)` for intervals ≥1 ms;
-  busy-wait (`clock_gettime` spin) for sub-ms intervals.
+- **[M2] Pacing** - a single `wait_until_ns(t0_ns + (seq+1) * interval_ns)` used
+  for **every** interval, on both the AF_XDP and `-k` kernel TX loops. It sleeps
+  to an absolute deadline via `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)`.
+  A relative sleep or a spin accrues cumulative drift, because each iteration's
+  own overhead is added to the gap and the actual interval is always longer than
+  requested; a deadline derived from a fixed `t0_ns` self-corrects, so one late
+  packet does not push every subsequent packet later. Sleeping rather than
+  spinning is also what lets AF_XDP TX completions drain.
 - **[M3] Stamp + TX** - `ts_ns = CLOCK_REALTIME` stamped in place just before
   AF_XDP TX submit (zero-copy). `sfence` ensures store-ordering before NIC DMA.
   Dst MAC ARP-resolved at startup.
@@ -239,7 +245,8 @@ mcast_send -D <replicator-ip> [options]
 | `-c <count>` | Packets to send | `10000` |
 | `-i <interval_us>` | Inter-packet gap in µs | `1000` |
 | `-s <size>` | Payload size in bytes (min: 32 = `WIRE_APP_HDR_LEN`) | `64` |
-| `-q <queue>` | AF_XDP TX queue (avoid queue 0 / RSS) | `1` |
+| `-q <queue>` | AF_XDP TX queue (avoid queue 0 / RSS); ignored with `-k` | `1` |
+| `-k` | Kernel mode: plain UDP socket, no AF_XDP/root (see below) | off |
 | `-h` | Print usage and exit 0 | - |
 
 Missing `-D` → `error: -D <replicator-ip> is required` + usage, exit 1.
@@ -251,14 +258,38 @@ driver rejects native. All headers are built once per UMEM frame; the hot path
 overwrites only `seq` (8B) and `ts_ns` (8B) per packet. Timestamps
 `CLOCK_REALTIME` immediately before `xsk_ring_prod__submit` with an `sfence`.
 
-**Pacing:** Sub-1ms intervals use a `clock_gettime` busy-wait; ≥1ms uses
-`nanosleep`.
+**Pacing:** every interval, sub-ms included, is paced by
+`wait_until_ns(t0_ns + (seq+1) * interval_ns)`, which sleeps to an absolute
+deadline with `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)`. Both the AF_XDP
+and the `-k` kernel TX loop use it. An absolute deadline computed from a fixed
+`t0_ns` self-corrects: a relative sleep or spin folds each iteration's own
+overhead into the gap, so the realised interval is always longer than requested
+and the error compounds, whereas here a late packet does not shift the deadline
+of the packets after it. Sleeping instead of spinning also yields the CPU, which
+is what allows AF_XDP TX completions to drain.
+
+**Real-time priority:** `enable_realtime()` raises the TX thread to
+`SCHED_FIFO` priority 80 and calls `mlockall`. It runs on the **AF_XDP path
+only**, and deliberately sits immediately before the hot TX loop rather than
+before AF_XDP setup - placing it earlier caused roughly 50% packet loss, because
+MAC/ARP resolution and ring setup do blocking work that must not run at RT
+priority. If `SCHED_FIFO` cannot be set (no root / `CAP_SYS_NICE`) the tool
+warns and continues at `SCHED_OTHER`. The `-k` kernel path stays `SCHED_OTHER`
+on purpose so it remains an untuned stock-socket baseline.
 
 **Tradeoffs & limitations:**
 - Requires `CAP_NET_ADMIN` / root for AF_XDP.
 - The m2u frame is plain **unicast** to the replicator; ENA does not support L2
   multicast, so the group is only meaningful inside the m2u header.
 - No built-in RX / statistics - pair with `mcast_receive` on the destination.
+
+**`-k` (kernel mode):** skips AF_XDP entirely - opens a plain
+`socket(AF_INET, SOCK_DGRAM, 0)` and `sendto()`s `[m2u(8) | app payload]`
+directly; the kernel builds Eth/IP/UDP itself. No root required. This is the
+apples-to-apples TX-side counterpart of the replicator's
+`REPLICATOR_FWD_MODE=kernel` and `mcast_receive -k` - use all three together
+for a full plain-socket baseline run, or mix with AF_XDP `mcast_send`/
+`mcast_receive` to isolate which leg of the path benefits from AF_XDP.
 
 ---
 
@@ -278,12 +309,13 @@ mcast_receive -I <iface> [options]
 | `-p <port>` | Inner UDP destination port to match | `5000` |
 | `-c <count>` | Packets to receive before stopping | `10000` |
 | `-t <timeout>` | Seconds before giving up (watchdog) | `60` |
-| `-q <queue>` | XDP/AF_XDP queue index | `0` |
+| `-q <queue>` | XDP/AF_XDP queue index; ignored with `-k` | `0` |
 | `-r` | Print raw latencies (one per line, in ns) | off |
 | `-j <path>` | Write JSON results file | - |
+| `-k` | Kernel mode: plain UDP socket, no AF_XDP/root/XDP attach; `-I` not required (see below) | off |
 | `-h` | Print usage and exit 0 | - |
 
-Missing `-I` → `error: -I <iface> is required` + usage, exit 1.
+Missing `-I` → `error: -I <iface> is required` + usage, exit 1 (unless `-k`).
 
 **Datapath:**
 1. Loads `mcast.o` (BPF object, search paths: `./src/xdp/mcast.o`,
@@ -293,14 +325,38 @@ Missing `-I` → `error: -I <iface> is required` + usage, exit 1.
    matching m2u frames to the AF_XDP socket.
 4. Opens an RX-only AF_XDP socket with `XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD`
    (uses the already-attached program).
+
+**`-k` (kernel mode):** skips all four steps above - no `mcast.o`, no XDP
+attach, no AF_XDP socket. Binds a plain `AF_INET`/`SOCK_DGRAM` socket to
+`-p`'s port and filters by group in userspace (comparing the m2u header's
+group field against `-g`, since a kernel socket has no `config_map`-style
+kernel-side filter). `recvfrom()`'s buffer already starts at the m2u magic -
+the kernel stripped Eth/IP/UDP before userspace ever sees the datagram, so
+there is no header-parse step to run before it. Shares the same hop1/hop2/
+percentile/`-j` JSON reporting code as the AF_XDP path (`-r`/raw output
+included) - only frame acquisition and header-offset math differ.
 5. Enables NAPI busy-poll (`SO_BUSY_POLL=50µs`, `SO_PREFER_BUSY_POLL`,
    `SO_BUSY_POLL_BUDGET=64`).
 6. Polls RX ring in batches of 64; stamps `rx_ns = CLOCK_REALTIME` at each
    dequeue.
+7. **Busy-poll watchdog:** after `WATCHDOG_EMPTY_POLLS = 200000` consecutive
+   empty `poll()` calls the RX loop issues a short `nanosleep` and resets the
+   counter. Under `SO_BUSY_POLL` a `poll()` calls `sk_busy_loop()` and never
+   truly blocks, so a `SCHED_FIFO` 80 thread on an isolated core can spin
+   without ever yielding; the `nanosleep` forces a real block and lets
+   lower-priority work run. Defence-in-depth, not a fix for RT bandwidth
+   throttling (see below).
 
 **Output:** Per-hop latencies (hop1, hop2, total, proc, leg2), min/mean/p50/p90/
 p95/p99/p99.9/max. Counts out-of-order, lost, and negative-hop2 (clock skew)
 samples. Optional `-j` JSON output.
+
+**Achieved rate:** the `-j` JSON carries three timing fields. `elapsed_s` is the
+receive loop's own wall time, kept for context only. `active_s` spans the first
+packet received to the last packet received, and `achieved_pps` is
+`(received - 1) / active_s` - the rate over the active window, excluding
+sender startup dead time. `rtt` likewise writes `elapsed_s` and `achieved_pps`
+into its JSON.
 
 **Tradeoffs & limitations:**
 - Requires `CAP_NET_ADMIN` + `CAP_NET_RAW` / root.
@@ -310,6 +366,29 @@ samples. Optional `-j` JSON output.
 - Negative hop values indicate clock skew; ensure all hosts sync to the same
   Nitro PHC (`/dev/ptp0`) via chrony with `refclock PHC` for ≤1 µs accuracy.
 - XDP program is detached on exit (SIGINT/SIGTERM/atexit).
+
+#### RT bandwidth throttling on tickless cores
+
+These tools run `SCHED_FIFO` busy-poll threads pinned to `isolcpus` +
+`nohz_full` cores. On a tickless core the scheduler tick that normally charges RT
+runtime is stopped, so `update_curr_rt()` runs only at sporadic scheduling events
+and `rt_time` accumulates in large deferred lumps instead of smoothly. It then
+overshoots the default 950 ms / 1000 ms budget, and the kernel throttles the
+runqueue to pay the overshoot back - descheduling the busy-poll thread for
+hundreds of milliseconds. Measured live: `rt_time` reached 1704 ms against an
+`rt_runtime` of 950 ms, `.rt_throttled` flipped to 1 five times in a single
+failing run, about 3700 packets were dropped on an affected run, and hop2 showed
+a p99 of 73 ms and a max of 93 ms against a normal p50 near 18 µs.
+
+The baked AMI therefore sets `kernel.sched_rt_runtime_us = -1` in
+`/etc/sysctl.d/99-rt-sched.conf`, disabling RT bandwidth control entirely -
+the standard setting for RT + `nohz_full`, since the accounting is not
+reliable on tickless cores.
+
+Accepted tradeoff: this removes the kernel's last-resort protection against a
+runaway RT thread. It is mitigated by `isolcpus` keeping these threads off the
+CPU0 housekeeping core, by each tool's own idle deadline, and by the agent
+wrapping every measurement in `timeout`.
 
 ---
 
@@ -382,6 +461,27 @@ No args → usage and exit 1.
   interface. Do NOT use `--iface` with kernel tunnels (it overrides routing).
 
 ---
+
+## Wander sampling (optional, off by default)
+
+A periodic PHC-vs-system-clock offset sampler, separate from the per-packet
+latency measurement above - it characterizes clock *stability* (wander) over
+the course of a run rather than end-to-end packet latency. Each participating
+node samples `/dev/ptp0` (Nitro PHC) against `CLOCK_REALTIME` at a fixed
+cadence and reports the drift band; this is what the `hop1`/`hop2` clock-sync
+assumption in the multicast path above is actually resting on.
+
+It is a **boolean, opt-in flag** on the orchestrator's run request
+(`wander_sample` in the JSON API, `WanderSample bool` in
+`control_plane/backend/orchestrator/orchestrator.go`) and **defaults to
+`false`/off** - Go's zero-value for an omitted `bool` field, with no code path
+in `afxdpctl` or the web UI currently setting it `true`. Enable it only by
+passing `"wander_sample": true` explicitly on the orchestrator's run API; it
+adds sampling overhead and per-node wander CSVs to the run output, so leave it
+off for routine latency runs and turn it on deliberately when investigating
+clock-sync behavior. See [`ACCURACY.md`](ACCURACY.md) for the full methodology
+behind the reported wander band and every other error term sized to produce
+it.
 
 ## Timestamping & clocks (summary)
 

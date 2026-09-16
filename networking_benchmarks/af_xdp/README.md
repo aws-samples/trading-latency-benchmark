@@ -87,6 +87,34 @@ below and [`deploy/ansible/`](deploy/ansible/README.md).
 | AF_XDP + m2u | `sudo replicator eth0 <mcast> <port> --mcast` | Yes | Multicast fan-out via m2u tunnel |
 | Echo | `replicator --echo-mode <ip> <port>` | No | Testing, containers, ~200µs p50 |
 
+## Unicast (round-trip)
+
+Single-host round trip: a client sends, the replicator (or a plain kernel
+echo) bounces the packet back, the client stamps both ends on its own clock -
+no cross-host clock sync needed, since the offset cancels on a same-host
+diff. Measures the AF_XDP replicator's or the stock kernel's RTT floor.
+Driven by `tools/rtt.cpp` against `replicator` running in ucast mode (or
+`--echo-mode`/`kernel` baselines for comparison).
+
+See [`src/Replicator/README.md`](src/Replicator/README.md) for the replicator's
+unicast datapath and [`tools/README.md`](tools/README.md) for `rtt`'s flags and
+timestamp modes.
+
+## Multicast (one-way fan-out)
+
+Three roles, one-way: a source sends to a **replicator**, which fans the
+packet out to every registered **destination** over an m2u tunnel (EC2 VPCs
+don't forward raw multicast - see below). Needs cross-host clock agreement,
+since source and destination timestamps come from two different machines;
+`configure_mcast.yaml`'s clock-sync gate enforces this before a run starts.
+Reports total one-way latency plus a hop1 (source→replicator) / hop2
+(replicator→destination) split.
+
+See [`src/Replicator/README.md`](src/Replicator/README.md) for the replicator's
+mcast fan-out/fwd-mode datapath and [`tools/README.md`](tools/README.md) for
+`mcast_send`/`mcast_receive`'s flags. The wire format and full walkthrough are
+below.
+
 ## Multicast data path (m2u)
 
 Three roles, two hops. EC2 VPCs don't forward raw multicast, so an 8-byte **m2u**
@@ -145,12 +173,16 @@ Outputs land in `results/<date>/<hh-mm-ss>-mcast/`: per-pair `<src_ip>-<dst_ip>.
 `matrix_summary.json`. The same `fleet.json` schema is what the control-plane web
 viewer renders - see [`control_plane/`](control_plane/README.md).
 
-## Measured Results (best case, c7i cluster-PG)
+## Measured Results (best case, cluster-PG)
 
 | Path | p50 | p99 | Loss |
 |---|---|---|---|
-| Unicast RTT, same-AZ + cluster-PG (dedicated 3-node run, us-east-1) | 32 µs | 37 µs | 0% |
-| Multicast one-way, same-AZ + cluster-PG (live 8-node fleet, eu-central-1) | 51 µs | 64 µs | 0% |
+| Unicast RTT, same-AZ + cluster-PG (dedicated 3-node run, us-east-1, `c7i.4xlarge`) | 32 µs | 37 µs | 0% |
+| Multicast one-way, same-AZ + cluster-PG (3-node fleet, `ap-northeast-1`, `m8a.2xlarge`, PHC-disciplined, inplace mode, 100k msgs @ 10µs) | 31 µs | 40 µs | 0% |
+
+The unicast row is still the `c7i` figure - no comparable unicast RTT run has
+been measured on `m8a` yet, so it is not updated here to avoid stating an
+unverified number. The multicast row is the latest measured `m8a` result.
 
 Full topology-tier breakdown (dedicated host, same-AZ, cross-AZ,
 cross-region; hop1/hop2 splits; per-replicator/destination multicast
@@ -252,8 +284,12 @@ exposure and set `clientCidr` when the fleet is single-region.
   ports on fleet nodes and no SSH in the hot path, so a runaway XDP program can't lock you out.
 - **PHC clock sync** - chrony disciplines each node to the **ENA PHC hardware clock**
   (`refclock PHC /dev/ptp0`, `phc_enable=1`) reading the Nitro hypervisor clock directly
-  (observed RMS offset tens of nanoseconds). AWS Time Sync NTP (`169.254.169.123`, xleave,
-  `minpoll 2`) is the fallback until the PHC device is available after reboot.
+  (observed RMS offset tens of nanoseconds). This is the fleet default for both ucast
+  and mcast; AWS Time Sync NTP (`169.254.169.123`, xleave, `minpoll 2`) is the fallback
+  only until the PHC device is available after reboot, not a preferred alternative -
+  see `deploy/ansible/configure_mcast.yaml`'s clock-sync gate for the measured
+  rationale (same-AZ PHC-to-PHC pairwise offset, not NTP's shared-reference offset,
+  is what the mcast clock-sync gate converges against).
 
 ## License
 

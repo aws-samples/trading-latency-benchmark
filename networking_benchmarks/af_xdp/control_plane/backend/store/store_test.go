@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -751,6 +752,143 @@ func TestStoreRecordMeasurementPersistsHopSplit(t *testing.T) {
 	}
 }
 
+// A mcast run's params.size (mcast_send payload bytes, set by
+// RunMcastMatrix) must round-trip through both LatestMeasurements and
+// LatestMcastReplicatorResults, the same way replicator_id/pg/az/vpc already
+// do - size is stored in the same params JSON blob via json_extract, not a
+// dedicated column.
+func TestStoreRecordMeasurementPersistsSize(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+
+	runID, _ := s.InsertRun("mcast", "copy", "", "", 1, map[string]any{
+		"replicator_id": "i-repl", "replicator_ip": "10.0.9.9", "size": 512,
+	})
+	RecordMeasurement(s, proto.Telemetry{
+		Kind: "mcast", Variation: "copy", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", Unix: time.Now().Unix(),
+		Metrics: proto.Metrics{ServiceRTT: proto.Pct{P50: 41}},
+	}, runID)
+	s.Flush()
+
+	measResults, err := s.LatestMeasurements("mcast", 0, 0)
+	if err != nil {
+		t.Fatalf("LatestMeasurements: %v", err)
+	}
+	if len(measResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(measResults))
+	}
+	if measResults[0].Size != 512 {
+		t.Fatalf("LatestMeasurements did not surface size: got %d, want 512", measResults[0].Size)
+	}
+
+	replResults, err := s.LatestMcastReplicatorResults(0, 0)
+	if err != nil {
+		t.Fatalf("LatestMcastReplicatorResults: %v", err)
+	}
+	if len(replResults) != 1 {
+		t.Fatalf("expected 1 replicator result, got %d", len(replResults))
+	}
+	if replResults[0].Size != 512 {
+		t.Fatalf("LatestMcastReplicatorResults did not surface size: got %d, want 512", replResults[0].Size)
+	}
+}
+
+// A run whose params carry no size (ucast, or a mcast run predating this
+// field) must read back as 0, not error - 0 also means "tool default" on the
+// write side, so the two cases are indistinguishable by design (see
+// McastMatrixParams.Size).
+func TestStoreRecordMeasurementMissingSizeReadsAsZero(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+
+	runID, _ := s.InsertRun("mcast", "copy", "", "", 1, map[string]any{
+		"replicator_id": "i-repl", "replicator_ip": "10.0.9.9",
+	})
+	RecordMeasurement(s, proto.Telemetry{
+		Kind: "mcast", Variation: "copy", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", Unix: time.Now().Unix(),
+		Metrics: proto.Metrics{ServiceRTT: proto.Pct{P50: 41}},
+	}, runID)
+	s.Flush()
+
+	measResults, err := s.LatestMeasurements("mcast", 0, 0)
+	if err != nil {
+		t.Fatalf("LatestMeasurements: %v", err)
+	}
+	if len(measResults) != 1 || measResults[0].Size != 0 {
+		t.Fatalf("expected size=0 for a run with no size param, got %+v", measResults)
+	}
+}
+
+// AchievedPps/RequestedPps/RateShortfall must round-trip through
+// LatestMeasurements when the Telemetry carries them, and RateShortfall
+// specifically must distinguish "computed false" from "not computed" - both
+// look like a zero value on the wire, but only the NULL/nil case should read
+// back as nil.
+func TestStoreRecordMeasurementPersistsRateFields(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+
+	runID, _ := s.InsertRun("mcast", "copy", "", "", 1, map[string]any{
+		"replicator_id": "i-repl", "replicator_ip": "10.0.9.9",
+	})
+	RecordMeasurement(s, proto.Telemetry{
+		Kind: "mcast", Variation: "copy", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", Unix: time.Now().Unix(),
+		Metrics: proto.Metrics{
+			ServiceRTT: proto.Pct{P50: 41},
+			// A shortfall case: 50k achieved of 100k requested.
+			AchievedPps: 50000, RequestedPps: 100000, RateShortfall: true,
+		},
+	}, runID)
+	s.Flush()
+
+	measResults, err := s.LatestMeasurements("mcast", 0, 0)
+	if err != nil {
+		t.Fatalf("LatestMeasurements: %v", err)
+	}
+	if len(measResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(measResults))
+	}
+	r := measResults[0]
+	if r.AchievedPps == nil || *r.AchievedPps != 50000 {
+		t.Fatalf("AchievedPps not persisted correctly: %+v", r.AchievedPps)
+	}
+	if r.RequestedPps == nil || *r.RequestedPps != 100000 {
+		t.Fatalf("RequestedPps not persisted correctly: %+v", r.RequestedPps)
+	}
+	if r.RateShortfall == nil || !*r.RateShortfall {
+		t.Fatalf("RateShortfall not persisted correctly (want true): %+v", r.RateShortfall)
+	}
+}
+
+// A run with no rate-expectation data at all (unbounded-rate run, or a
+// measurement predating this field) must read back as nil for all three
+// fields, not a misleading computed zero.
+func TestStoreRecordMeasurementMissingRateFieldsReadAsNil(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+
+	runID, _ := s.InsertRun("mcast", "copy", "", "", 1, map[string]any{
+		"replicator_id": "i-repl", "replicator_ip": "10.0.9.9",
+	})
+	RecordMeasurement(s, proto.Telemetry{
+		Kind: "mcast", Variation: "copy", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", Unix: time.Now().Unix(),
+		Metrics: proto.Metrics{ServiceRTT: proto.Pct{P50: 41}},
+	}, runID)
+	s.Flush()
+
+	measResults, err := s.LatestMeasurements("mcast", 0, 0)
+	if err != nil {
+		t.Fatalf("LatestMeasurements: %v", err)
+	}
+	if len(measResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(measResults))
+	}
+	r := measResults[0]
+	if r.AchievedPps != nil || r.RequestedPps != nil || r.RateShortfall != nil {
+		t.Fatalf("expected all rate fields nil when not computed, got %+v", r)
+	}
+}
+
 // A ucast measurement (no Hop1/Hop2 on the Telemetry) must persist NULL hop
 // columns, not zeroes - zero is a valid latency value and would be
 // indistinguishable from "measured 0us", which ucast never has.
@@ -772,5 +910,177 @@ func TestStoreRecordMeasurementUcastHasNullHops(t *testing.T) {
 	}
 	if hop1p50.Valid {
 		t.Fatalf("ucast measurement should have NULL hop1_p50, got %d", hop1p50.Int64)
+	}
+}
+
+// MergeRunParams must ADD new keys to an existing run's params (the wander
+// sampler's CSVs, which only exist after InsertRun already opened the row -
+// wander-sampler-lifecycle-design.md §3 step 9), preserve pre-existing keys
+// untouched, and overwrite on key collision without disturbing anything else.
+func TestStoreMergeRunParams(t *testing.T) {
+	s := openTestStore(t)
+
+	runID, err := s.InsertRun("mcast", "copy", "", "", 1, map[string]any{
+		"replicator_id": "i-repl-a", "group": "224.0.31.50",
+	})
+	if err != nil {
+		t.Fatalf("InsertRun: %v", err)
+	}
+
+	if err := s.MergeRunParams(runID, map[string]any{
+		"wander_csv_10.0.0.1": "1,100,101,100,1,1,5000\n",
+		"wander_csv_10.0.0.2": "1,200,201,200,1,1,5000\n",
+	}); err != nil {
+		t.Fatalf("MergeRunParams: %v", err)
+	}
+
+	var paramsJSON sql.NullString
+	if err := s.db.QueryRow("SELECT params FROM runs WHERE id=?", runID).Scan(&paramsJSON); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(paramsJSON.String), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["replicator_id"] != "i-repl-a" {
+		t.Fatalf("pre-existing key lost after merge: %+v", got)
+	}
+	if got["wander_csv_10.0.0.1"] != "1,100,101,100,1,1,5000\n" {
+		t.Fatalf("merged key missing/wrong: %+v", got)
+	}
+
+	// Overwrite: merging the same key again with a different value must
+	// replace it, not duplicate or error.
+	if err := s.MergeRunParams(runID, map[string]any{"replicator_id": "i-repl-b"}); err != nil {
+		t.Fatalf("MergeRunParams overwrite: %v", err)
+	}
+	if err := s.db.QueryRow("SELECT params FROM runs WHERE id=?", runID).Scan(&paramsJSON); err != nil {
+		t.Fatal(err)
+	}
+	json.Unmarshal([]byte(paramsJSON.String), &got)
+	if got["replicator_id"] != "i-repl-b" {
+		t.Fatalf("overwrite did not take effect: %+v", got)
+	}
+	if got["wander_csv_10.0.0.2"] != "1,200,201,200,1,1,5000\n" {
+		t.Fatalf("unrelated merged key disturbed by overwrite: %+v", got)
+	}
+}
+
+// MergeRunParams on a run with no params at all (NULL column) must start
+// from an empty object rather than failing - covers a run inserted with a
+// nil params map, or (hypothetically) one predating this method.
+func TestStoreMergeRunParamsOnEmptyParams(t *testing.T) {
+	s := openTestStore(t)
+	runID, err := s.InsertRun("mcast", "copy", "", "", 1, nil)
+	if err != nil {
+		t.Fatalf("InsertRun: %v", err)
+	}
+	if err := s.MergeRunParams(runID, map[string]any{"wander_csv_10.0.0.1": "x"}); err != nil {
+		t.Fatalf("MergeRunParams on empty params: %v", err)
+	}
+	var paramsJSON sql.NullString
+	s.db.QueryRow("SELECT params FROM runs WHERE id=?", runID).Scan(&paramsJSON)
+	var got map[string]any
+	if err := json.Unmarshal([]byte(paramsJSON.String), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["wander_csv_10.0.0.1"] != "x" {
+		t.Fatalf("merge into empty params failed: %+v", got)
+	}
+}
+
+// MergeRunParams must be a safe no-op on a nil store (persistence disabled)
+// and when there is nothing to merge - matching FinishRun/InsertRun's own
+// nil-store convention elsewhere in this file.
+func TestStoreMergeRunParamsNilSafe(t *testing.T) {
+	var s *Store
+	if err := s.MergeRunParams(1, map[string]any{"k": "v"}); err != nil {
+		t.Fatalf("nil store must not error: %v", err)
+	}
+	real := openTestStore(t)
+	runID, _ := real.InsertRun("mcast", "copy", "", "", 1, map[string]any{"a": "b"})
+	if err := real.MergeRunParams(runID, nil); err != nil {
+		t.Fatalf("empty extra map must not error: %v", err)
+	}
+	if err := real.MergeRunParams(0, map[string]any{"k": "v"}); err != nil {
+		t.Fatalf("runID<=0 must not error: %v", err)
+	}
+}
+
+// RunParams must return a run's full params map, distinguishing "no params"
+// (nil, nil - not an error) from a real lookup failure, and must return the
+// per-node wander_<ip>_<field> keys MergeRunParams attaches - the exact
+// shape /api/run-params serves to the frontend for wander-band-design.md
+// §6 W3's report attachment, since those keys are dynamic per-IP and cannot
+// go through LatestMeasurements' static json_extract projection.
+func TestRunParamsReadsWanderKeys(t *testing.T) {
+	s := openTestStore(t)
+
+	runID, err := s.InsertRun("mcast", "copy", "", "", 1, map[string]any{"replicator_id": "i-repl-a"})
+	if err != nil {
+		t.Fatalf("InsertRun: %v", err)
+	}
+	if err := s.MergeRunParams(runID, map[string]any{
+		"wander_10.0.0.5_med_ns":        0.0,
+		"wander_10.0.0.5_mad_scaled_ns": 2199.0,
+		"wander_10.0.0.5_rejected":      "",
+	}); err != nil {
+		t.Fatalf("MergeRunParams: %v", err)
+	}
+
+	params, err := s.RunParams(runID)
+	if err != nil {
+		t.Fatalf("RunParams: %v", err)
+	}
+	if params["replicator_id"] != "i-repl-a" {
+		t.Fatalf("pre-existing key missing: %+v", params)
+	}
+	if params["wander_10.0.0.5_mad_scaled_ns"] != 2199.0 {
+		t.Fatalf("merged wander key missing/wrong: %+v", params)
+	}
+}
+
+// RunParams on a run with no params at all must return (nil, nil), not an
+// error - a run legitimately created with no params (or before this
+// feature existed) is a valid "nothing to show" case for the API handler.
+func TestStoreRunParamsNoParams(t *testing.T) {
+	s := openTestStore(t)
+	runID, err := s.InsertRun("mcast", "copy", "", "", 1, nil)
+	if err != nil {
+		t.Fatalf("InsertRun: %v", err)
+	}
+	params, err := s.RunParams(runID)
+	if err != nil {
+		t.Fatalf("RunParams on empty params must not error: %v", err)
+	}
+	if params != nil {
+		t.Fatalf("RunParams on a run with no params must return nil, got %+v", params)
+	}
+}
+
+// RunParams on a nonexistent run ID must return (nil, nil), not an error -
+// matching sql.ErrNoRows being treated as "nothing to show" rather than a
+// failure the caller has to special-case.
+func TestStoreRunParamsNonexistentRun(t *testing.T) {
+	s := openTestStore(t)
+	params, err := s.RunParams(999999)
+	if err != nil {
+		t.Fatalf("nonexistent run must not error: %v", err)
+	}
+	if params != nil {
+		t.Fatalf("nonexistent run must return nil params, got %+v", params)
+	}
+}
+
+// RunParams must be nil-store-safe and reject a non-positive runID without
+// touching the database, matching MergeRunParams' own convention.
+func TestStoreRunParamsNilSafe(t *testing.T) {
+	var s *Store
+	if _, err := s.RunParams(1); err != nil {
+		t.Fatalf("nil store must not error: %v", err)
+	}
+	real := openTestStore(t)
+	if params, err := real.RunParams(0); err != nil || params != nil {
+		t.Fatalf("runID<=0 must return (nil, nil), got (%+v, %v)", params, err)
 	}
 }

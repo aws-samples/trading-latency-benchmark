@@ -22,6 +22,8 @@
 
 #include "Internal.hpp"
 #include "common/wire.h"   // S1: the ONE definition of the m2u wire format
+#include <poll.h>
+#include <linux/net_tstamp.h>  // SOF_TIMESTAMPING_RX_SOFTWARE / SOF_TIMESTAMPING_SOFTWARE (kernel fwd mode RX socket tuning)
 
 void Replicator::processPacketsForQueue(int queueId) {
     std::cout << "HFT-optimized packet processing thread started for queue " << queueId << std::endl;
@@ -109,19 +111,48 @@ void Replicator::processPacketsForQueue(int queueId) {
 // UMEM frame stride. Must match the size XdpSocket registers per frame.
 static constexpr uint64_t FRAME_SIZE = 4096;
 
-int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId) {
-    // Capture RX time at entry — before header parsing — so replicator_ns marks
-    // the dequeue instant, not the post-parse instant. Keeps the hop1/hop2 split
-    // (source->replicator vs replicator->dest) from charging parse cost to hop1.
-    uint64_t replicator_ns_be = 0;
-    if (mcast_mode_) {
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        uint64_t ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
-                    + static_cast<uint64_t>(ts.tv_nsec);
-        replicator_ns_be = __builtin_bswap64(ns);  // to big-endian (x86 is LE)
-    }
+bool Replicator::processMcastFrame(const uint8_t* m2u_data, size_t m2u_len,
+                                    const uint8_t*& payload_data, size_t& payload_len,
+                                    uint32_t& group_nbo) {
+    // Capture RX time at entry — before parsing — so replicator_ns marks the
+    // dequeue instant (AF_XDP ring pop, or recvfrom() return under kernel fwd
+    // mode), not the post-parse instant. Keeps the hop1/hop2 split (source->
+    // replicator vs replicator->dest) from charging parse cost to hop1.
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
+                + static_cast<uint64_t>(ts.tv_nsec);
+    uint64_t replicator_ns_be = __builtin_bswap64(ns);  // to big-endian (x86 is LE)
 
+    // m2u_data must already be positioned at the 8-byte m2u header (magic+group).
+    // The AF_XDP path arrives here via extractUdpPayloadMulticast, which already
+    // validated the magic while unwrapping Eth/IP/UDP; the kernel fwd mode's
+    // recvfrom() buffer starts here directly (the kernel already stripped
+    // Eth/IP/UDP), so this magic check is the ONLY validation for that path —
+    // not redundant defense-in-depth in that case.
+    if (m2u_len < WIRE_M2U_HDR_LEN)
+        return false;
+    uint32_t magic;
+    memcpy(&magic, m2u_data, 4);
+    if (ntohl(magic) != WIRE_M2U_MAGIC)
+        return false;
+    memcpy(&group_nbo, m2u_data + WIRE_M2U_GROUP_OFF, 4);
+
+    payload_data = m2u_data;   // [m2u(8) | app payload]
+    payload_len  = m2u_len;
+
+    // Write the entry-captured RX time into the app payload's replicator_ns
+    // slot (payload[16..23], i.e. +8 past the m2u header). The sender zeroed
+    // the slot; the receiver uses it to split reported latency into hop1
+    // (source->replicator) and hop2 (replicator->destination).
+    if (payload_len >= WIRE_M2U_HDR_LEN + WIRE_APP_HDR_LEN) {
+        memcpy(const_cast<uint8_t*>(payload_data)
+                   + WIRE_M2U_HDR_LEN + WIRE_APP_REPL_NS_OFF, &replicator_ns_be, 8);
+    }
+    return true;
+}
+
+int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId) {
     const uint8_t* payload_data = nullptr;
     size_t payload_len = 0;
     uint32_t group_nbo = 0;
@@ -130,16 +161,14 @@ int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int
         return 0; // Not a valid UDP packet
     }
 
-    // m2u mode: write the entry-captured RX time into the app payload's
-    // replicator_ns slot (payload[16..23]). payload_data points at the 8-byte
-    // m2u header, so the app payload starts at +8. The sender zeroed the slot;
-    // the receiver uses it to split reported latency into hop1 (source->replicator)
-    // and hop2 (replicator->destination).
+    // mcast mode: extractUdpPayload (via extractUdpPayloadMulticast) already
+    // unwrapped Eth/IP/UDP and left payload_data at the m2u header.
+    // processMcastFrame does the RX-stamp + m2u parse — shared with
+    // processMcastKernelRx (REPLICATOR_FWD_MODE=kernel), which calls it
+    // directly on a recvfrom() buffer that has no Eth/IP/UDP to unwrap.
     if (mcast_mode_) {
-        if (payload_len >= WIRE_M2U_HDR_LEN + WIRE_APP_HDR_LEN) {
-            memcpy(const_cast<uint8_t*>(payload_data)
-                       + WIRE_M2U_HDR_LEN + WIRE_APP_REPL_NS_OFF, &replicator_ns_be, 8);
-        }
+        if (!processMcastFrame(payload_data, payload_len, payload_data, payload_len, group_nbo))
+            return 0;
     }
 
     // Per-group fan-out: only send to destinations that joined this multicast group via IGMP.
@@ -379,6 +408,96 @@ bool Replicator::sendToDestinationFallback(const Destination& destination, const
         return false;
     }
     return sent == static_cast<ssize_t>(length);
+}
+
+void Replicator::processMcastKernelRx() {
+    std::cout << "kernel fwd-mode RX thread started on port " << listen_port_ << std::endl;
+
+    // Socket tuning: apply the AF_XDP RX path's existing busy-poll parity
+    // (see XdpSocket.cpp's openSocket — same constants) plus the two options
+    // genuinely new to this mode (SO_RCVBUF, SO_TIMESTAMPING). RLIMIT_MEMLOCK
+    // and CPU pinning are process-wide/thread-wide and already applied
+    // elsewhere (XdpSocket::setResourceLimits() at startup; setCpuAffinity()
+    // by the caller of this thread) — not repeated here.
+#ifndef SO_BUSY_POLL
+#define SO_BUSY_POLL 46
+#endif
+#ifndef SO_PREFER_BUSY_POLL
+#define SO_PREFER_BUSY_POLL 69
+#endif
+#ifndef SO_BUSY_POLL_BUDGET
+#define SO_BUSY_POLL_BUDGET 70
+#endif
+    {
+        int on = 1, busy_us = 50, budget = 64, rcvbuf = 4 * 1024 * 1024;
+        setsockopt(kernel_rx_socket_, SOL_SOCKET, SO_PREFER_BUSY_POLL, &on, sizeof(on));
+        setsockopt(kernel_rx_socket_, SOL_SOCKET, SO_BUSY_POLL, &busy_us, sizeof(busy_us));
+        setsockopt(kernel_rx_socket_, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
+        setsockopt(kernel_rx_socket_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+        // Kernel-software RX timestamp (SOF_TIMESTAMPING_RX_SOFTWARE): stamped in
+        // the NAPI netif_receive_skb path, before socket-queue enqueue — closer to
+        // wire time than a clock_gettime() call after recvfrom() returns, which
+        // would also fold in socket-queue + wake latency. See rtt.cpp's
+        // detect_timestamp_mode for the same rationale applied to the rtt tool.
+        int ts_flags = SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_SOFTWARE;
+        setsockopt(kernel_rx_socket_, SOL_SOCKET, SO_TIMESTAMPING, &ts_flags, sizeof(ts_flags));
+        setsockopt(kernel_rx_socket_, SOL_SOCKET, SO_TIMESTAMP, &on, sizeof(on));
+    }
+
+    std::vector<uint8_t> buf(65535);
+    struct pollfd pfd{};
+    pfd.fd = kernel_rx_socket_;
+    pfd.events = POLLIN;
+
+    while (running_.load(std::memory_order_relaxed)) {
+        // 500ms timeout, matching KernelEcho.cpp's shutdown pattern: a bare
+        // blocking recvfrom() would hang stop() waiting for a packet that may
+        // never arrive.
+        int ret = poll(&pfd, 1, 500);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            if (running_.load(std::memory_order_relaxed))
+                std::cerr << "kernel fwd-mode poll error: " << strerror(errno) << std::endl;
+            continue;
+        }
+        if (ret == 0 || !(pfd.revents & POLLIN))
+            continue;
+
+        ssize_t n = recvfrom(kernel_rx_socket_, buf.data(), buf.size(), 0, nullptr, nullptr);
+        if (n <= 0) {
+            if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && running_.load(std::memory_order_relaxed))
+                std::cerr << "kernel fwd-mode recvfrom error: " << strerror(errno) << std::endl;
+            continue;
+        }
+
+        // recvfrom()'s buffer starts at the m2u header — the kernel already
+        // stripped Eth/IP/UDP, so processMcastFrame is called directly with
+        // no extractUdpPayloadMulticast unwrap (there is nothing to unwrap).
+        const uint8_t* payload_data = nullptr;
+        size_t payload_len = 0;
+        uint32_t group_nbo = 0;
+        if (!processMcastFrame(buf.data(), static_cast<size_t>(n), payload_data, payload_len, group_nbo))
+            continue;
+
+        const std::vector<Destination>& current_destinations = getCachedGroupDestinations(group_nbo);
+        if (current_destinations.empty())
+            continue;
+
+        int sent_count = 0;
+        for (const Destination& dest : current_destinations) {
+            if (sendToDestinationFallback(dest, payload_data, payload_len))
+                sent_count++;
+        }
+
+        packets_received_.fetch_add(1, std::memory_order_relaxed);
+        bytes_received_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+        if (sent_count > 0) {
+            packets_sent_.fetch_add(static_cast<uint64_t>(sent_count), std::memory_order_relaxed);
+            bytes_sent_.fetch_add(static_cast<uint64_t>(sent_count) * payload_len, std::memory_order_relaxed);
+        }
+    }
+
+    std::cout << "kernel fwd-mode RX thread stopped" << std::endl;
 }
 
 bool Replicator::sendToDestinationWithQueue(const Destination& destination, const uint8_t* data, size_t length, int queueId) {

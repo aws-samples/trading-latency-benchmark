@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """fleet_json.py - emit the canonical topology data model (fleet.json).
 
-The shared data contract (see dev/roadmap.md, schema "afxdp.topology/v1")
+The shared data contract (schema "afxdp.topology/v1")
 consumed by report/web (batch render) and, later, the live collector's WS
 snapshot. Reuses the report.py loaders so there is one source of truth.
 
