@@ -1,5 +1,7 @@
 #  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: MIT-0
+# Documented in README but not called by the e2e test; its kill-grep only matches java, missing the hft_client pattern used elsewhere, so it silently 
+# fails to stop Rust/C++ clients
 
 ---
 - name: stop exchange clients
