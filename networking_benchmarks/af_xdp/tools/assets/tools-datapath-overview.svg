@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 720" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12">
+  <!-- Background -->
+  <rect width="960" height="720" fill="#fafafa"/>
+
+  <!-- Title -->
+  <text x="480" y="32" text-anchor="middle" font-size="16" font-weight="bold" fill="#1a1a1a">AF_XDP Tools — Measurement Datapath Overview</text>
+
+  <!-- ===== PATH A: Unicast RTT (top half) ===== -->
+  <text x="40" y="64" font-size="14" font-weight="bold" fill="#0d47a1">A. Unicast RTT  (rtt)</text>
+  <text x="40" y="80" font-size="11" fill="#555">Single-clock round-trip — no cross-host clock sync required</text>
+
+  <!-- rtt client box -->
+  <rect x="40" y="96" width="470" height="228" rx="8" fill="#e3f2fd" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="275" y="116" text-anchor="middle" font-weight="bold" fill="#0d47a1">rtt CLIENT  (one host)</text>
+
+  <!-- TX section -->
+  <rect x="56" y="128" width="438" height="82" rx="4" fill="#bbdefb" stroke="#1976d2" stroke-width="1"/>
+  <text x="68" y="145" font-weight="600" fill="#1a1a1a">TX (send thread, pinned send_cpu, SCHED_FIFO 80)</text>
+  <text x="68" y="161" fill="#333">Default: kernel sendto()  — CLOCK_REALTIME stamp before send</text>
+  <text x="68" y="177" fill="#333">--xdp-tx: AF_XDP zero-copy TX frame (pre-built UMEM),</text>
+  <text x="68" y="192" fill="#333">  stamps CLOCK_REALTIME + CLOCK_MONOTONIC, then submit+kick</text>
+  <text x="68" y="205" font-size="10" fill="#666">Startup prints "(zero-copy)" or "(COPY/SKB fallback)"</text>
+
+  <!-- RX section -->
+  <rect x="56" y="218" width="438" height="94" rx="4" fill="#bbdefb" stroke="#1976d2" stroke-width="1"/>
+  <text x="68" y="235" font-weight="600" fill="#1a1a1a">RX (recv thread, pinned recv_cpu, busy-poll recvmsg)</text>
+  <text x="68" y="251" fill="#333">Default: SO_TIMESTAMPING kernel-SW (NAPI, CLOCK_REALTIME)</text>
+  <text x="68" y="267" fill="#333">--xdp-rx: bpf_ktime_get_ns at XDP ingress (CLOCK_MONOTONIC)</text>
+  <text x="68" y="283" fill="#333">  read from payload; TX also stamps MONOTONIC to match</text>
+  <text x="68" y="300" font-size="10" fill="#666">RTT = RX_stamp − TX_stamp  (same clock domain per mode)</text>
+
+  <!-- Replicator box -->
+  <rect x="590" y="144" width="330" height="100" rx="8" fill="#fff3e0" stroke="#e65100" stroke-width="1.5"/>
+  <text x="755" y="166" text-anchor="middle" font-weight="bold" fill="#e65100">REPLICATOR  (AF_XDP)</text>
+  <text x="606" y="186" fill="#333">ucast.o (XDP prog) → AF_XDP redirect</text>
+  <text x="606" y="202" fill="#333">Fan-out: echoes frame back to client</text>
+  <text x="606" y="218" fill="#333">--xdp-rx stamps bpf_ktime into payload</text>
+  <text x="606" y="234" font-size="10" fill="#666">Ctrl port: UDP 12345 (env AFXDP_CONTROL_PORT)</text>
+
+  <!-- Arrows A -->
+  <defs>
+    <marker id="arrowR" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1565c0"/>
+    </marker>
+    <marker id="arrowL" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1565c0"/>
+    </marker>
+    <marker id="arrowO" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#e65100"/>
+    </marker>
+  </defs>
+  <line x1="510" y1="164" x2="586" y2="164" stroke="#1565c0" stroke-width="2" marker-end="url(#arrowR)"/>
+  <text x="513" y="157" font-size="10" fill="#1565c0">probe</text>
+  <line x1="586" y1="224" x2="510" y2="278" stroke="#1565c0" stroke-width="2" marker-end="url(#arrowL)"/>
+  <text x="513" y="256" font-size="10" fill="#1565c0">echo</text>
+
+  <!-- ===== PATH B: Multicast One-Way (bottom half) ===== -->
+  <text x="40" y="350" font-size="14" font-weight="bold" fill="#2e7d32">B. Multicast One-Way  (mcast_send → replicator → mcast_receive)</text>
+  <text x="40" y="366" font-size="11" fill="#555">Cross-host one-way — requires PHC/chrony clock sync (~µs)</text>
+
+  <!-- mcast_send box -->
+  <rect x="40" y="380" width="240" height="140" rx="8" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.5"/>
+  <text x="160" y="398" text-anchor="middle" font-weight="bold" fill="#2e7d32">mcast_send</text>
+  <text x="48" y="416" fill="#333">AF_XDP TX zero-copy</text>
+  <text x="48" y="432" fill="#333">Stamps ts_ns (CLOCK_REALTIME)</text>
+  <text x="48" y="448" fill="#333">before submit+sfence</text>
+  <text x="48" y="468" fill="#333">m2u header: magic + group</text>
+  <text x="48" y="484" fill="#333">Unicast to replicator (-D)</text>
+  <text x="48" y="504" font-size="10" fill="#666">Pacing: clock_nanosleep ABSTIME</text>
+
+  <!-- Replicator box (mcast) -->
+  <rect x="360" y="380" width="240" height="140" rx="8" fill="#fff3e0" stroke="#e65100" stroke-width="1.5"/>
+  <text x="480" y="398" text-anchor="middle" font-weight="bold" fill="#e65100">REPLICATOR (--mcast)</text>
+  <text x="368" y="416" fill="#333">mcast.o (XDP): parse m2u</text>
+  <text x="368" y="432" fill="#333">match {group,port} in map</text>
+  <text x="368" y="448" fill="#333">Stamps replicator_ns (RX)</text>
+  <text x="368" y="464" fill="#333">Stamps replicator_tx_ns (TX)</text>
+  <text x="368" y="484" fill="#333">Fan-out: unicast × K dests</text>
+  <text x="368" y="504" font-size="10" fill="#666">Ctrl: mcast join/leave via ctl</text>
+
+  <!-- mcast_receive box -->
+  <rect x="680" y="380" width="240" height="140" rx="8" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.5"/>
+  <text x="800" y="398" text-anchor="middle" font-weight="bold" fill="#2e7d32">mcast_receive</text>
+  <text x="688" y="416" fill="#333">Own mcast.o + config_map</text>
+  <text x="688" y="432" fill="#333">AF_XDP RX (busy-poll NAPI)</text>
+  <text x="688" y="448" fill="#333">Stamps rx_ns (CLOCK_REALTIME)</text>
+  <text x="688" y="468" fill="#333">hop1 = repl_ns − ts_ns</text>
+  <text x="688" y="484" fill="#333">hop2 = rx_ns − repl_tx_ns</text>
+  <text x="688" y="504" font-size="10" fill="#666">Reports p50…max + JSON (-j)</text>
+
+  <!-- Arrows B -->
+  <defs>
+    <marker id="arrowG" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#2e7d32"/>
+    </marker>
+  </defs>
+  <line x1="280" y1="450" x2="356" y2="450" stroke="#2e7d32" stroke-width="2" marker-end="url(#arrowG)"/>
+  <text x="295" y="442" font-size="10" fill="#2e7d32">unicast</text>
+  <line x1="600" y1="450" x2="676" y2="450" stroke="#2e7d32" stroke-width="2" marker-end="url(#arrowG)"/>
+  <text x="612" y="442" font-size="10" fill="#2e7d32">unicast ×K</text>
+
+  <!-- ===== Utilities (bottom strip) ===== -->
+  <text x="40" y="556" font-size="14" font-weight="bold" fill="#4a148c">Utilities</text>
+
+  <!-- replicator_ctl -->
+  <rect x="40" y="568" width="220" height="80" rx="6" fill="#f3e5f5" stroke="#6a1b9a" stroke-width="1"/>
+  <text x="150" y="586" text-anchor="middle" font-weight="bold" fill="#4a148c">replicator_ctl</text>
+  <text x="48" y="604" fill="#333">add / remove destinations</text>
+  <text x="48" y="620" fill="#333">list registered endpoints</text>
+  <text x="48" y="636" fill="#333">mcast join/leave groups</text>
+
+  <!-- udp_send -->
+  <rect x="280" y="568" width="220" height="80" rx="6" fill="#f3e5f5" stroke="#6a1b9a" stroke-width="1"/>
+  <text x="390" y="586" text-anchor="middle" font-weight="bold" fill="#4a148c">udp_send</text>
+  <text x="288" y="604" fill="#333">Connectivity probe (kernel UDP)</text>
+  <text x="288" y="620" fill="#333">Unicast or native multicast</text>
+  <text x="288" y="636" fill="#333">--iface for IP_MULTICAST_IF</text>
+
+  <!-- Wire format box -->
+  <rect x="540" y="556" width="380" height="108" rx="6" fill="#eceff1" stroke="#455a64" stroke-width="1"/>
+  <text x="730" y="576" text-anchor="middle" font-weight="bold" fill="#37474f">On-Wire Packet Layout  (wire.h)</text>
+  <text x="548" y="596" font-family="monospace" font-size="11" fill="#333">Eth(14) │ IPv4(20) │ UDP(8) │ m2u(8) │ AppHdr(32)</text>
+  <text x="548" y="616" font-family="monospace" font-size="11" fill="#333">m2u: magic "M2CU"(4) + group(4)</text>
+  <text x="548" y="636" font-family="monospace" font-size="11" fill="#333">AppHdr: seq(8) ts_ns(8) repl_ns(8) repl_tx_ns(8)</text>
+  <text x="548" y="654" font-family="monospace" font-size="10" fill="#666">Min frame: 82 B   All fields big-endian uint64</text>
+
+  <!-- Legend / footer -->
+  <text x="40" y="700" font-size="10" fill="#888">© Amazon.com, Inc. — MIT-0 License.  Diagram derived from wire.h and tools/*.cpp source.</text>
+</svg>

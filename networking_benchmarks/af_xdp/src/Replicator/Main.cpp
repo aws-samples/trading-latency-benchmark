@@ -86,8 +86,13 @@ void printUsage(const char* progName) {
 
 #ifndef ECHO_MODE_ONLY
 void printStatisticsLoop() {
+    // Sleep in short slices so shutdown does not block on this thread's join:
+    // the statistics cadence stays 10s, but g_running is observed within 100ms.
+    const int slices = 100;   // 100 x 100ms = 10s
     while (g_running) {
-        std::this_thread::sleep_for(std::chrono::seconds(10));
+        for (int i = 0; i < slices && g_running; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
         if (g_replicator && g_running) {
             g_replicator->printStatistics();
         }
@@ -235,10 +240,11 @@ int main(int argc, char* argv[]) {
         std::cout << "  ./ctl list" << std::endl;
         std::cout << std::endl;
         
-        // Main loop - just wait for signal
+        // Main loop - wait for a signal. Polls in 100ms slices so SIGTERM is
+        // acted on promptly instead of up to a second later.
         while (g_running) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
             // Check if replicator is still running
             if (!g_replicator->isRunning()) {
                 std::cerr << "Replicator stopped unexpectedly" << std::endl;

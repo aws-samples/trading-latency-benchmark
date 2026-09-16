@@ -27,12 +27,19 @@ REPLICATOR = AF_XDP_DIR / "replicator"
 LISTEN_IP = "127.0.0.1"
 
 
-@pytest.fixture(scope="session", autouse=True)
-def check_binaries():
-    """Fail fast if binaries aren't built."""
-    if not REPLICATOR.exists():
-        pytest.skip(
-            f"Binaries not found at {AF_XDP_DIR}. "
-            f"Run 'make all' (or 'make echo-mode') in {AF_XDP_DIR} first.",
-            allow_module_level=True,
-        )
+@pytest.fixture(autouse=True)
+def check_binaries(request):
+    """Skip suites that need the C++ binaries when they are not built.
+
+    Suites marked no_cpp_binaries exercise the Go/SQLite surfaces and run
+    anywhere, so a host that cannot build the datapath (macOS arm64 rejects
+    -mfma) still gets useful coverage instead of an all-skipped run.
+    """
+    if REPLICATOR.exists():
+        return
+    if request.node.get_closest_marker("no_cpp_binaries"):
+        return
+    pytest.skip(
+        f"Binaries not found at {AF_XDP_DIR}. "
+        f"Run 'make all' (or 'make echo-mode') in {AF_XDP_DIR} first."
+    )

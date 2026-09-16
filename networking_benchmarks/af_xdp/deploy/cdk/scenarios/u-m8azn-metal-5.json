@@ -1,0 +1,6 @@
+[
+  {"count": 2, "type": "m8azn.metal-12xl", "az": "a", "pgType": "cluster", "pgName": "cpg-a"},
+  {"count": 1, "type": "m8azn.metal-12xl", "az": "a"},
+  {"count": 1, "type": "m8azn.metal-12xl", "az": "b"},
+  {"count": 1, "type": "m8azn.metal-12xl", "region": "eu-west-1"}
+]

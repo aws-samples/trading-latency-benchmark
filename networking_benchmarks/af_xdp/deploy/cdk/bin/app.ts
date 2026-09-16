@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { FleetStack, FleetEntry, partitionFleet, connectRegions } from '../lib/fleet';
 import { AmiBuilderStack } from '../lib/ami-builder';
+import { ControlPlaneStack } from '../lib/control-plane';
 
 const app = new cdk.App();
 
@@ -27,7 +28,7 @@ if (!keyPairName) {
 // Formats:
 //   --context fleet='[{"count":2}]'                        (inline JSON)
 //   --context fleet=@path/to/file.json                     (load from file)
-//   --context scenario=ucast/az-cpg-3x                     (from scenarios/)
+//   --context scenario=ucast-az-cpg-3                      (from scenarios/)
 //
 function resolveFleet(): FleetEntry[] {
   const fleetRaw     = app.node.tryGetContext('fleet');
@@ -80,7 +81,7 @@ function resolveFleet(): FleetEntry[] {
   if (!fleetData) {
     throw new Error(
       'Fleet spec required. Provide one of:\n' +
-      '  --context scenario=ucast/az-cpg-3x      (from scenarios/)\n' +
+      '  --context scenario=ucast-az-cpg-3         (from scenarios/)\n' +
       '  --context fleet=@path/to/file.json       (from file)\n' +
       '  --context fleet=\'[{"count":2}]\'          (inline JSON)'
     );
@@ -114,6 +115,30 @@ switch (deploymentType) {
       instanceType,
       gitRepo,
       gitRef,
+    });
+    break;
+  }
+
+  case 'control-plane': {
+    // Central control plane: one EC2 running nats-server + the Go backend
+    // (serves web + API). Fleet agents connect outbound to its EIP:4222.
+    //   cdk deploy --context deploymentType=control-plane \
+    //     --context keyPairName=<key> --context gitRepo=<repo> --context gitRef=<branch> \
+    //     [--context clientCidr=1.2.3.4/32] [--context adminCidr=1.2.3.4/32] \
+    //     [--context hostedZoneId=Z... --context zoneName=example.com --context recordName=bench.example.com]
+    new ControlPlaneStack(app, `${stackName}-ControlPlane`, {
+      env: { account: process.env.CDK_DEFAULT_ACCOUNT, region },
+      keyPairName,
+      instanceType: app.node.tryGetContext('instanceType') || undefined,
+      gitRepo: app.node.tryGetContext('gitRepo') || undefined,
+      gitRef: app.node.tryGetContext('gitRef') || undefined,
+      clientCidr: app.node.tryGetContext('clientCidr') || undefined,
+      adminCidr: app.node.tryGetContext('adminCidr') || undefined,
+      hostedZoneId: app.node.tryGetContext('hostedZoneId') || undefined,
+      zoneName: app.node.tryGetContext('zoneName') || undefined,
+      recordName: app.node.tryGetContext('recordName') || undefined,
+      natsToken: app.node.tryGetContext('natsToken') || undefined,
+      natsTls: String(app.node.tryGetContext('natsTls')) === 'true',
     });
     break;
   }
@@ -155,7 +180,8 @@ switch (deploymentType) {
         entries: secondaryEntries,
         regionName: secondaryRegion,
         peerVpcCidr: primaryCidr,
-        ssmAmi: false,
+        ssmAmi: true,
+        controlPlaneRegion: region,
       });
       connectRegions(primary, secondary, { secondaryRegion });
     }
