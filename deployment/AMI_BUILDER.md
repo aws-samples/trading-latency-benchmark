@@ -6,7 +6,7 @@ This directory contains tools to build pre-optimized Amazon Machine Images (AMIs
 
 The AMI builder consists of:
 - **CDK Stack** (`cdk/lib/ami-builder-stack.ts`): Deploys a single EC2 instance for AMI creation
-- **Build Script** (`build-tuned-ami.sh`): Orchestrates deployment, tuning, and AMI creation
+- **Build Script** (`scripts/build-tuned-ami.sh`): Orchestrates deployment, tuning, and AMI creation
 - **Ansible Playbook** (`ansible/tune_os.yaml`): Applies comprehensive OS optimizations
 
 ## Prerequisites
@@ -41,7 +41,7 @@ Build an OS-tuned AMI with default settings:
 
 ```bash
 cd deployment
-./build-tuned-ami.sh --key-file ~/.ssh/virginia.pem
+./scripts/build-tuned-ami.sh --key-file ~/.ssh/virginia.pem
 ```
 
 This will:
@@ -62,7 +62,7 @@ Expected duration: **20-30 minutes**
 ## Usage
 
 ```bash
-./build-tuned-ami.sh [options]
+./scripts/build-tuned-ami.sh [options]
 ```
 
 ### Options
@@ -80,24 +80,24 @@ Expected duration: **20-30 minutes**
 
 **Build AMI with custom instance type:**
 ```bash
-./build-tuned-ami.sh --instance-type c6in.4xlarge --key-file ~/.ssh/my-key.pem
+./scripts/build-tuned-ami.sh --instance-type c6in.4xlarge --key-file ~/.ssh/my-key.pem
 ```
 
 **Build AMI with custom name:**
 ```bash
-./build-tuned-ami.sh --ami-name my-trading-ami-v1 --key-file ~/.ssh/virginia.pem
+./scripts/build-tuned-ami.sh --ami-name my-trading-ami-v1 --key-file ~/.ssh/virginia.pem
 ```
 
 **Build AMI and keep instance for inspection:**
 ```bash
-./build-tuned-ami.sh --no-cleanup --key-file ~/.ssh/virginia.pem
+./scripts/build-tuned-ami.sh --no-cleanup --key-file ~/.ssh/virginia.pem
 # Instance will remain running - remember to destroy the stack later:
 # cd cdk && cdk destroy TradingBenchmarkAmiBuilderStack
 ```
 
 **Build AMI in different region:**
 ```bash
-./build-tuned-ami.sh --region us-west-2 --key-file ~/.ssh/my-west-key.pem
+./scripts/build-tuned-ami.sh --region us-west-2 --key-file ~/.ssh/my-west-key.pem
 ```
 
 ## What Gets Tuned?
@@ -320,13 +320,13 @@ cat /proc/cmdline  # Should include isolcpus, nohz_full, etc.
 
 ```bash
 # Build AMI for 16-32 vCPU instances
-./build-tuned-ami.sh --instance-type c7i.4xlarge --ami-name trading-16vcpu-v1
+./scripts/build-tuned-ami.sh --instance-type c7i.4xlarge --ami-name trading-16vcpu-v1
 
 # Build AMI for 48-96 vCPU instances
-./build-tuned-ami.sh --instance-type c7i.24xlarge --ami-name trading-96vcpu-v1
+./scripts/build-tuned-ami.sh --instance-type c7i.24xlarge --ami-name trading-96vcpu-v1
 
 # Build AMI for 128-192 vCPU instances
-./build-tuned-ami.sh --instance-type c7i.48xlarge --ami-name trading-192vcpu-v1
+./scripts/build-tuned-ami.sh --instance-type c7i.48xlarge --ami-name trading-192vcpu-v1
 ```
 
 **Dynamic CPU Allocation at Build Time:**
@@ -360,7 +360,7 @@ To create AMIs with different tuning profiles:
 
 2. Build AMI with a descriptive name:
    ```bash
-   ./build-tuned-ami.sh --ami-name trading-16core-v1
+   ./scripts/build-tuned-ami.sh --ami-name trading-16core-v1
    ```
 
 3. Document the configuration in AMI tags or description
@@ -377,7 +377,7 @@ Integrate AMI building into CI/CD:
 set -e
 
 # Build AMI
-AMI_ID=$(./build-tuned-ami.sh \
+AMI_ID=$(./scripts/build-tuned-ami.sh \
   --ami-name "trading-ami-$(git rev-parse --short HEAD)" \
   --key-file "$SSH_KEY_PATH" | \
   grep "AMI ID:" | awk '{print $3}')

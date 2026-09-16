@@ -225,7 +225,7 @@ fi
 
 # Navigate to CDK directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-CDK_DIR="$SCRIPT_DIR/cdk"
+CDK_DIR="$SCRIPT_DIR/../cdk"
 
 cd "$CDK_DIR"
 
@@ -298,8 +298,8 @@ if cdk deploy $STACK_NAME $CDK_CONTEXT --require-approval never; then
         --output json)
 
     # Create output directory and save outputs to file
-    mkdir -p "$SCRIPT_DIR/latency-hunting"
-    OUTPUT_FILE="$SCRIPT_DIR/latency-hunting/deployment-outputs.json"
+    mkdir -p "$SCRIPT_DIR/../latency-hunting"
+    OUTPUT_FILE="$SCRIPT_DIR/../latency-hunting/deployment-outputs.json"
     echo "$OUTPUTS" > "$OUTPUT_FILE"
     print_info "Stack outputs saved to: $OUTPUT_FILE"
 
