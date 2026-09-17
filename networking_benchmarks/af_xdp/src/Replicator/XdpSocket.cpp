@@ -630,6 +630,32 @@ void XdpSocket::requestDriverPoll() {
 int XdpSocket::reserveTxRing(int count, uint32_t* tx_idx) {
     // No checkOpen(): called only from sendSinglePacketDirect which is guarded
     // by sendToDestinationWithQueue's queueId/socket validity check.
+    //
+    // B5 — FRAME-SAFETY BACKPRESSURE. A successful xsk_ring_prod__reserve() only
+    // means a DESCRIPTOR slot is free: the TX ring's consumer index advances when
+    // the kernel DEQUEUES the descriptor, not when the NIC has finished DMA-ing the
+    // buffer. The UMEM frame that sendSinglePacketDirect() derives from the ring
+    // index — (tx_idx % TX_FRAMES) * FRAME_SIZE — is only safe to overwrite once
+    // its COMPLETION has been reaped. Without this guard the producer can wrap onto
+    // a frame that is still in flight and rewrite it mid-transmission, putting a
+    // torn/inconsistent frame on the wire; AWS VPC then drops it silently, which
+    // shows up as apparent packet "loss" that grows with run length and has no
+    // local drop counter.
+    //
+    // The batched path (sendPackets) has always carried the equivalent ena-xdp
+    // check `outstanding_tx_ > TX_FRAMES - TX_BATCH_SIZE`; it was never ported to
+    // this single-packet path, which is the one the replicator hot path uses.
+    // The guard must cover the WHOLE reservation: a fan-out reserves K slots at
+    // once, so checking only that one frame is free lets a K-slot reserve wrap onto
+    // frames still being DMA'd (e.g. 2040 outstanding + 24 reserved > 2048 frames),
+    // which puts torn frames on the wire that AWS VPC drops without any local
+    // counter moving.
+    const uint32_t need = static_cast<uint32_t>(count);
+    if (outstanding_tx_ + need > static_cast<uint32_t>(TX_FRAMES)) {
+        pollTxCompletions();
+        if (outstanding_tx_ + need > static_cast<uint32_t>(TX_FRAMES))
+            return 0;   // caller kicks + retries, then falls back to the kernel socket
+    }
     return xsk_ring_prod__reserve(&wrapper_->tx, count, tx_idx);
 }
 
@@ -649,7 +675,7 @@ void XdpSocket::submitTxRing(int count) {
 }
 
 bool XdpSocket::forwardFrameInPlace(uint64_t rx_addr, uint32_t len) {
-    // Free TX slots (this also recycles previously-borrowed RX frames back to fill).
+    // Release TX ring slots. RX-range frames (inplace mode) are returned to the fill queue.
     pollTxCompletions();
 
     // This RX frame is being handed to TX; make sure recycleFrames() does NOT also

@@ -32,6 +32,8 @@
 #include <cerrno>
 
 #include <arpa/inet.h>
+#include "common/wire.h"   // S1: single source of the on-wire layout
+#include "common/nexthop.h"  // next-hop MAC (gateway when off-subnet)
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
@@ -62,13 +64,13 @@ static constexpr int         DEF_COUNT       = 10000;
 static constexpr int         DEF_INTERVAL_US = 1000;
 static constexpr int         DEF_SIZE        = 64;
 static constexpr int         DEF_TX_QUEUE    = 1;   /* queue 0 is RSS-pinned (carries SSH/ctrl); bind TX off it */
-static constexpr int         HDR_SIZE        = 32;   /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
+static constexpr int         HDR_SIZE        = WIRE_APP_HDR_LEN;   /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
 
 /* Light mcast->ucast tunnel tag ("M2CU"): an 8-byte header {magic, group}
  * prepended to the UDP payload. Kept in
  * sync with src/xdp/mcast.c, src/Replicator.cpp and tools/mcast_receive.cpp. */
-static constexpr uint32_t    M2U_MAGIC       = 0x4D324355;
-static constexpr int         M2U_HDR_LEN     = 8;   /* magic(4) + group(4) */
+static constexpr uint32_t    M2U_MAGIC       = WIRE_M2U_MAGIC;
+static constexpr int         M2U_HDR_LEN     = WIRE_M2U_HDR_LEN;   /* magic(4) + group(4) */
 
 /*
  * Fixed offsets within the ethernet frame for the fields updated per packet.
@@ -81,11 +83,11 @@ static constexpr int         M2U_HDR_LEN     = 8;   /* magic(4) + group(4) */
  *                                zeroed in template — receiver skips hop
  *                                breakdown if still 0)
  */
-static constexpr int PAYLOAD_OFF    = 14 + 20 + 8 + M2U_HDR_LEN;
+static constexpr int PAYLOAD_OFF    = WIRE_PAYLOAD_OFF;
 static constexpr int SEQ_OFF        = PAYLOAD_OFF;
-static constexpr int TS_OFF         = PAYLOAD_OFF + 8;
-static constexpr int REPLICATOR_TS_OFF  = PAYLOAD_OFF + 16;  /* written by replicator, not sender */
-static constexpr int REPLICATOR_TX_TS_OFF = PAYLOAD_OFF + 24;  /* written by replicator at TX submit, not sender */
+static constexpr int TS_OFF         = PAYLOAD_OFF + WIRE_APP_TS_NS_OFF;
+static constexpr int REPLICATOR_TS_OFF  = PAYLOAD_OFF + WIRE_APP_REPL_NS_OFF;  /* written by replicator, not sender */
+static constexpr int REPLICATOR_TX_TS_OFF = PAYLOAD_OFF + WIRE_APP_REPL_TX_NS_OFF;  /* written by replicator at TX submit, not sender */
 
 struct __attribute__((packed)) pkt_hdr {
 	uint64_t seq;
@@ -163,41 +165,6 @@ static bool get_iface_info(const char *iface, iface_info &out)
 }
 
 /* ── ARP MAC resolution ───────────────────────────────────────────────── */
-static bool resolve_mac(const char *dst_ip, const char *iface, uint8_t mac[6])
-{
-	int s = socket(AF_INET, SOCK_DGRAM, 0);
-	if (s < 0) return false;
-	setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, iface, strlen(iface) + 1);
-	struct sockaddr_in a{};
-	a.sin_family = AF_INET;
-	a.sin_port   = htons(9);
-	inet_pton(AF_INET, dst_ip, &a.sin_addr);
-	connect(s, (struct sockaddr *)&a, sizeof(a));
-	send(s, nullptr, 0, 0);
-	close(s);
-
-	usleep(50000);
-
-	FILE *f = fopen("/proc/net/arp", "r");
-	if (!f) { perror("open /proc/net/arp"); return false; }
-
-	char line[256];
-	fgets(line, sizeof(line), f);
-	while (fgets(line, sizeof(line), f)) {
-		char ip[32], hwtype[16], flags[16], hw[32], mask[16], dev[32];
-		if (sscanf(line, "%31s %15s %15s %31s %15s %31s",
-		           ip, hwtype, flags, hw, mask, dev) != 6) continue;
-		if (strcmp(ip, dst_ip) != 0) continue;
-		unsigned int b[6];
-		if (sscanf(hw, "%x:%x:%x:%x:%x:%x",
-		           &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) continue;
-		for (int i = 0; i < 6; i++) mac[i] = (uint8_t)b[i];
-		fclose(f);
-		return true;
-	}
-	fclose(f);
-	return false;
-}
 
 /*
  * Build the full m2u packet template into buf.
@@ -327,8 +294,8 @@ int main(int argc, char *argv[])
 	/* ── resolve replicator MAC ───────────────────────────────────────────── */
 	uint8_t dst_mac[6];
 	printf("Resolving MAC for %s ...\n", replicator_ip_s);
-	if (!resolve_mac(replicator_ip_s, iface, dst_mac)) {
-		fprintf(stderr, "error: ARP resolution failed for %s\n", replicator_ip_s);
+	if (!afxdp::resolve_next_hop_mac(replicator_ip_s, iface, dst_mac)) {
+		fprintf(stderr, "error: next-hop MAC resolution failed for %s\n", replicator_ip_s);
 		fprintf(stderr, "       ensure replicator is reachable and try again\n");
 		return 1;
 	}

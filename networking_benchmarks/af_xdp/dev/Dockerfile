@@ -52,6 +52,10 @@ COPY Makefile ./
 COPY src/   ./src/
 COPY tools/ ./tools/
 COPY tests/ ./tests/
+# The MCP schema-contract tests read the Go store and tool sources, so the
+# backend and mcp packages have to be in the image. Nothing here is compiled.
+COPY control_plane/backend/ ./control_plane/backend/
+COPY control_plane/mcp/     ./control_plane/mcp/
 
 # Build validation: full AF_XDP build must compile (mirrors the AMI bake).
 RUN make full

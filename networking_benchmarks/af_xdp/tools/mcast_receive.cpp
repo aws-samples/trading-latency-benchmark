@@ -21,6 +21,7 @@
 #include <string>
 
 #include <arpa/inet.h>
+#include "common/wire.h"   // S1: single source of the on-wire layout
 #include <net/if.h>
 #include <linux/if_ether.h>
 #include <netinet/ip.h>
@@ -48,8 +49,8 @@ static constexpr uint32_t FILL_SIZE   = 2048;   /* XSK_RING_PROD__DEFAULT_NUM_DE
 static constexpr uint32_t RX_SIZE     = 2048;
 static constexpr uint32_t BATCH       = 64;
 static constexpr uint16_t ETH_P_IPV4  = 0x0800;
-static constexpr int      HDR_SIZE    = 32;     /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
-static constexpr uint32_t M2U_MAGIC   = 0x4D324355;  /* "M2CU" — light mcast->ucast tag */
+static constexpr int      HDR_SIZE    = WIRE_APP_HDR_LEN;     /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
+static constexpr uint32_t M2U_MAGIC   = WIRE_M2U_MAGIC;  /* "M2CU" — light mcast->ucast tag */
 static constexpr int      M2U_HDR_LEN = 8;           /* magic(4) + group(4) */
 
 struct __attribute__((packed)) pkt_hdr {
@@ -369,6 +370,11 @@ int main(int argc, char *argv[])
 	printf("AF_XDP listening on %s queue %d  inner UDP dst port=%d  "
 	       "expect=%d  timeout=%ds\n\n",
 	       iface, queue, port, count, timeout);
+	// Flush explicitly: stdout is redirected to a file by the agent, so libc
+	// picks full buffering and this line would otherwise sit in the buffer until
+	// exit. The orchestrator polls for it as the receiver's readiness signal and
+	// starts the source send only once every receiver has reported it.
+	fflush(stdout);
 
 	struct timespec t0;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -607,12 +613,14 @@ next:
 			fprintf(jf, "    \"max\": %" PRIu64 "\n", max_lat / 1000);
 			fprintf(jf, "  },\n");
 			if (has_replicator_ts && !latencies_hop1.empty()) {
-				fprintf(jf, "  \"hop1_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
-				        pct(latencies_hop1, 50) / 1000, pct(latencies_hop1, 99) / 1000);
+				fprintf(jf, "  \"hop1_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 ", \"p999\": %" PRIu64 " },\n",
+				        pct(latencies_hop1, 50) / 1000, pct(latencies_hop1, 99) / 1000,
+				        (latencies_hop1[(latencies_hop1.size() - 1) * 999 / 1000]) / 1000);
 			}
 			if (has_replicator_ts && !latencies_hop2.empty()) {
-				fprintf(jf, "  \"hop2_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
-				        pct(latencies_hop2, 50) / 1000, pct(latencies_hop2, 99) / 1000);
+				fprintf(jf, "  \"hop2_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 ", \"p999\": %" PRIu64 " },\n",
+				        pct(latencies_hop2, 50) / 1000, pct(latencies_hop2, 99) / 1000,
+				        (latencies_hop2[(latencies_hop2.size() - 1) * 999 / 1000]) / 1000);
 			}
 			if (has_tx_ts && !latencies_proc.empty()) {
 				fprintf(jf, "  \"hop2_proc_ns\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",

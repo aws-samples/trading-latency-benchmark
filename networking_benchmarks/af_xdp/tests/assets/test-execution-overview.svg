@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 420" font-family="'Segoe UI',Arial,sans-serif" font-size="13">
+  <!-- Background -->
+  <rect width="720" height="420" fill="#fafbfc" rx="6"/>
+
+  <!-- Title -->
+  <text x="360" y="28" text-anchor="middle" font-size="16" font-weight="bold" fill="#1a1a2e">AF_XDP Integration Test Execution Paths</text>
+
+  <!-- ─── Left: Docker / Local echo-mode ─── -->
+  <rect x="20" y="50" width="330" height="350" rx="8" fill="#e8f4fd" stroke="#4a90d9" stroke-width="1.5"/>
+  <text x="185" y="72" text-anchor="middle" font-weight="bold" fill="#2c5282">Local / Docker (echo-mode)</text>
+  <text x="185" y="90" text-anchor="middle" font-size="11" fill="#4a6fa5">No root · No XDP/BPF · Container-safe</text>
+
+  <!-- replicator --echo-mode box -->
+  <rect x="45" y="105" width="280" height="50" rx="5" fill="#fff" stroke="#4a90d9"/>
+  <text x="185" y="126" text-anchor="middle" font-size="12" font-weight="bold" fill="#2c5282">replicator --echo-mode</text>
+  <text x="185" y="143" text-anchor="middle" font-size="11" fill="#555">KernelEcho.cpp — UDP echo via kernel sockets</text>
+
+  <!-- pytest box -->
+  <rect x="45" y="170" width="280" height="85" rx="5" fill="#fff" stroke="#4a90d9"/>
+  <text x="185" y="190" text-anchor="middle" font-size="12" font-weight="bold" fill="#2c5282">pytest tests/ (45 tests)</text>
+  <text x="55" y="208" font-size="11" fill="#333">• Binary existence &amp; usage validation</text>
+  <text x="55" y="224" font-size="11" fill="#333">• Control protocol (ADD/REMOVE/LIST)</text>
+  <text x="55" y="240" font-size="11" fill="#333">• Data echo &amp; multi-dst fan-out</text>
+
+  <!-- rtt binary box -->
+  <rect x="45" y="268" width="280" height="55" rx="5" fill="#fff" stroke="#4a90d9"/>
+  <text x="185" y="288" text-anchor="middle" font-size="12" font-weight="bold" fill="#2c5282">rtt binary</text>
+  <text x="55" y="306" font-size="11" fill="#333">• JSON schema · latency sanity · zero-loss</text>
+
+  <!-- CLI tools box -->
+  <rect x="45" y="335" width="280" height="50" rx="5" fill="#fff" stroke="#4a90d9"/>
+  <text x="185" y="355" text-anchor="middle" font-size="12" font-weight="bold" fill="#2c5282">CLI tools (replicator_ctl · udp_send · mcast_*)</text>
+  <text x="55" y="372" font-size="11" fill="#333">• Arg parsing · usage · required-option checks</text>
+
+  <!-- ─── Right: EC2 on-fleet ─── -->
+  <rect x="370" y="50" width="330" height="350" rx="8" fill="#fef3e2" stroke="#d4760a" stroke-width="1.5"/>
+  <text x="535" y="72" text-anchor="middle" font-weight="bold" fill="#7c4200">EC2 Fleet (AF_XDP datapath)</text>
+  <text x="535" y="90" text-anchor="middle" font-size="11" fill="#996515">Root · XDP/BPF · Real NIC · Placement group</text>
+
+  <!-- Ansible run_tests.yaml -->
+  <rect x="395" y="105" width="280" height="55" rx="5" fill="#fff" stroke="#d4760a"/>
+  <text x="535" y="126" text-anchor="middle" font-size="12" font-weight="bold" fill="#7c4200">run_tests.yaml (Ansible)</text>
+  <text x="405" y="143" font-size="11" fill="#333">Same 45 tests on fleet nodes; stops</text>
+  <text x="405" y="156" font-size="11" fill="#333">replicator.service, then restarts it.</text>
+
+  <!-- run_ucast.yaml -->
+  <rect x="395" y="175" width="280" height="55" rx="5" fill="#fff" stroke="#d4760a"/>
+  <text x="535" y="196" text-anchor="middle" font-size="12" font-weight="bold" fill="#7c4200">run_ucast.yaml</text>
+  <text x="405" y="213" font-size="11" fill="#333">Real AF_XDP unicast: kernel / xdp-tx /</text>
+  <text x="405" y="226" font-size="11" fill="#333">xdp-rx / xdp-txrx × 1K/10K/100K packets</text>
+
+  <!-- run_mcast.yaml -->
+  <rect x="395" y="245" width="280" height="55" rx="5" fill="#fff" stroke="#d4760a"/>
+  <text x="535" y="266" text-anchor="middle" font-size="12" font-weight="bold" fill="#7c4200">run_mcast.yaml</text>
+  <text x="405" y="283" font-size="11" fill="#333">m2u AF_XDP multicast: copy / in-place /</text>
+  <text x="405" y="296" font-size="11" fill="#333">kernel × 1K/10K/100K packets; matrix report</text>
+
+  <!-- Gate box -->
+  <rect x="395" y="320" width="280" height="65" rx="5" fill="#fff3cd" stroke="#d4760a"/>
+  <text x="535" y="342" text-anchor="middle" font-size="12" font-weight="bold" fill="#7c4200">What they gate</text>
+  <text x="405" y="360" font-size="11" fill="#333">✓ Validates real zero-copy datapath</text>
+  <text x="405" y="376" font-size="11" fill="#333">✓ Measures latency for benchmark reports</text>
+
+  <!-- Arrows / flow indicators -->
+  <line x1="355" y1="210" x2="370" y2="210" stroke="#888" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="360" y="200" text-anchor="middle" font-size="10" fill="#888" transform="rotate(-90,360,200)">gates</text>
+</svg>
