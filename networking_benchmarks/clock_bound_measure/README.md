@@ -46,12 +46,12 @@ On first boot, each instance executes `user_data/bootstrap.sh`:
    ├── /dev/ptpN exists? → SYNC_MECHANISM=PTP
    │   └── Configure chrony: refclock PHC /dev/ptpN poll 0 delay 0.000010 prefer
    └── No PHC? → SYNC_MECHANISM=NTP
-3. Install ClockBound daemon:
-   ├── Try RPM from GitHub releases
-   └── Fallback: build from source (cargo build --release --features daemon)
+3. Install ClockBound daemon: build from source
+   (cargo build --release --features daemon; RPM install is a future TODO)
 4. Install Rust toolchain (if not present)
 5. Build example client (examples/client/rust)
-6. Write /opt/clock-bound/status.json
+6. CloudWatch publisher: pip install boto3, write and start clockbound-metrics.service
+7. Write /opt/clock-bound/status.json
 ```
 
 When PTP is detected, chrony is configured with the PHC as a preferred reference clock per [AWS documentation](https://aws.amazon.com/blogs/compute/its-about-time-microsecond-accurate-clocks-on-amazon-ec2-instances/):
@@ -110,6 +110,8 @@ The bootstrap script auto-detects PHC availability at runtime — no configurati
 - AWS Session Manager plugin (`session-manager-plugin`)
 - Python 3.9+
 - Node.js (for CDK CLI)
+- `cdk bootstrap` run once in the target account and region — the stack ships the
+  metrics publisher as an S3 asset
 
 ### Deploy
 
@@ -132,6 +134,56 @@ npx cdk deploy -c region=us-east-1 \
 
 # With full daemon logs and client output:
 ./scripts/run_clock_bound.sh --region us-east-1 --verbose
+```
+
+### Continuous CloudWatch Metrics
+
+`run_clock_bound.sh` gives a one-shot snapshot. Each instance also publishes
+continuously, so degradation is visible over time instead of only when you happen
+to run the script. The stack prints a `DashboardUrl` output, which
+`run_clock_bound.sh` echoes after its summary table.
+
+`clockbound-metrics.service` runs `/opt/clockbound_metrics.py`, which reads the
+ClockBound protocol v3 shared memory segment at `/var/run/clockbound/shm1` once a
+second and publishes one statistic set per minute:
+
+| Metric | Namespace | Unit | Meaning |
+|---|---|---|---|
+| `ClockErrorBound` | `ClockBoundMeasure` | Microseconds | Segment `Bound` field, ns→µs |
+| `ClockStatus` | `ClockBoundMeasure` | None | 0=Unknown, 1=Synchronized, 2=FreeRunning, 3=Disrupted |
+
+Both carry a single `InstanceId` dimension. `SyncMechanism` is deliberately not a
+dimension: CloudWatch alarms require an exact dimension set and cannot alarm on
+`SEARCH()`, and PTP-vs-NTP is not resolved until the instance boots.
+
+These are ClockBound's own numbers, not the chrony formula — ClockBound 3.x already
+folds the Nitro `phc_error_bound` sysfs value into its bound, and models
+feed-forward drift between updates, which chrony does not. See
+[Understanding the Two Error Bound Measurements](#understanding-the-two-error-bound-measurements).
+
+Four alarms, all evaluating one 60-second period on `Maximum`:
+
+- `ClockErrorBound` per instance against `ClockErrorBoundThreshold1` / `2`
+  (defaults 200µs and 2000µs, matching a PTP / NTP instance pairing)
+- `ClockStatus >= 2` per instance, catching `FreeRunning` and `Disrupted`
+
+All four treat missing data as breaching. When the publisher cannot get a valid
+bound — segment absent, torn read, or past its `Void-After` timestamp — it emits
+nothing rather than a fabricated value, so a gap means "bound unknown". A gap also
+occurs when an instance is stopped or the stack is destroyed.
+
+No SNS topic is created; alarm state is visible on the dashboard and in the console.
+
+Check the parser without deploying anything:
+
+```bash
+python3 user_data/clockbound_metrics.py --selftest
+```
+
+Publisher logs on an instance:
+
+```bash
+journalctl -u clockbound-metrics -n 50
 ```
 
 ### End-to-End Test
@@ -276,12 +328,13 @@ aws ssm get-command-invocation --command-id <id> --instance-id <id> --query Stat
 clock_bound_measure/
 ├── app.py                      # CDK app entry point
 ├── cdk.json                    # CDK configuration
-├── requirements.txt            # Python deps (aws-cdk-lib, constructs)
+├── requirements.txt            # Python deps (aws-cdk-lib, boto3, constructs)
 ├── stacks/
 │   ├── __init__.py
-│   └── clock_bound_stack.py    # Stack: VPC, EC2, IAM, SG
+│   └── clock_bound_stack.py    # Stack: VPC, EC2, IAM, SG, alarms, dashboard
 ├── user_data/
-│   └── bootstrap.sh            # Instance bootstrap (PTP, ClockBound, Rust)
+│   ├── bootstrap.sh            # Instance bootstrap (PTP, ClockBound, Rust)
+│   └── clockbound_metrics.py   # shm1 reader → CloudWatch (--selftest)
 └── scripts/
     ├── run_clock_bound.sh      # Query instances via SSM
     ├── e2e_test.sh             # Deploy + query + optional cleanup
@@ -291,6 +344,8 @@ clock_bound_measure/
 ## References
 
 - [ClockBound GitHub](https://github.com/aws/clock-bound)
+- [ClockBound shared memory protocol](https://github.com/aws/clock-bound/blob/main/docs/protocol.md) — the v3 segment layout parsed by `clockbound_metrics.py`
+- [AWS Blog: Manage EC2 Clock Accuracy with Time Sync and CloudWatch (Part 2)](https://aws.amazon.com/blogs/mt/manage-amazon-ec2-instance-clock-accuracy-using-amazon-time-sync-service-and-amazon-cloudwatch-part-2/) — predates ClockBound and derives the bound from `chronyc tracking`; this stack publishes ClockBound's own bound instead
 - [AWS Blog: Microsecond-Accurate Clocks on EC2](https://aws.amazon.com/blogs/compute/its-about-time-microsecond-accurate-clocks-on-amazon-ec2-instances/)
 - [EC2 User Guide: Configure Amazon Time Sync Service](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configure-ec2-ntp.html)
 - [EC2 User Guide: Compare Timestamps with ClockBound](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/compare-timestamps-with-clockbound.html)
