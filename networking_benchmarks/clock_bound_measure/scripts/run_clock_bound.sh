@@ -251,6 +251,11 @@ printf "║ %-20s ║ %-16s ║ %-9s ║ %-19s ║ %-19s ║\n" "$INSTANCE1_ID" 
 printf "║ %-20s ║ %-16s ║ %-9s ║ %-19s ║ %-19s ║\n" "$INSTANCE2_ID" "$INSTANCE2_TYPE" "$SYNC2" "$CLIENT2" "$CHRONY2"
 printf "╚══════════════════════╩══════════════════╩═══════════╩═════════════════════╩═════════════════════╝\n"
 
+DASHBOARD_URL=$(get_output "DashboardUrl")
+if [[ -n "$DASHBOARD_URL" && "$DASHBOARD_URL" != "None" ]]; then
+    printf "\nContinuous metrics: %s\n" "$DASHBOARD_URL"
+fi
+
 # ── Verbose output ───────────────────────────────────────────────────────────
 if [[ "$VERBOSE" == "true" ]]; then
     echo ""

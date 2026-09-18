@@ -160,7 +160,44 @@ else
     echo "WARNING: No client binary found in target/release"
 fi
 
-# ── Step 6: Write status marker ─────────────────────────────────────────────
+# ── Step 6: CloudWatch metrics publisher ────────────────────────────────────
+# AWS CLI v2 vendors its own Python, so system python3 has no boto3. No dnf retry
+# loop here: Step 3 already proved network and dnf work.
+dnf install -y --setopt=cachedir=/tmp/dnf-cb python3-pip
+pip3 install boto3
+python3 -c "import boto3; print('boto3', boto3.__version__)" || { echo "ERROR: boto3 import failed"; exit 1; }
+
+# boto3 cannot infer a region on EC2, so pin it from IMDS in the unit.
+REGION=$(TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 21600") && \
+    curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+    http://169.254.169.254/latest/meta-data/placement/region)
+# curl -s exits 0 on an HTTP error, so reject a body that is not a region.
+[[ "$REGION" =~ ^[a-z0-9-]+-[a-z]+-[0-9]+$ ]] || { echo "ERROR: invalid region from IMDS: '$REGION'"; exit 1; }
+
+cat > /etc/systemd/system/clockbound-metrics.service <<UNIT
+[Unit]
+Description=Publish ClockBound error bound and status to CloudWatch
+# IMDS is queried at startup, so wait for routing to be up.
+Wants=network-online.target
+After=network-online.target clockbound.service
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/clockbound_metrics.py
+Environment=AWS_DEFAULT_REGION=$REGION
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+
+systemctl enable clockbound-metrics
+systemctl start clockbound-metrics
+echo "CloudWatch metrics publisher started (region: $REGION)"
+
+# ── Step 7: Write status marker ─────────────────────────────────────────────
 INSTANCE_TYPE=$(TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
     -H "X-aws-ec2-metadata-token-ttl-seconds: 21600") && \
     curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
