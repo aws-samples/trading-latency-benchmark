@@ -1,0 +1,10 @@
+# Authors
+
+mcast2ucast — DPDK multicast-to-unicast converter
+
+Original author and creator:
+  Sercan Karaoglu <sercanka@amazon.com>  (initial implementation, 2026-03-18)
+
+Contributors:
+  David Dornseifer <dornseid@amazon.com>  (repo reorg; benchmark harness)
+  Anatoly Shae <binshae@amazon.de>
