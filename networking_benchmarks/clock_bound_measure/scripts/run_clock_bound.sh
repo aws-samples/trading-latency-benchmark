@@ -115,7 +115,7 @@ run_query() {
         $REGION_FLAG \
         --instance-ids "$instance_id" \
         --document-name "AWS-RunShellScript" \
-        --parameters 'commands=["cat /opt/clock-bound/status.json","echo ---SEPARATOR---","systemctl status clockbound --no-pager 2>&1 || true","echo ---SEPARATOR---","/usr/local/bin/clock-bound-client 2>&1 || echo CLIENT_NOT_AVAILABLE","echo ---SEPARATOR---","chronyc tracking 2>&1","echo ---SEPARATOR---","IFACE=$(ls /sys/class/net/ | grep -v lo | head -1); PCI=$(cat /sys/class/net/$IFACE/device/uevent 2>/dev/null | grep PCI_SLOT_NAME | cut -d= -f2); cat /sys/bus/pci/devices/$PCI/phc_error_bound 2>/dev/null || echo NOT_AVAILABLE"]' \
+        --parameters 'commands=["cat /opt/clock-bound/status.json","echo ---SEPARATOR---","systemctl status clockbound --no-pager 2>&1 || true","echo ---SEPARATOR---","/usr/local/bin/clock-bound-client 2>&1 || echo CLIENT_NOT_AVAILABLE"]' \
         --query "Command.CommandId" \
         --output text)
 
@@ -176,7 +176,8 @@ if len(parts) >= 3:
         if m:
             earliest = float(m.group(1))
             latest = float(m.group(2))
-            bound_ns = int((latest - earliest) * 1e9)
+            # [earliest, latest] = now ± bound, so the bound is half the width
+            bound_ns = int((latest - earliest) / 2 * 1e9)
             bound_us = bound_ns / 1000.0
             status = 'Sync' if 'Synchronized' in client else 'Unknown'
             print(f'±{bound_us:.1f}µs ({status})')
@@ -187,69 +188,22 @@ else:
 "
 }
 
-# Calculate clock error bound using AWS blog formula:
-# CLOCK_ERROR_BOUND = SYSTEM_TIME + (0.5 * ROOT_DELAY) + ROOT_DISPERSION + PHC_ERROR_BOUND
-# Reference: https://aws.amazon.com/blogs/compute/its-about-time-microsecond-accurate-clocks-on-amazon-ec2-instances/
-parse_chrony_error_bound() {
-    echo "$1" | python3 -c "
-import sys, re
-parts = sys.stdin.read().split('---SEPARATOR---')
-if len(parts) >= 5:
-    chrony_tracking = parts[3].strip()
-    phc_raw = parts[4].strip()
-
-    # Parse chrony tracking values
-    sys_time_m = re.search(r'System time\s*:\s*([\d.]+)\s*seconds', chrony_tracking)
-    root_delay_m = re.search(r'Root delay\s*:\s*([\d.]+)\s*seconds', chrony_tracking)
-    root_disp_m = re.search(r'Root dispersion\s*:\s*([\d.]+)\s*seconds', chrony_tracking)
-
-    if sys_time_m and root_delay_m and root_disp_m and phc_raw != 'NOT_AVAILABLE':
-        sys_time = float(sys_time_m.group(1))
-        root_delay = float(root_delay_m.group(1))
-        root_disp = float(root_disp_m.group(1))
-        phc_ns = float(phc_raw)
-        phc_s = phc_ns / 1e9
-
-        # Blog formula
-        bound_s = sys_time + (0.5 * root_delay) + root_disp + phc_s
-        bound_us = bound_s * 1e6
-        print(f'±{bound_us:.1f}µs')
-    elif phc_raw == 'NOT_AVAILABLE':
-        # NTP-only: use chrony tracking without PHC
-        if sys_time_m and root_delay_m and root_disp_m:
-            sys_time = float(sys_time_m.group(1))
-            root_delay = float(root_delay_m.group(1))
-            root_disp = float(root_disp_m.group(1))
-            bound_s = sys_time + (0.5 * root_delay) + root_disp
-            bound_us = bound_s * 1e6
-            print(f'±{bound_us:.1f}µs (no PHC)')
-        else:
-            print('N/A')
-    else:
-        print('N/A')
-else:
-    print('N/A')
-"
-}
-
 SYNC1=$(parse_sync "$OUTPUT1")
 SYNC2=$(parse_sync "$OUTPUT2")
 CLIENT1=$(parse_client_output "$OUTPUT1")
 CLIENT2=$(parse_client_output "$OUTPUT2")
-CHRONY1=$(parse_chrony_error_bound "$OUTPUT1")
-CHRONY2=$(parse_chrony_error_bound "$OUTPUT2")
 
 # ── Display summary ──────────────────────────────────────────────────────────
 DISPLAY_REGION="${REGION:-$(aws configure get region 2>/dev/null || echo 'unknown')}"
 
 printf "\n"
 printf "Region: %s\n\n" "$DISPLAY_REGION"
-printf "╔══════════════════════╦══════════════════╦═══════════╦═════════════════════╦═════════════════════╗\n"
-printf "║ %-20s ║ %-16s ║ %-9s ║ %-19s ║ %-19s ║\n" "Instance ID" "Instance Type" "Sync" "ClockBound" "Chrony+PHC"
-printf "╠══════════════════════╬══════════════════╬═══════════╬═════════════════════╬═════════════════════╣\n"
-printf "║ %-20s ║ %-16s ║ %-9s ║ %-19s ║ %-19s ║\n" "$INSTANCE1_ID" "$INSTANCE1_TYPE" "$SYNC1" "$CLIENT1" "$CHRONY1"
-printf "║ %-20s ║ %-16s ║ %-9s ║ %-19s ║ %-19s ║\n" "$INSTANCE2_ID" "$INSTANCE2_TYPE" "$SYNC2" "$CLIENT2" "$CHRONY2"
-printf "╚══════════════════════╩══════════════════╩═══════════╩═════════════════════╩═════════════════════╝\n"
+printf "╔══════════════════════╦══════════════════╦═══════════╦═════════════════════╗\n"
+printf "║ %-20s ║ %-16s ║ %-9s ║ %-19s ║\n" "Instance ID" "Instance Type" "Sync" "ClockBound"
+printf "╠══════════════════════╬══════════════════╬═══════════╬═════════════════════╣\n"
+printf "║ %-20s ║ %-16s ║ %-9s ║ %-19s ║\n" "$INSTANCE1_ID" "$INSTANCE1_TYPE" "$SYNC1" "$CLIENT1"
+printf "║ %-20s ║ %-16s ║ %-9s ║ %-19s ║\n" "$INSTANCE2_ID" "$INSTANCE2_TYPE" "$SYNC2" "$CLIENT2"
+printf "╚══════════════════════╩══════════════════╩═══════════╩═════════════════════╝\n"
 
 DASHBOARD_URL=$(get_output "DashboardUrl")
 if [[ -n "$DASHBOARD_URL" && "$DASHBOARD_URL" != "None" ]]; then

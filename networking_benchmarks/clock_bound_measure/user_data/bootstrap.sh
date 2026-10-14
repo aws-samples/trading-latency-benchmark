@@ -81,11 +81,6 @@ if [[ -n "$PHC_INDEX" && "$PHC_INDEX" != "none" ]] && [[ "$PHC_INDEX" -ge 0 ]] 2
     if [[ -c "/dev/ptp${PHC_INDEX}" ]]; then
         SYNC_MECHANISM="PTP"
         echo "PTP Hardware Clock detected: /dev/ptp${PHC_INDEX}"
-
-        # Configure chrony to use PHC as preferred reference clock
-        echo "refclock PHC /dev/ptp${PHC_INDEX} poll 0 delay 0.000010 prefer" >> /etc/chrony.conf
-        systemctl restart chronyd
-        echo "Configured chrony with PHC /dev/ptp${PHC_INDEX} as preferred refclock"
     fi
 else
     echo "No PTP Hardware Clock available, using NTP"
@@ -111,16 +106,20 @@ for attempt in $(seq 1 12); do
 done
 [[ "$DNF_OK" == "true" ]] || { echo "ERROR: dnf install failed after 12 attempts"; exit 1; }
 
+# Pinned to the 3.0.0-beta.0 release so builds and measurements are reproducible.
+CLOCKBOUND_REF=526b8a89d2a8b8ac461a3ab61cadc8c93d48a479
 cd /opt/clock-bound
 git clone https://github.com/aws/clock-bound.git repo
 cd repo
+git checkout --detach "$CLOCKBOUND_REF"
 cargo build --release -p clock-bound --features daemon
 cp target/release/clockbound /usr/local/bin/clockbound
 
 cat > /etc/systemd/system/clockbound.service <<'UNIT'
 [Unit]
 Description=ClockBound Daemon
-After=network.target
+After=network.target chronyd.service
+Conflicts=chronyd.service
 
 [Service]
 ExecStart=/usr/local/bin/clockbound
@@ -132,6 +131,11 @@ WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
 
+# ClockBound v3 reads PHC/NTP/VMClock itself and disciplines the system clock;
+# chronyd would steer CLOCK_REALTIME concurrently, so it must not run
+# (Conflicts= in the unit stops it if anything starts it later).
+systemctl disable --now chronyd
+
 systemctl enable clockbound
 systemctl start clockbound
 echo "ClockBound daemon started"
@@ -142,18 +146,11 @@ if ! command -v cargo &>/dev/null; then
 fi
 
 # ── Step 5: Build example client ────────────────────────────────────────────
-cd /opt/clock-bound
-if [[ ! -d repo ]]; then
-    git clone https://github.com/aws/clock-bound.git repo
-fi
-cd repo/examples/client/rust
+cd /opt/clock-bound/repo/examples/client/rust
 cargo build --release 2>&1 | tail -5
 
-# Find the built binary — name varies by version
-CLIENT_BIN=$(find /opt/clock-bound/repo/target/release -maxdepth 1 -type f -executable \
-    ! -name "*.d" ! -name "*.so" ! -name "clockbound" \
-    | head -1)
-if [[ -n "$CLIENT_BIN" ]]; then
+CLIENT_BIN=/opt/clock-bound/repo/target/release/clock-bound-vmclock-client-example
+if [[ -x "$CLIENT_BIN" ]]; then
     cp "$CLIENT_BIN" /usr/local/bin/clock-bound-client
     echo "Client binary installed: $(basename $CLIENT_BIN)"
 else
