@@ -9,16 +9,16 @@ Automated deployment and measurement of [ClockBound](https://github.com/aws/cloc
 │  CDK Stack: ClockBoundMeasureStack                               │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
-│  │  VPC (10.60.0.0/16) — 2 AZs                               │  │
+│  │  VPC (10.60.0.0/16) — 2 AZs                                │  │
 │  │                                                            │  │
-│  │  ┌─────────────────────┐    ┌─────────────────────┐       │  │
-│  │  │  Instance 1          │    │  Instance 2          │       │  │
-│  │  │  (configurable type) │    │  (configurable type) │       │  │
-│  │  │                      │    │                      │       │  │
-│  │  │  ENA + PHC detection │    │  ENA + PHC detection │       │  │
-│  │  │  ClockBound daemon   │    │  ClockBound daemon   │       │  │
-│  │  │  Example client      │    │  Example client      │       │  │
-│  │  └─────────────────────┘    └─────────────────────┘       │  │
+│  │  ┌─────────────────────┐    ┌─────────────────────┐        │  │
+│  │  │  Instance 1 (PTPG)  │    │  Instance 2         │        │  │
+│  │  │  (Gen7+, PTP)       │    │  (configurable type)│        │  │
+│  │  │                     │    │                     │        │  │
+│  │  │  ENA + PHC detection│    │  ENA + PHC detection│        │  │
+│  │  │  ClockBound daemon  │    │  ClockBound daemon  │        │  │
+│  │  │  Example client     │    │  Example client     │        │  │
+│  │  └─────────────────────┘    └─────────────────────┘        │  │
 │  │                                                            │  │
 │  │  NAT Gateway (outbound: GitHub, rustup)                    │  │
 │  └────────────────────────────────────────────────────────────┘  │
@@ -44,23 +44,14 @@ On first boot, each instance executes `user_data/bootstrap.sh`:
 2. PTP Detection:
    ├── ENA driver? → enable phc_enable=1 (modprobe.d + reload)
    ├── /dev/ptpN exists? → SYNC_MECHANISM=PTP
-   │   └── Configure chrony: refclock PHC /dev/ptpN poll 0 delay 0.000010 prefer
    └── No PHC? → SYNC_MECHANISM=NTP
-3. Install ClockBound daemon: build from source
-   (cargo build --release --features daemon; RPM install is a future TODO)
+3. Install ClockBound daemon: build from source, disable chronyd, start clockbound
+   (pinned to 3.0.0-beta.0; cargo build --release --features daemon; RPM install is a future TODO)
 4. Install Rust toolchain (if not present)
 5. Build example client (examples/client/rust)
 6. CloudWatch publisher: pip install boto3, write and start clockbound-metrics.service
 7. Write /opt/clock-bound/status.json
 ```
-
-When PTP is detected, chrony is configured with the PHC as a preferred reference clock per [AWS documentation](https://aws.amazon.com/blogs/compute/its-about-time-microsecond-accurate-clocks-on-amazon-ec2-instances/):
-
-```bash
-refclock PHC /dev/ptp0 poll 0 delay 0.000010 prefer
-```
-
-This gives chrony direct PTP access with ±5µs delay accounting for OS latency, enabling the tightest possible synchronization.
 
 ## ClockBound Integration
 
@@ -74,24 +65,34 @@ ClockBound reports a **deterministic error bound** — not a statistical estimat
 
 True time is guaranteed to exist within this interval. This differs from standard deviation (which only gives probabilistic coverage).
 
+### Pinned Version
+
+`bootstrap.sh` builds ClockBound from the
+[`3.0.0-beta.0`](https://github.com/aws/clock-bound/releases/tag/3.0.0-beta.0) release,
+pinned to commit
+[`526b8a8`](https://github.com/aws/clock-bound/commit/526b8a89d2a8b8ac461a3ab61cadc8c93d48a479)
+(`CLOCKBOUND_REF`). All results below were measured on that commit. To try another
+release, change `CLOCKBOUND_REF`; the example client binary name
+(`clock-bound-vmclock-client-example`) and the shm1 protocol may differ between releases.
+
 ### ClockBound 3.0 Feed-Forward Algorithm
 
-Version 3.0.0-alpha.1 replaces chrony-based synchronization with a built-in feed-forward clock discipline:
+Version 3.0.0 replaces chrony-based synchronization with a built-in feed-forward clock discipline:
 
 - **Auto-detects** available time sources (PHC, NTP, VMClock)
-- **Disciplines the system clock** directly — no chrony dependency
+- **Disciplines the system clock** directly — `chronyd` is disabled (and `Conflicts=` in the unit) so only one daemon steers `CLOCK_REALTIME`
 - **Reports bounds via shared memory** — 13-14M reads/sec, no syscall overhead
-- **More conservative bounds** than chrony+PHC formula — accounts for TSC drift between samples
+- **Accounts for TSC drift** between samples in the reported bound
 
 ### PTP vs NTP — Measured Results
 
-| Instance Type | Sync | ClockBound | Chrony+PHC Formula | Throughput |
-|---------------|------|------------|-------------------|------------|
-| m7i.4xlarge | PTP | ±63–78µs | ±25–34µs | ~14M calls/sec |
-| m5.4xlarge | NTP | ±1391–1448µs | N/A | ~11M calls/sec |
-| c6in.4xlarge | NTP | ±1422–1744µs | N/A | ~13M calls/sec |
+| Instance Type | Sync | ClockBound | Throughput |
+|---------------|------|------------|------------|
+| m7i.4xlarge (PTPG) | PTP | ±30–36µs | ~14M calls/sec |
+| m5.4xlarge | NTP | ±677–691µs | ~11M calls/sec |
 
-PTP delivers **~20x tighter bounds** than NTP. The Chrony+PHC formula confirms the AWS blog's "under 40µs" claim for PTP-enabled instances.
+PTP delivers **~20x tighter bounds** than NTP. Measured 2026-10-14 in us-east-1 with
+`chronyd` disabled; the placement group made no measurable difference to the bound.
 
 ### PTP-Capable Instance Families
 
@@ -101,6 +102,9 @@ PHC support requires:
 - **Supported regions:** us-east-1, us-east-2, us-west-2, ap-northeast-1, eu-north-1, and others
 
 The bootstrap script auto-detects PHC availability at runtime — no configuration needed.
+
+Instance 1 launches into a precision-time placement group (`Strategy: precision-time`),
+so `InstanceType1` must be a Gen7+ precision-time-capable type (default `m7i.4xlarge`).
 
 ## Usage
 
@@ -156,10 +160,9 @@ Both carry a single `InstanceId` dimension. `SyncMechanism` is deliberately not 
 dimension: CloudWatch alarms require an exact dimension set and cannot alarm on
 `SEARCH()`, and PTP-vs-NTP is not resolved until the instance boots.
 
-These are ClockBound's own numbers, not the chrony formula — ClockBound 3.x already
-folds the Nitro `phc_error_bound` sysfs value into its bound, and models
-feed-forward drift between updates, which chrony does not. See
-[Understanding the Two Error Bound Measurements](#understanding-the-two-error-bound-measurements).
+These are ClockBound's own numbers — ClockBound 3.x already folds the Nitro
+`phc_error_bound` sysfs value into its bound, and models feed-forward drift
+between updates.
 
 Four alarms, all evaluating one 60-second period on `Maximum`:
 
@@ -234,29 +237,6 @@ npx cdk destroy -c region=us-east-1
 
 ## Troubleshooting
 
-### Understanding the Two Error Bound Measurements
-
-The `run_clock_bound.sh` script reports two different error bounds:
-
-| Column | Source | Typical PTP Value | What It Means |
-|--------|--------|-------------------|---------------|
-| **ClockBound** | ClockBound 3.0 daemon | ±63–78µs | Conservative bound including TSC drift modeling |
-| **Chrony+PHC** | Blog formula | ±25–34µs | `SYSTEM_TIME + 0.5*ROOT_DELAY + ROOT_DISPERSION + PHC_ERROR_BOUND` |
-
-ClockBound 3.0's feed-forward algorithm reports wider bounds because it models TSC frequency drift between PHC polling intervals — uncertainty that chrony ignores. Both are valid; ClockBound is more conservative.
-
-To validate the chrony-based calculation manually:
-```bash
-# PHC error bound from Nitro sysfs (nanoseconds):
-PCI=$(cat /sys/class/net/<iface>/device/uevent | grep PCI_SLOT_NAME | cut -d= -f2)
-cat /sys/bus/pci/devices/$PCI/phc_error_bound
-
-# Chrony tracking values (System time, Root delay, Root dispersion):
-chronyc tracking
-```
-
-Reference: [AWS Blog — Measuring your clock accuracy](https://aws.amazon.com/blogs/compute/its-about-time-microsecond-accurate-clocks-on-amazon-ec2-instances/)
-
 ### PTP Not Detected on Expected Instance Type
 
 **Problem:** Instance reports `sync_mechanism: NTP` despite being a PTP-capable type.
@@ -272,9 +252,6 @@ ls /dev/ptp*
 
 # Verify ENA driver version (needs ≥ 2.10.0):
 modinfo ena | grep version
-
-# Verify chrony is using PHC:
-chronyc sources    # Should show #* PHC0
 ```
 
 **Common causes:**

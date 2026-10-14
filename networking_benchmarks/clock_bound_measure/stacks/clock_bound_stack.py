@@ -27,15 +27,18 @@ class ClockBoundMeasureStack(Stack):
             self,
             "InstanceType1",
             type="String",
-            default="c6in.4xlarge",
-            description="Instance type for the first EC2 instance",
+            default="m7i.4xlarge",
+            description="Instance type for the first (PTP) EC2 instance; must be Gen7+ precision-time capable",
+            # Rejects pre-Gen7 types (e.g. c6in, m5) before any resource is created.
+            allowed_pattern=r"^[a-z]+[7-9][a-z0-9-]*\.[a-z0-9-]+$",
+            constraint_description="must be a Gen7+ instance type (precision-time placement group)",
         )
 
         instance_type_2 = CfnParameter(
             self,
             "InstanceType2",
             type="String",
-            default="c6in.4xlarge",
+            default="m5.4xlarge",
             description="Instance type for the second EC2 instance",
         )
 
@@ -159,6 +162,9 @@ class ClockBoundMeasureStack(Stack):
             ],
         )
         instance1.apply_removal_policy(RemovalPolicy.DESTROY)
+        # L2 PlacementGroupStrategy has no precision-time, so use the L1 resource.
+        ptpg = ec2.CfnPlacementGroup(self, "PrecisionTimePG", strategy="precision-time")
+        instance1.instance.placement_group_name = ptpg.ref
         Tags.of(instance1).add("Name", "ClockBound-1")
         Tags.of(instance1).add("Project", "clock-bound-measure")
 
