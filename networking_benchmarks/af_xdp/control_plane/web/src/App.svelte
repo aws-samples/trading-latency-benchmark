@@ -4,7 +4,7 @@
   import { mountTopology3D } from './lib/topology3d.js';
   import { createLive, runCampaign, cancelCampaign } from './lib/live.js';
   import { mountControls } from './lib/controls.js';
-  import { buildCombinedReportBody, buildCombinedReportHTML, REPORT_CSS, reportInteractions } from './lib/report-combined.js';
+  import { buildCombinedReportBody, buildCombinedReportHTML, fetchWanderByRun, REPORT_CSS, reportInteractions } from './lib/report-combined.js';
   import { prunedTargets, countPairs, SCOPE_AMONG, SCOPE_FANOUT, resolvePreset } from './lib/pairs.js';
 
   let container;        // viz host (wiped on remount)
@@ -136,7 +136,7 @@
     const dt = new Date();
     const stamp = `${dt.getFullYear()}${p2(dt.getMonth() + 1)}${p2(dt.getDate())}`
       + `-${p2(dt.getHours())}${p2(dt.getMinutes())}${p2(dt.getSeconds())}`;
-    const doc = buildCombinedReportHTML(measurementRows, mcastReplicatorResults, panel?.timezone?.() || '')
+    const doc = (await buildCombinedReportHTML(measurementRows, mcastReplicatorResults, panel?.timezone?.() || ''))
       .replace(/<title>[^<]*<\/title>/, `<title>latency-report-${kinds}-${stamp}</title>`)
       .replace('</head>', `<style>
         @page { size: landscape; margin: 0; }
@@ -217,9 +217,12 @@
     Promise.all([
       fetchMeasurements(reportKindFilter()),
       fetchMcastReplicatorResults(!reportKinds.length || reportKinds.includes('mcast')),
-    ]).then(([measurementRows, mcastReplicatorResults]) => {
+    ]).then(async ([measurementRows, mcastReplicatorResults]) => {
       if (!reportOverlayOpen || !reportOverlayEl) return; // closed while the fetch was in flight
-      const body = buildCombinedReportBody(measurementRows, mcastReplicatorResults, panel?.timezone?.() || '', { showRefresh: true });
+      const wanderByRun = await fetchWanderByRun(measurementRows, mcastReplicatorResults);
+      if (!reportOverlayOpen || !reportOverlayEl) return; // closed while the wander fetch was in flight
+      const body = buildCombinedReportBody(measurementRows, mcastReplicatorResults, panel?.timezone?.() || '',
+        { showRefresh: true, wanderByRun });
       const contentEl = reportOverlayEl.querySelector('.report-content');
       if (contentEl) {
         contentEl.innerHTML = body;

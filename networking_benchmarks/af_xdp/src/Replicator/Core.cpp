@@ -158,7 +158,21 @@ Replicator& Replicator::operator=(Replicator&& other) noexcept {
 void Replicator::start() {
     if (!running_.exchange(true)) {
         std::cout << "Starting HFT-optimized Replicator..." << std::endl;
-        
+
+        if (kernelFwdActive()) {
+            // kernel fwd mode: one thread, one plain UDP socket — no per-queue
+            // AF_XDP busy-poll threads to spawn. Still pin it to the first
+            // assigned core so it gets the same isolated-CPU treatment as the
+            // AF_XDP poll threads (initializeCpuCores() already picked the pool).
+            packet_processor_threads_.resize(1);
+            packet_processor_threads_[0] = std::make_unique<std::thread>(
+                [this]() { this->processMcastKernelRx(); }
+            );
+            if (!cpu_cores_.empty()) {
+                setCpuAffinity(*packet_processor_threads_[0], cpu_cores_[0]);
+            }
+            std::cout << "Started kernel fwd-mode RX thread" << std::endl;
+        } else {
         // Start packet processing threads for each queue
         packet_processor_threads_.resize(num_queues_);
         for (int queue_id = 0; queue_id < num_queues_; queue_id++) {
@@ -172,6 +186,7 @@ void Replicator::start() {
             }
             
             std::cout << "Started HFT-optimized packet processing thread for queue " << queue_id << std::endl;
+        }
         }
         
         // Publish the fan-out snapshot off the packet threads: rebuilding it inline
@@ -254,8 +269,15 @@ void Replicator::stop() {
             all_destinations_.clear();
         }
 
-        // Unload XDP program
-        XdpSocket::unloadXdpProgram(listen_interface_, true);
+        if (kernel_rx_socket_ >= 0) {
+            ::close(kernel_rx_socket_);
+            kernel_rx_socket_ = -1;
+        }
+
+        // kernel fwd mode never loaded an XDP program — nothing to unload.
+        if (!kernelFwdActive()) {
+            XdpSocket::unloadXdpProgram(listen_interface_, true);
+        }
         
         std::cout << "Replicator stopped" << std::endl;
     }

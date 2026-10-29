@@ -59,10 +59,10 @@
       group: ec2-user
       mode: 0755
     loop:
-      - { src: ../run_client.sh, dest: /home/ec2-user/run_client.sh }
-      - { src: ../run_server.sh, dest: /home/ec2-user/run_server.sh }
-      - { src: ../stop.sh, dest: /home/ec2-user/stop.sh }
-      - { src: ../latency_report.sh, dest: /home/ec2-user/latency_report.sh }
+      - { src: ../scripts/run_client.sh, dest: /home/ec2-user/run_client.sh }
+      - { src: ../scripts/run_server.sh, dest: /home/ec2-user/run_server.sh }
+      - { src: ../scripts/stop.sh, dest: /home/ec2-user/stop.sh }
+      - { src: ../scripts/latency_report.sh, dest: /home/ec2-user/latency_report.sh }
     tags:
       - deploy
 

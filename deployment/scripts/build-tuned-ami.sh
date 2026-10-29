@@ -16,7 +16,7 @@ REGION="${AWS_REGION:-us-east-1}"
 AMI_NAME_PREFIX="trading-benchmark-tuned"
 CLEANUP="${CLEANUP:-true}"
 MAX_WAIT_TIME=600  # 10 minutes
-ANSIBLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/ansible" && pwd)"
+ANSIBLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../ansible" && pwd)"
 
 # Color output
 RED='\033[0;31m'
@@ -123,7 +123,7 @@ echo -e "${GREEN}======================================================${NC}"
 
 # Step 1: Deploy CDK stack
 echo -e "\n${YELLOW}[Step 1/7] Deploying CDK stack...${NC}"
-cd "$(dirname "${BASH_SOURCE[0]}")/cdk"
+cd "$(dirname "${BASH_SOURCE[0]}")/../cdk"
 
 # Check if node_modules exists, if not run npm install
 if [ ! -d "node_modules" ]; then
@@ -401,7 +401,7 @@ if [ "$CLEANUP" == "true" ]; then
     }
 
     # Clean up output file
-    CDK_DIR="$(dirname "${BASH_SOURCE[0]}")/cdk"
+    CDK_DIR="$(dirname "${BASH_SOURCE[0]}")/../cdk"
     rm -f "$CDK_DIR/ami-builder-outputs.json"
 
     echo -e "${GREEN}Cleanup completed${NC}"
@@ -431,7 +431,7 @@ echo "  MachineImage.genericLinux({ '$REGION': '$AMI_ID' })"
 echo -e "${GREEN}======================================================${NC}"
 
 # Save AMI ID to a file for easy reference
-AMI_INFO_FILE="$(dirname "${BASH_SOURCE[0]}")/ami-builder-latest.txt"
+AMI_INFO_FILE="$(dirname "${BASH_SOURCE[0]}")/../ami-builder-latest.txt"
 cat > "$AMI_INFO_FILE" << EOF
 AMI_ID=$AMI_ID
 AMI_NAME=$AMI_NAME

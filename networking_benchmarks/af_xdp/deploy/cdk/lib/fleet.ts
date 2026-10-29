@@ -20,17 +20,19 @@ import {
 } from 'aws-cdk-lib/aws-ec2';
 import { Tags, RemovalPolicy } from 'aws-cdk-lib';
 
-// DEFAULT is c7i.4xlarge = 16 vCPU / 8 physical cores (nosmt -> 8 online).
-// MULTICAST: each node runs a single busy-poll app so it needs only 3
-// dedicated cores (OS, ENA IRQ, app). UNICAST is heavier: the sender co-locates
-// the replicator poll thread AND the rtt sender AND the rtt receiver, and each
-// wants its own physical core alongside OS + a SEPARATE ENA-IRQ core (keeping the
-// IRQ off the poll core avoids the tail jitter that hit --xdp-tx) = 5 cores.
-// One AMI serves both: core pinning is derived
-// dynamically at runtime from the isolated set (bake-ami.sh isolcpus, the
-// replicator's initializeCpuCores, and run_ucast.yaml auto_pin), so it adapts to
-// whatever instance a scenario deploys — 4xlarge -> metal.
-const DEFAULT_INSTANCE_TYPE = 'c7i.4xlarge';
+// DEFAULT is m8a.2xlarge = 8 vCPU / 8 physical cores (AMD, no SMT -> all 8
+// online). MULTICAST: each node runs a
+// single busy-poll app so it needs only 3 dedicated cores (OS, ENA IRQ, app).
+// UNICAST is heavier: the sender co-locates the replicator poll thread AND the
+// rtt sender AND the rtt receiver, and each wants its own physical core
+// alongside OS + a SEPARATE ENA-IRQ core (keeping the IRQ off the poll core
+// avoids the tail jitter that hit --xdp-tx) = 5 cores. One AMI serves both:
+// core pinning is derived dynamically at runtime from the isolated set
+// (bake-ami.sh isolcpus, the replicator's initializeCpuCores, and
+// run_ucast.yaml auto_pin), so it adapts to whatever instance a scenario
+// deploys — 2xlarge -> metal, Intel -> AMD (see Makefile's -march=x86-64-v3,
+// which keeps the built binary portable across both vendor families).
+const DEFAULT_INSTANCE_TYPE = 'm8a.2xlarge';
 const DEFAULT_ROLE = 'destination';
 const DEFAULT_PRIMARY_CIDR = '10.61.0.0/16';
 const DEFAULT_SECONDARY_CIDR = '10.62.0.0/16';
@@ -46,7 +48,7 @@ export type Tenancy = 'shared' | 'instance' | 'host';
 
 /** A single node in the fleet specification. */
 export interface FleetEntry {
-  /** EC2 instance type. Default: c7i.4xlarge */
+  /** EC2 instance type. Default: m8a.2xlarge */
   type?: string;
   /** Number of instances. Default: 1 */
   count?: number;
@@ -62,10 +64,10 @@ export interface FleetEntry {
    *  Entries whose region differs from the primary become a second stack. */
   region?: string;
   /** EC2 tenancy: "shared" (default), "instance" (Dedicated Instance -
-   *  single-tenant hardware isolation, no placement control/guarantee - see
-   *  dev/roadmap for the latency-impact writeup), or "host" (Dedicated Host -
-   *  pinned physical server; every entry sharing the same (type, AZ) is
-   *  allocated onto the same host, capacity permitting). */
+   *  single-tenant hardware isolation, no placement control/guarantee), or
+   *  "host" (Dedicated Host - pinned physical server; every entry sharing
+   *  the same (type, AZ) is allocated onto the same host, capacity
+   *  permitting). */
   tenancy?: Tenancy;
   /** Target a Dedicated Host instead of letting this stack allocate a fresh
    *  one per (type, AZ). Two forms:
@@ -113,6 +115,11 @@ export interface FleetStackProps extends cdk.StackProps {
   /** Region where the control-plane publishes /af-xdp/nats-url. Set on
    *  secondary stacks so user-data replicates the params locally. */
   controlPlaneRegion?: string;
+  /** CIDR allowed to SSH into fleet nodes. Omitted: SSH is open to
+   *  0.0.0.0/0 - only rely on that fallback for throwaway/local testing.
+   *  `afxdpctl up` always supplies this (auto-detected caller IP by
+   *  default), so it is unset only when the CDK app is invoked directly. */
+  adminCidr?: string;
 }
 
 /** Resolve an AZ spec ("a" | "us-east-1a" | undefined) to a full AZ name. */
@@ -275,7 +282,11 @@ export class FleetStack extends cdk.Stack {
       allowAllOutbound: true,
     });
     sg.applyRemovalPolicy(RemovalPolicy.DESTROY);
-    sg.addIngressRule(Peer.anyIpv4(), Port.tcp(22), 'SSH');
+    if (props.adminCidr) {
+      sg.addIngressRule(Peer.ipv4(props.adminCidr), Port.tcp(22), 'SSH (admin)');
+    } else {
+      sg.addIngressRule(Peer.anyIpv4(), Port.tcp(22), 'SSH');
+    }
     sg.addIngressRule(sg, Port.allTraffic(), 'All intra-group traffic');
     if (props.peerVpcCidr) {
       // Mirror the intra-group allowance for the peer VPC. An SG self-reference
@@ -413,9 +424,8 @@ export class FleetStack extends cdk.Stack {
         if (tenancy === 'instance') {
           // Dedicated Instance: single-tenant hardware, isolated from other
           // AWS accounts. No placement visibility/control and no host
-          // affinity - see dev/roadmap for the full writeup. Compatible with
-          // cluster/partition placement groups (validated above), billed
-          // per-instance.
+          // affinity. Compatible with cluster/partition placement groups
+          // (validated above), billed per-instance.
           (inst.node.defaultChild as ec2.CfnInstance).tenancy = 'dedicated';
         } else if (tenancy === 'host') {
           // Dedicated Host: pinned to a specific physical server, so two

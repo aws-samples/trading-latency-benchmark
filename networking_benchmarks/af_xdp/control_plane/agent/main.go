@@ -136,14 +136,49 @@ func (a *agent) onCommand(m *nats.Msg) {
 }
 
 func (a *agent) handleCommand(c proto.Command) {
-	// Read-only status queries answer WITHOUT taking execMu. They touch no shared
-	// state and need no AF_XDP queue, and the command they report on is itself
-	// holding the lock: CmdMcastReceive blocks for the whole receive, so a probe
-	// that waited for the lock could never be answered while it mattered.
+	// Read-only status queries, and the wander sampler's start/stop, answer
+	// WITHOUT taking execMu. The wander sampler is deliberately concurrent
+	// with whatever traffic command (e.g. CmdMcastReceive) is running for the
+	// same campaign — wander-sampler-lifecycle-design.md §2.2/§3 requires it
+	// to span that command's settle+run window, not follow it. Serializing
+	// wander_start/wander_stop behind execMu would block them until the
+	// traffic command they're supposed to overlap has already finished.
+	// StartWander/StopWander have their own internal lock (wanderMu) so this
+	// is safe without execMu's broader serialization.
 	if c.Type == proto.CmdMcastRxReady {
 		res := proto.CommandResult{CmdID: c.CmdID, InstanceID: a.node.InstanceID, OK: true}
 		if !a.run.McastRxReady() {
 			res.Fail("mcast_receive not listening yet")
+		}
+		a.publish(proto.SubjectResult(a.node.InstanceID), res)
+		return
+	}
+	if c.Type == proto.CmdWanderStart || c.Type == proto.CmdWanderStop {
+		res := proto.CommandResult{CmdID: c.CmdID, InstanceID: a.node.InstanceID, OK: true}
+		if c.Type == proto.CmdWanderStart {
+			seconds := 0
+			if c.Wander != nil {
+				seconds = c.Wander.Seconds
+			}
+			res.SetErr(a.run.StartWander(seconds))
+			// G4/G5 window-START evidence (wander-band-design.md §5), read
+			// regardless of whether StartWander itself succeeded - a failed
+			// sampler start is still useful to correlate against a bad
+			// refclock/counter state. Best-effort: PhcCounters/
+			// RefclockSelected return nil/err on a node that can't answer
+			// them, and the gates themselves (not implemented on the agent
+			// side) treat that as "cannot verify", not a false pass.
+			res.PhcCounters = a.run.PhcCounters()
+			if sel, err := a.run.RefclockSelected(); err == nil {
+				res.RefclockPhcSelected = &sel
+			}
+		} else {
+			csv, err := a.run.StopWander()
+			res.SetErr(err)
+			res.WanderCSV = csv
+			// G4 window-END counters, so the caller can diff against the
+			// wander_start snapshot without a third round trip.
+			res.PhcCounters = a.run.PhcCounters()
 		}
 		a.publish(proto.SubjectResult(a.node.InstanceID), res)
 		return
@@ -236,6 +271,8 @@ func (a *agent) handleCommand(c proto.Command) {
 		} else {
 			res.SetErr(a.run.RunMcastSend(*c.Mcast))
 		}
+	case proto.CmdNicTuning:
+		res.NicTuning = a.run.NicTuning()
 	default:
 		res.Fail("unknown command type: " + string(c.Type))
 	}

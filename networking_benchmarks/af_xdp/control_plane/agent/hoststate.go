@@ -38,7 +38,7 @@ const replicatorEnvFile = "/etc/default/replicator"
 // hostState is the observed local configuration.
 type hostState struct {
 	svcActive   bool   // replicator.service is active
-	mode        string // REPLICATOR_MODE (ucast|mcast|kernel)
+	mode        string // REPLICATOR_MODE (ucast|mcast|echo)
 	fwd         string // REPLICATOR_FWD_MODE ("" == copy)
 	xdpAttached bool   // any XDP program on the data interface
 	standalone  bool   // that program was attached by us, not by the replicator

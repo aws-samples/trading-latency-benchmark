@@ -60,7 +60,7 @@ Single-stack AMI builder. Launches a temporary instance, runs `bake-ami.sh` via 
 **Defaults:**
 | Parameter | Default |
 |-----------|---------|
-| `instanceType` | `c7i.xlarge` |
+| `instanceType` | `m8a.2xlarge` |
 | `gitRepo` | `https://github.com/aws-samples/trading-latency-benchmark.git` |
 | `gitRef` | `main` |
 

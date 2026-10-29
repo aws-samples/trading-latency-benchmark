@@ -8,16 +8,16 @@ plugin: amazon.aws.aws_ec2
 # Region(s) are determined by environment variables — set them to match your
 # CDK deploy context rather than hardcoding:
 #
-#   AWS_DEFAULT_REGION   — primary fleet region (required; e.g. eu-central-1)
+#   AWS_DEFAULT_REGION   — primary fleet region (required; e.g. ap-northeast-1)
 #   AWS_SECONDARY_REGION — second region for cross-region topologies (optional)
 #
 # The secondary region is supported via a companion inventory file:
 #   ansible-playbook -i inventory.aws_ec2.yml [-i inventory_secondary.aws_ec2.yml] ...
 #
 # For a single-region fleet (the common case):
-#   AWS_DEFAULT_REGION=eu-central-1 ansible-playbook -i inventory.aws_ec2.yml sync.yaml
+#   AWS_DEFAULT_REGION=ap-northeast-1 ansible-playbook -i inventory.aws_ec2.yml sync.yaml
 regions:
-  - "{{ lookup('env', 'AWS_DEFAULT_REGION') | default('us-east-1', true) }}"
+  - "{{ lookup('env', 'AWS_DEFAULT_REGION') | default('ap-northeast-1', true) }}"
 
 include_filters:
   - tag:Role:

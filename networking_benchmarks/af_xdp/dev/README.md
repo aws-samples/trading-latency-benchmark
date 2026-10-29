@@ -7,6 +7,8 @@ Developer iteration tooling - separate from production `deploy/`. Used to build,
 ```
 dev/
 ├── Dockerfile              Local build + test harness (mirrors the AMI bake)
+├── roadmap/                Local planning - GITIGNORED, not in the repo
+│   └── fix.md                  Running log of defects, root causes, and fixes
 └── ansible/                Dev playbooks + shared-inventory symlink
     ├── sync.yaml           rsync local source → fleet EC2s + control-plane, rebuild, restart
     ├── ansible.cfg         Enables amazon.aws.aws_ec2 inventory plugin + disables SSH multiplexing
@@ -15,13 +17,20 @@ dev/
     └── inventory.aws_ec2.yml → symlink to ../../deploy/ansible/inventory.aws_ec2.yml
 ```
 
+## A note on `roadmap/`
+
+`dev/roadmap/` is gitignored and not part of a fresh clone. Some source
+comments cite it as background for a fix; those citations are internal
+breadcrumbs, not followable links. `tools/README.md` and
+`deploy/cdk/scripts/README.md` summarise the relevant conclusions.
+
 ## Recommended: `afxdpctl sync`
 
 The `afxdpctl` CLI (at `control_plane/cmd/afxdpctl`) wraps the dev ansible for the common hot-deploy case:
 
 ```bash
 # Hot-deploy local code to all fleet nodes (rsync → make → agent rebuild → restart):
-afxdpctl sync --key ~/.ssh/virginia.pem --region us-east-1
+afxdpctl sync --key ~/.ssh/frankfurt.pem --region eu-central-1
 ```
 
 This is equivalent to running `ansible-playbook sync.yaml` but handles env vars and paths for you.
@@ -51,10 +60,11 @@ Run from `dev/ansible/` (the inventory is symlinked here). Requires `SSH_KEY_FIL
 ### Prerequisites
 
 ```bash
-export SSH_KEY_FILE=~/.ssh/virginia.pem
-export AWS_DEFAULT_REGION=us-east-1
+export SSH_KEY_FILE=~/.ssh/frankfurt.pem
+export AWS_DEFAULT_REGION=eu-central-1
 # For cross-region:
-export SSH_KEY_FILE_SECONDARY=~/.ssh/london.pem
+export SSH_KEY_FILE_SECONDARY=~/.ssh/ireland.pem
+export AWS_SECONDARY_REGION=eu-west-1
 ```
 
 A fleet must be running and tagged by `Role` (deployed via CDK or manually tagged).
@@ -134,6 +144,19 @@ ansible-playbook -i inventory.aws_ec2.yml provision.yaml -e grub_reboot=false
 - Reboot for kernel cmdline + PHC activation
 - Verifies PHC active after reboot
 
+**Gap vs the baked AMI** - `provision.yaml` does not apply two settings that
+`bake-ami.sh` does, and both affect measurement validity:
+
+- `kernel.sched_rt_runtime_us = -1` (`/etc/sysctl.d/99-rt-sched.conf`) -
+  without it, RT bandwidth throttling can stall the `SCHED_FIFO` busy-poll
+  threads on `nohz_full` cores.
+- `chrony-force-sync.service`, which waits for clock sync before
+  `replicator.service`/`afxdp-agent.service` start - without it a benchmark
+  can start while the clock is still slewing, producing invalid one-way
+  numbers.
+
+Apply both by hand on a provisioned node, or prefer the baked AMI.
+
 ### run_tests.yaml - Run Integration Tests
 
 Runs the pytest suite on all fleet nodes in echo mode:
@@ -154,14 +177,25 @@ ansible-playbook -i inventory.aws_ec2.yml run_tests.yaml --limit replicator
 
 ### inventory.aws_ec2.yml
 
-Symlink to `../../deploy/ansible/inventory.aws_ec2.yml`. Uses the `amazon.aws.aws_ec2` plugin to discover fleet instances by `Role` tag across `us-east-1` and `eu-west-2`.
+Symlink to `../../deploy/ansible/inventory.aws_ec2.yml`. Uses the
+`amazon.aws.aws_ec2` plugin to discover instances by tag. The region is **not**
+hardcoded - it is read from `AWS_DEFAULT_REGION` (falling back to `us-east-1`
+only if that is unset), so it must match the region you deployed into. The
+current fleet is `eu-central-1` with `eu-west-1` as the cross-region secondary.
+
+Cross-region is not a second entry in this file: pass the companion inventory
+alongside it, `-i inventory.aws_ec2.yml -i inventory_secondary.aws_ec2.yml`,
+with `AWS_SECONDARY_REGION` and `SSH_KEY_FILE_SECONDARY` set.
 
 Groups:
 - `source` - Role=source
 - `replicator` - Role=replicator
 - `destination` - Role=destination
+- `control_plane` - matched by the `XdpStack-ControlPlane` CFN stack-name tag,
+  since the control-plane host carries no `Role` tag and would otherwise be
+  invisible to `sync.yaml`
 
-Auto-selects the SSH key per region (primary vs secondary).
+`ansible_ssh_private_key_file` comes from `SSH_KEY_FILE`.
 
 ## Typical Dev Loop
 
@@ -173,7 +207,7 @@ docker build --platform linux/amd64 -f dev/Dockerfile -t afxdp-test . && \
 docker run --rm --platform linux/amd64 afxdp-test
 
 # 3. Hot-deploy to fleet:
-afxdpctl sync --key ~/.ssh/virginia.pem
+afxdpctl sync --key ~/.ssh/frankfurt.pem --region eu-central-1
 
 # 4. Run tests:
 cd dev/ansible && ansible-playbook -i inventory.aws_ec2.yml run_tests.yaml
