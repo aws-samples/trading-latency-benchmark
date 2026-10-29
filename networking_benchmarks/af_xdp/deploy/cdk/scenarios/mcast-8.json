@@ -3,8 +3,8 @@
   {"az": "a", "pgType": "cluster", "pgName": "cpg-a", "role": "replicator"},
   {"az": "a", "pgType": "cluster", "pgName": "cpg-a", "role": "destination"},
   {"az": "a", "role": "replicator"},
-  {"az": "b", "role": "replicator"},
+  {"az": "d", "role": "replicator"},
   {"az": "a", "role": "destination"},
   {"az": "c", "role": "destination"},
-  {"region":"eu-west-2", "az": "a", "role": "destination"}
+  {"region": "ap-southeast-1", "az": "a", "role": "destination", "type": "c7a.2xlarge"}
 ]

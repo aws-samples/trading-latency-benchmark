@@ -286,10 +286,8 @@ Contents:
   was swept): one row per `(replicator, mode, destination)`, with the
   replicator's PG/AZ - a focused, pre-sorted, mcast-only view for scanning
   specifically for placement differences without the ucast rows/extra columns
-  from "All measurements" in the way. See
-  `dev/roadmap/mcast-replicator-selection.md` for the planned follow-up
-  (choosing a subset of replicators to run, instead of always sweeping all of
-  them).
+  from "All measurements" in the way. Choosing a subset of replicators to run
+  (instead of always sweeping all of them) is a planned follow-up.
 - `reportInteractions()` is serialised via `Function.prototype.toString` so the
   saved HTML is self-contained (no external imports).
 - **XLS export**: SpreadsheetML 2003 workbook, one worksheet per table, sheet

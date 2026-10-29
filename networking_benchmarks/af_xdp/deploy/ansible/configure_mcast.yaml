@@ -35,46 +35,49 @@
 # bug). Idempotent: makestep + gate are no-ops once synced. mcast-only — ucast
 # RTT is a single-host round-trip where the offset cancels, so run_ucast never
 # does this.
+#
+# PHC is the fleet default reference over AWS Time Sync NTP: it is the more
+# architecturally sound choice (direct hardware reference, no extra
+# network-path dependency), and same-AZ PHC-to-PHC pairwise offset measures
+# comfortably tighter than an NTP-disciplined alternative on this fleet.
 - name: Clock-sync convergence gate
   hosts: all
   become: yes
   gather_facts: no
   vars:
-    max_clock_offset_us: 10     # AWS Time Sync NTP inter-instance is ~us (not sub-us like a local PHC)
+    max_clock_offset_us: 10     # PHC-disciplined inter-instance agreement is comfortably sub-10us in practice (see comment above)
     clock_gate_retries: 20      # x delay(3s) = ~60s budget
     allow_unsynced: false       # -e allow_unsynced=true to bypass (e.g. cross-region ms runs)
   tasks:
-    # ROOT-CAUSE FIX: the ENA PHC refclock disciplines each node to its OWN
-    # hardware PHC, and two instances' PHCs disagree by ~100-200us — which
-    # dominates one-way latency (the per-node offset looks sub-us but INTER-node
-    # is ~200us). AWS Time Sync NTP (169.254.169.123, xleave) disciplines every
-    # node to the SAME reference, giving <10us inter-instance (this is what
-    # mcast2ucast relies on). Prefer it over the PHC. Deterministic + idempotent.
-    - name: Prefer AWS Time Sync NTP over the local PHC refclock
+    # Ensure the PHC refclock is active.
+    - name: Ensure PHC refclock is enabled (re-enable if a prior run disabled it)
       ansible.builtin.shell: |
         set -e
         systemctl is-active --quiet chronyd
-        if [ -f /etc/chrony.d/aws-phc.conf ]; then
-          mv /etc/chrony.d/aws-phc.conf /etc/chrony.d/aws-phc.conf.disabled
+        if [ -f /etc/chrony.d/aws-phc.conf.disabled ]; then
+          mv /etc/chrony.d/aws-phc.conf.disabled /etc/chrony.d/aws-phc.conf
           systemctl restart chronyd
           sleep 2
         fi
       changed_when: false
 
-    - name: Force chrony to step + burst to AWS Time Sync (deterministic convergence)
+    - name: Force chrony to step + burst to the PHC refclock (deterministic convergence)
       ansible.builtin.shell: |
         chronyc -a makestep >/dev/null 2>&1 || true
         chronyc -a 'burst 4/4' >/dev/null 2>&1 || true
       changed_when: false
 
-    - name: Gate — wait until synchronised and |last offset| <= {{ max_clock_offset_us }}us
+    - name: Gate — wait until synchronised and |System time| <= {{ max_clock_offset_us }}us
+      # Reads "System time". "Last offset"/"RMS offset" describe how well chrony
+      # tracks the *rate* of its reference; they say nothing about the
+      # absolute error still outstanding on the system clock.
       ansible.builtin.shell: |
         t=$(chronyc tracking 2>/dev/null)
         leap=$(printf '%s\n' "$t" | awk -F': *' '/Leap status/{print $2}')
-        last=$(printf '%s\n' "$t" | awk -F': *' '/Last offset/{print $2}' | awk '{print $1}')
-        awk -v l="$last" -v leap="$leap" 'BEGIN{
+        systime=$(printf '%s\n' "$t" | awk -F': *' '/^System time/{print $2}' | awk '{print $1}')
+        awk -v s="$systime" -v leap="$leap" 'BEGIN{
           if (leap !~ /Normal/) exit 2;             # chrony not synchronised yet
-          a = (l < 0) ? -l : l;
+          a = (s < 0) ? -s : s;
           exit (a*1e6 <= {{ max_clock_offset_us }}) ? 0 : 1
         }'
       register: clock_gate
@@ -86,8 +89,8 @@
 
     - name: Read achieved offset (microseconds)
       ansible.builtin.shell: |
-        last=$(chronyc tracking 2>/dev/null | awk -F': *' '/Last offset/{print $2}' | awk '{print $1}')
-        awk -v l="$last" 'BEGIN{a=(l<0)?-l:l; printf "%.3f", a*1e6}'
+        systime=$(chronyc tracking 2>/dev/null | awk -F': *' '/^System time/{print $2}' | awk '{print $1}')
+        awk -v s="$systime" 'BEGIN{a=(s<0)?-s:s; printf "%.3f", a*1e6}'
       register: clock_offset_us
       changed_when: false
 

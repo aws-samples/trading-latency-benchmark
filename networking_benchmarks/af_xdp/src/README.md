@@ -15,7 +15,7 @@ sub-microsecond timing resolution.
 | `Replicator/Internal.hpp` | Shared internal header for the `Replicator/*.cpp` units (common includes + debug macros) |
 | `Replicator/Core.cpp` | Replicator impl - lifecycle (ctor/dtor/move), thread start/stop, statistics, CPU affinity |
 | `Replicator/Init.cpp` | Replicator impl - XDP program load, per-queue AF_XDP socket setup, `config_map` seeding |
-| `Replicator/Groups.cpp` | Replicator impl - dynamic BPF group slots (ref-counted) + kernel XDP_TX forward target |
+| `Replicator/Groups.cpp` | Replicator impl - dynamic BPF group slots (ref-counted) |
 | `Replicator/Control.cpp` | Replicator impl - control protocol thread + message handling + upstream forwarding |
 | `Replicator/Destinations.cpp` | Replicator impl - `Destination` type, destination registry, thread-local fan-out cache |
 | `Replicator/DataPath.cpp` | Replicator impl - RX busy-poll, replicate/fan-out, UDP/m2u parse, zero-copy TX, packet build |
@@ -134,6 +134,13 @@ to the replicator, intercepted by XDP. No kernel tunnel device is involved.
    `-g <group>`) seeds its own `config_map[0]` and receives via the AF_XDP
    socket. Multicast latency is **one-way** (source→dest), so it requires
    synchronized clocks (see accuracy).
+6. **Kernel baseline (`REPLICATOR_FWD_MODE=kernel`, `mcast_send -k`/
+   `mcast_receive -k`)** - the same m2u framing and control protocol, but with
+   AF_XDP/eBPF removed entirely: plain `AF_INET`/`SOCK_DGRAM` sockets on the
+   replicator and both endpoints. No `config_map`, no `MAX_GROUPS` ceiling, no
+   ring batching. Exists as an apples-to-apples "no kernel bypass" reference
+   point for the copy/inplace measurements above - see
+   `src/Replicator/README.md`'s "Axis 3" section for the full comparison.
 
 ## Latency-critical RX/TX paths
 

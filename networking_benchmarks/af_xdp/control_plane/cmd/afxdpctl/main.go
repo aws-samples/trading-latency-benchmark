@@ -12,12 +12,12 @@
 //   afxdpctl fleet
 //   afxdpctl run ucast kernel
 //   afxdpctl run ucast kernel -count 50000 -rate 10000
-//   afxdpctl run mcast copy,inplace,kernel -count 10000 -interval-us 200
+//   afxdpctl run mcast copy,inplace,xdp_tx -count 10000 -interval-us 200
 //   afxdpctl cancel
 //   afxdpctl report -o run.html
-//   afxdpctl up   --key frankfurt --secondary-key london --scenario all --git-repo <url> --git-ref <branch> --bake
+//   afxdpctl up   --key frankfurt --secondary-key london --scenario all-11 --git-repo <url> --git-ref <branch> --bake
 //   afxdpctl sync --key ~/.ssh/frankfurt.pem --region eu-central-1
-//   afxdpctl down --key frankfurt --scenario all
+//   afxdpctl down --key frankfurt --scenario all-11
 package main
 
 import (
@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -120,6 +121,16 @@ func fmtJob(d map[string]any) string {
 		}
 	case "done":
 		return fmt.Sprintf("done %s", kv)
+	case "mode_done":
+		// RunMcastMatrix's per-(mode,replicator) event: "ok" is false when
+		// every retry attempt failed (including mcastPathologicalTail's
+		// SCHED_FIFO busy-poll stall check in the agent) - surface that
+		// distinctly, or a run that quietly exhausted its retries reads
+		// identically to a clean one in the CLI's live log.
+		if ok, present := d["ok"].(bool); present && !ok {
+			return fmt.Sprintf("%s: FAILED after retries (edge left at its last known value)", kv)
+		}
+		return fmt.Sprintf("%s done", kv)
 	case "cancelled":
 		return fmt.Sprintf("cancelled %s", kv)
 	case "rejected":
@@ -232,7 +243,7 @@ func printMatrix(base, kind, variation string) {
 
 func cmdRun(base string, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: run ucast <variation> [-count N] [-rate R] [-warmup W] [-max-parallel P] [-max-loss PCT]\n       run mcast <modes,csv> [-count N] [-interval-us I] [-timeout T]")
+		return fmt.Errorf("usage: run ucast <variation> [-count N] [-rate R] [-warmup W] [-max-parallel P] [-max-loss PCT] [-xdp-tx] [-xdp-rx] [-xdp-tx-queue Q] [-send-cpu C] [-recv-cpu C]\n       run mcast <modes,csv> [-count N] [-interval-us I] [-timeout T] [-size B] [-group G] [-data-port P] [-tx-queue Q] [-rx-queue Q]")
 	}
 	kind := args[0]
 	var body map[string]any
@@ -245,6 +256,15 @@ func cmdRun(base string, args []string) error {
 		warmup := fs.Int("warmup", 1000, "warmup messages")
 		maxPar := fs.Int("max-parallel", 4, "max concurrent pairs per round (1=serial, 0=unlimited)")
 		maxLoss := fs.Float64("max-loss", 2.0, "reject a pair whose loss exceeds this % (percentiles from a lossy run are survivorship-biased); -1 disables")
+		// xdpTx/xdpRx default to the variation-derived behavior (nil => let the
+		// backend derive both from variation=="xdp"); passing either flag
+		// overrides just that leg, matching run_ucast.yaml's independent
+		// xdp_tx/xdp_rx vars.
+		xdpTx := fs.Bool("xdp-tx", false, "force AF_XDP client TX on, independent of variation")
+		xdpRx := fs.Bool("xdp-rx", false, "force AF_XDP client RX on, independent of variation")
+		xdpTxQueue := fs.Int("xdp-tx-queue", 0, "AF_XDP TX queue when xdp-tx is active (0 = backend default, queue 1)")
+		sendCPU := fs.Int("send-cpu", 0, "pin the rtt TX thread to this CPU (0 = auto-derive from isolated set)")
+		recvCPU := fs.Int("recv-cpu", 0, "pin the rtt RX thread to this CPU (0 = auto-derive from isolated set)")
 		// The variation ("kernel"/"xdp") is a positional arg that comes
 		// BEFORE the flags (`run ucast kernel -count N`), but Go's flag
 		// package stops parsing at the first non-flag token - if the
@@ -262,13 +282,35 @@ func cmdRun(base string, args []string) error {
 		}
 		fs.Parse(flagArgs)
 		body = map[string]any{"kind": "ucast", "variation": variation, "count": *count, "rate": *rate, "warmup": *warmup, "max_parallel": *maxPar, "max_loss_pct": *maxLoss}
+		// Only send xdp_tx/xdp_rx overrides when the operator actually passed
+		// them - omitting the keys lets the backend's variation-derived
+		// default apply, same as before these flags existed.
+		fs.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "xdp-tx":
+				body["xdp_tx"] = *xdpTx
+			case "xdp-rx":
+				body["xdp_rx"] = *xdpRx
+			case "xdp-tx-queue":
+				body["xdp_tx_queue"] = *xdpTxQueue
+			case "send-cpu":
+				body["send_cpu"] = *sendCPU
+			case "recv-cpu":
+				body["recv_cpu"] = *recvCPU
+			}
+		})
 	case "mcast":
 		fs := flag.NewFlagSet("run-mcast", flag.ExitOnError)
 		count := fs.Int("count", 10000, "messages")
 		intervalUs := fs.Int("interval-us", 200, "inter-message interval (µs)")
 		timeout := fs.Int("timeout", 30, "receive timeout (sec)")
+		size := fs.Int("size", 0, "mcast_send payload bytes (0 = tool default, 64B; tool minimum 32B)")
+		group := fs.String("group", "", "multicast group tag (0 = tool default, 224.0.31.50)")
+		dataPort := fs.Int("data-port", 0, "UDP data port (0 = tool default, 5000)")
+		txQueue := fs.Int("tx-queue", 0, "mcast_send AF_XDP TX queue (0 = tool default, queue 1)")
+		rxQueue := fs.Int("rx-queue", 0, "mcast_receive AF_XDP/XDP queue index (0 = tool default, queue 0)")
 		// The modes CSV is a positional arg that comes BEFORE the flags
-		// (`run mcast copy,inplace,kernel -count N`), but Go's flag package
+		// (`run mcast copy,inplace,xdp_tx -count N`), but Go's flag package
 		// stops parsing at the first non-flag token - if the modes CSV were
 		// left in args[1:], fs.Parse would halt on it immediately and every
 		// flag after it would be silently ignored (count/interval-us/timeout
@@ -284,7 +326,14 @@ func cmdRun(base string, args []string) error {
 		fs.Parse(flagArgs)
 		modes := strings.Split(modesArg, ",")
 		variation = modes[0]
-		body = map[string]any{"kind": "mcast", "modes": modes, "count": *count, "interval_us": *intervalUs, "timeout_sec": *timeout}
+		body = map[string]any{"kind": "mcast", "modes": modes, "count": *count, "interval_us": *intervalUs, "timeout_sec": *timeout,
+			"size": *size, "tx_queue": *txQueue, "rx_queue": *rxQueue}
+		if *group != "" {
+			body["group"] = *group
+		}
+		if *dataPort != 0 {
+			body["data_port"] = *dataPort
+		}
 	default:
 		return fmt.Errorf("kind must be ucast or mcast")
 	}
@@ -324,20 +373,60 @@ func run(dir, name string, args ...string) error {
 	return c.Run()
 }
 
+// detectCallerIP asks a public echo service for the caller's own IP, for
+// defaulting --admin-cidr. Best-effort: on any failure (offline, DNS,
+// non-200), returns "" and the caller falls back to leaving adminCidr unset
+// (control-plane.ts's own default: 8080 closed, 22 open to 0.0.0.0/0) rather
+// than failing the whole `up` command over a convenience lookup.
+func detectCallerIP() string {
+	resp, err := http.Get("https://checkip.amazonaws.com")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 func cmdUp(args []string) error {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	key := fs.String("key", "", "EC2 key pair name for primary region (required)")
 	secondaryKey := fs.String("secondary-key", "", "EC2 key pair name for secondary region (cross-region deploys)")
-	scenario := fs.String("scenario", "ucast-cpg-3", "fleet scenario")
+	scenario := fs.String("scenario", "ucast-3", "fleet scenario")
 	repo := fs.String("git-repo", "", "git repo for control-plane + AMI bake")
 	ref := fs.String("git-ref", "main", "git ref")
 	bake := fs.Bool("bake", false, "also (re)bake the AMI")
-	instType := fs.String("instance-type", "c7i.4xlarge", "AMI builder instance type")
+	instType := fs.String("instance-type", "m8a.2xlarge", "AMI builder instance type")
 	cdkDir := fs.String("cdk-dir", "deploy/cdk", "path to the CDK app")
-	region := fs.String("region", "eu-central-1", "primary AWS region")
+	region := fs.String("region", "ap-northeast-1", "primary AWS region")
+	// Default "auto" resolves to the caller's own public IP/32 via
+	// detectCallerIP, so `up` opens 8080 (web/API) + 22 (SSH) to the caller
+	// without a separate manual `aws ec2 authorize-security-group-ingress` or
+	// hand-rolled `cdk deploy --context adminCidr=...` step - see
+	// control-plane.ts's ControlPlaneStackProps.adminCidr: omitted entirely,
+	// it leaves 8080 closed and 22 open to 0.0.0.0/0. Pass "" explicitly to
+	// keep that fully-closed-8080 default instead (e.g. SSM port-forwarding
+	// only), or a specific CIDR to admit a fixed address/range.
+	adminCidr := fs.String("admin-cidr", "auto", `CIDR allowed to reach 8080+22 ("auto" = detect caller IP, "" = closed/CDK default)`)
 	fs.Parse(args)
 	if *key == "" || *repo == "" {
 		return fmt.Errorf("up requires --key and --git-repo")
+	}
+	resolvedAdminCidr := *adminCidr
+	if resolvedAdminCidr == "auto" {
+		if ip := detectCallerIP(); ip != "" {
+			resolvedAdminCidr = ip + "/32"
+			fmt.Printf("admin-cidr: auto-detected caller IP -> %s\n", resolvedAdminCidr)
+		} else {
+			resolvedAdminCidr = ""
+			fmt.Println("admin-cidr: could not auto-detect caller IP; leaving 8080 closed (CDK default) - pass --admin-cidr explicitly if needed")
+		}
 	}
 	ctx := []string{"--require-approval", "never",
 		"--context", "keyPairName=" + *key,
@@ -346,6 +435,9 @@ func cmdUp(args []string) error {
 		"--context", "region=" + *region}
 	if *secondaryKey != "" {
 		ctx = append(ctx, "--context", "secondaryKeyPairName="+*secondaryKey)
+	}
+	if resolvedAdminCidr != "" {
+		ctx = append(ctx, "--context", "adminCidr="+resolvedAdminCidr)
 	}
 	if err := run(*cdkDir, "npx", append([]string{"cdk", "deploy", "XdpStack-ControlPlane", "--context", "deploymentType=control-plane"}, ctx...)...); err != nil {
 		return err
@@ -362,7 +454,7 @@ func cmdUp(args []string) error {
 func cmdSync(args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
 	key := fs.String("key", os.Getenv("SSH_KEY_FILE"), "SSH key file (or $SSH_KEY_FILE)")
-	region := fs.String("region", "us-east-1", "AWS region")
+	region := fs.String("region", "ap-northeast-1", "AWS region")
 	profile := fs.String("profile", os.Getenv("AWS_PROFILE"), "AWS profile")
 	dir := fs.String("ansible-dir", "dev/ansible", "path to the dev ansible dir")
 	fs.Parse(args)
@@ -395,9 +487,9 @@ func cmdSync(args []string) error {
 func cmdDown(args []string) error {
 	fs := flag.NewFlagSet("down", flag.ExitOnError)
 	key := fs.String("key", "x", "EC2 key pair name (context only)")
-	scenario := fs.String("scenario", "ucast-cpg-3", "scenario context (for fleet synth)")
+	scenario := fs.String("scenario", "ucast-3", "scenario context (for fleet synth)")
 	cdkDir := fs.String("cdk-dir", "deploy/cdk", "path to the CDK app")
-	region := fs.String("region", "eu-central-1", "primary AWS region")
+	region := fs.String("region", "ap-northeast-1", "primary AWS region")
 	fs.Parse(args)
 	ctx := []string{"--context", "keyPairName=" + *key, "--context", "region=" + *region}
 	// Destroy in reverse dependency order; each is best-effort.
@@ -415,12 +507,12 @@ func usage() {
     run ucast [variation] [-count N] [-rate R] [-warmup W] [-max-parallel P] [-max-loss PCT]
                                    variation: kernel|xdp|all
     run mcast [modes,csv] [-count N] [-interval-us I] [-timeout T]
-                                   modes: copy,inplace,kernel
+                                   modes: copy,inplace,xdp_tx
     cancel                         abort the running campaign
     report [-o file] [-kind]       write an HTML report (heatmap + all latencies)
 
   Infra (wrap CDK / ansible):
-    up   --key K --git-repo R [--secondary-key K2] [--git-ref B] [--scenario S] [--region R] [--bake]
+    up   --key K --git-repo R [--secondary-key K2] [--git-ref B] [--scenario S] [--region R] [--bake] [--admin-cidr auto|CIDR|""]
     sync --key KEYFILE [--region R] [--profile P]
     down --key K [--scenario S] [--region R]
 

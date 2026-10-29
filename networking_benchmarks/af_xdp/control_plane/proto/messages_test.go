@@ -42,6 +42,52 @@ func TestMcastCommandRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWanderCommandRoundTrip(t *testing.T) {
+	// Default: the field is absent entirely (omitempty), matching the
+	// toggle's off-by-default requirement - a zero-value Command must not
+	// carry a wander_start command at all.
+	var zero Command
+	b, err := json.Marshal(zero)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Command
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Wander != nil {
+		t.Fatalf("zero-value Command must not round-trip a Wander param: %+v", back.Wander)
+	}
+
+	in := Command{CmdID: "w1", Type: CmdWanderStart, Wander: &WanderParams{Seconds: 90}}
+	b, err = json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out Command
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Type != CmdWanderStart || out.Wander == nil || out.Wander.Seconds != 90 {
+		t.Fatalf("wander round-trip mismatch: %+v", out)
+	}
+}
+
+func TestWanderCSVResultRoundTrip(t *testing.T) {
+	r := CommandResult{CmdID: "w1", OK: true, WanderCSV: "1,100,101,100,1,1,5000\n"}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out CommandResult
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.WanderCSV != r.WanderCSV {
+		t.Fatalf("WanderCSV round-trip mismatch: got %q", out.WanderCSV)
+	}
+}
+
 func TestCommandResultHelpers(t *testing.T) {
 	r := CommandResult{OK: true}
 	r.SetErr(nil)

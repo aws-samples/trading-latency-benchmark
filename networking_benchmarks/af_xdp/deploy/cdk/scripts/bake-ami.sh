@@ -71,7 +71,7 @@ else
   cd /tmp/build-src/networking_benchmarks/af_xdp
   make full
   mkdir -p /opt/af-xdp/xdp
-  cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/ 2>/dev/null || true
+  cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send phcsample /opt/af-xdp/ 2>/dev/null || true
   cp -f src/xdp/*.o /opt/af-xdp/xdp/ 2>/dev/null || true
 fi
 
@@ -105,9 +105,16 @@ cat > /etc/modprobe.d/ena-phc.conf <<'EOF'
 options ena enable_llq=1 phc_enable=1
 EOF
 
-# chrony: ensure include directive exists (AL2023 default omits it)
-grep -qE '^include /etc/chrony\.d/\*\.conf' /etc/chrony.conf 2>/dev/null || \
-  echo 'include /etc/chrony.d/*.conf' >> /etc/chrony.conf
+# chrony: make sure /etc/chrony.d is read, WITHOUT adding a duplicate.
+#
+# AL2023's stock /etc/chrony.conf already carries BOTH `confdir /etc/chrony.d`
+# and `sourcedir /etc/chrony.d`. Appending `include /etc/chrony.d/*.conf` on top
+# of that would parse every drop-in TWICE, registering the single `refclock PHC`
+# line below as two refclocks that nodes could disagree on selecting between.
+#
+# So only add a directive if NONE of the three already covers the directory.
+grep -qE '^[[:space:]]*(confdir|sourcedir|include)[[:space:]]+/etc/chrony\.d' /etc/chrony.conf 2>/dev/null || \
+  echo 'confdir /etc/chrony.d' >> /etc/chrony.conf
 
 # chrony: comment out default NTP server (our config takes over)
 sed -i 's/^server 169\.254\.169\.123/# server 169.254.169.123/' /etc/chrony.conf 2>/dev/null || true
@@ -121,13 +128,41 @@ maxslewrate 500
 rtcsync
 EOF
 
-# chrony: refclock PHC (activated after reboot with phc_enable=1)
+# chrony: refclock PHC (activated after reboot with phc_enable=1).
+#
+# Device path: use the /dev/ptp_ena symlink, NOT /dev/ptp0. PTP device indices
+# depend on hardware initialization order, so /dev/ptp0 is not stable if a
+# second PTP-capable device ever appears; AL2023's udev rule creates ptp_ena
+# precisely to give a stable name.
+#
+# `delay 0.000010` follows AWS's documented recommendation (10us assumed delay,
+# covering OS latency). `trust` is deliberately NOT set: it disables chrony's
+# spike rejection, and AWS's own recommended line omits it. `dpoll -2` is a
+# local tuning (more frequent driver polling) and is kept.
+#
+# The PHC's own bound against UTC (phc_error_bound) is the dominant term in the
+# error budget; relative precision between two hosts, which the benchmarks rely
+# on, is comfortably tighter than that bound.
+#
+# Do NOT enable chrony's `hwtimestamp` on ENA: the NIC reports
+# `Hardware Transmit Timestamp Modes: none`, so there is no TX hardware
+# timestamp for NTP to use. Hardware RX packet timestamping is supported and
+# is a separate feature.
+#
+# NOTE: /dev/ptp_ena does not exist yet at bake time - phc_enable=1 was only
+# just written to modprobe.d and this script never reboots. The device appears
+# on first boot of an instance launched from this AMI. So do NOT test for it
+# here; instead guarantee the udev rule that creates it is present. Recent
+# AL2023 ships this rule already, so add it only when absent.
+if ! grep -rqs 'ena-ptp' /etc/udev/rules.d/ /usr/lib/udev/rules.d/ 2>/dev/null; then
+  echo 'SUBSYSTEM=="ptp", ATTR{clock_name}=="ena-ptp-*", SYMLINK += "ptp_ena"' \
+    > /etc/udev/rules.d/53-ena-ptp.rules
+  echo "=== added ena-ptp udev rule (AL2023 did not ship one) ==="
+else
+  echo "=== ena-ptp udev rule already present; not adding a duplicate ==="
+fi
 cat > /etc/chrony.d/aws-phc.conf <<'EOF'
-# ENA PHC (Nitro hypervisor clock) — ±50-500ns accuracy.
-# Bypasses NTP-UDP; reads PHC device directly.
-# Requires phc_enable=1 (set in /etc/modprobe.d/ena-phc.conf).
-# Do NOT use hwtimestamp on ENA — SIOCSHWTSTAMP not supported.
-refclock PHC /dev/ptp0 poll 0 dpoll -2 trust prefer
+refclock PHC /dev/ptp_ena poll 0 dpoll -2 delay 0.000010 prefer
 EOF
 
 # BPF JIT
@@ -135,6 +170,28 @@ cat > /etc/sysctl.d/99-bpf-xdp.conf <<'EOF'
 net.core.bpf_jit_enable = 1
 net.core.bpf_jit_harden = 0
 net.core.bpf_jit_kallsyms = 1
+EOF
+
+# RT bandwidth throttling: DISABLED.
+#
+# This fleet runs SCHED_FIFO busy-poll threads (mcast_receive, mcast_send, rtt)
+# pinned to isolcpus+nohz_full cores. On a tickless core the scheduler tick
+# that normally charges RT runtime continuously is stopped, so rt_time is
+# accumulated in large deferred lumps instead of smoothly and can blow past
+# the RT runtime budget, triggering throttling that descheduled the busy-poll
+# thread for hundreds of milliseconds.
+#
+# Disabling bandwidth control entirely is the standard configuration for
+# RT + nohz_full setups precisely because the accounting is not reliable on
+# tickless cores.
+#
+# Tradeoff accepted: this removes the kernel's last-resort protection against
+# a runaway RT thread monopolising a core. Mitigated here by isolcpus (these
+# threads never run on the CPU0 housekeeping core, so the OS/SSH stay
+# responsive), each tool's own idle deadline, and the agent wrapping every
+# measurement in `timeout`.
+cat > /etc/sysctl.d/99-rt-sched.conf <<'EOF'
+kernel.sched_rt_runtime_us = -1
 EOF
 
 # Network tuning (feeder-safe, harmless on other roles)
@@ -160,14 +217,23 @@ export PATH=/opt/af-xdp:$PATH
 EOF
 
 # ── 4b. CPU isolation for non-competing busy-polling ──────────────────────────
-# Core layout (c7i.2xlarge = 4 physical cores, SMT disabled):
+# Core layout (any instance with >=5 online cores, e.g. c7i.4xlarge with nosmt,
+# or m8a.2xlarge which has no SMT to disable in the first place):
 #   core 0 : OS + NIC IRQs (housekeeping)
 #   core 1 : replicator AF_XDP busy-poll thread (queue 0 → core 1)
 #   core 2 : receiver (SCHED_FIFO)
 #   core 3 : sender   (SCHED_FIFO)
+#   core 4 : spare
 # isolcpus removes 1-4 from the scheduler's load balancer; nohz_full stops the
 # scheduler tick on them; rcu_nocbs offloads RCU callbacks; nosmt disables HT
-# siblings so each isolated core is a full physical core (deterministic).
+# siblings on vendors that have SMT (Intel) so each isolated core is a full
+# physical core - a no-op on vendors without SMT (AMD m8a, one vCPU per core).
+# This 4-core literal is fixed regardless of instance size or vendor; the
+# runtime narrows it to what the workload needs and never targets an offline
+# core (see initializeCpuCores / derivePins), but it does NOT scale up to use
+# more cores on a larger instance (e.g. m8a.metal-24xl's 96 cores) - that is a
+# deliberate tradeoff for core-count parity with comparable DPDK benchmarks,
+# not an oversight.
 ISOL="isolcpus=1-4 nohz_full=1-4 rcu_nocbs=1-4 nosmt intel_idle.max_cstate=0 processor.max_cstate=1 default_hugepagesz=2M hugepagesz=2M hugepages=512"
 if ! grep -q "isolcpus=" /etc/default/grub 2>/dev/null; then
   sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=\"|GRUB_CMDLINE_LINUX_DEFAULT=\"${ISOL} |" /etc/default/grub
@@ -196,24 +262,8 @@ ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"
 WantedBy=multi-user.target
 EOF
 
-# ENA queue: redirect ALL RSS traffic to queue 0 (where AF_XDP socket is bound)
-# ENA doesn't support combined=1, so we set indirection table instead.
-cat > /etc/systemd/system/ena-xdp-queues.service <<'EOF'
-[Unit]
-Description=Set ENA RSS indirection to queue 0 for AF_XDP
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); ethtool -X "${IFACE:-eth0}" equal 1'
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# MTU 3498 for native XDP (ENA single-page frame requirement)
+# MTU 3498 for native XDP (ENA single-page frame requirement). Must run
+# BEFORE ena-xdp-queues.service (below) - see that unit's ordering comment.
 cat > /etc/systemd/system/ena-mtu.service <<'EOF'
 [Unit]
 Description=Set MTU 3498 for ENA native XDP
@@ -224,6 +274,29 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); ip link set "${IFACE:-eth0}" mtu 3498'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ENA queue: redirect ALL RSS traffic to queue 0 (where AF_XDP socket is bound)
+# ENA doesn't support combined=1, so we set indirection table instead.
+#
+# ORDERING: must run AFTER ena-mtu.service, not just after network-online.target.
+# Changing the interface MTU resets the RSS indirection table on ENA, so
+# ena-xdp-queues must run strictly after the MTU change has landed for its
+# indirection table to be the one that survives.
+cat > /etc/systemd/system/ena-xdp-queues.service <<'EOF'
+[Unit]
+Description=Set ENA RSS indirection to queue 0 for AF_XDP
+After=network-online.target ena-mtu.service
+Requires=ena-mtu.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); ethtool -X "${IFACE:-eth0}" equal 1'
 
 [Install]
 WantedBy=multi-user.target
@@ -261,11 +334,10 @@ WantedBy=multi-user.target
 EOF
 
 # Low-latency NAPI for AF_XDP busy-poll RX: the RX consumers (XdpSocket in the
-# replicator, and mcast_receive) now busy-poll NAPI in-app via recvfrom/poll with
-# SO_BUSY_POLL, so we DEFER hard IRQs (napi_defer_hard_irqs) and let busy-poll own
-# the NAPI. gro_flush_timeout is the backstop for busy-poll gaps: 10us — NOT 0
-# (strands packets in gaps -> multi-second bursts) and NOT 200us (dominates hop
-# latency). See dev/roadmap.md for the full mechanics + measurements.
+# replicator, and mcast_receive) busy-poll NAPI in-app via recvfrom/poll with
+# SO_BUSY_POLL, so we DEFER hard IRQs (napi_defer_hard_irqs) and let busy-poll
+# own the NAPI. gro_flush_timeout is the backstop for busy-poll gaps: 10us —
+# NOT 0 (strands packets in gaps) and NOT 200us (dominates hop latency).
 cat > /etc/systemd/system/ena-rx-lowlat.service <<'EOF'
 [Unit]
 Description=Low-latency NAPI for AF_XDP busy-poll RX (defer hard IRQs + 10us gro backstop)
@@ -300,7 +372,7 @@ IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
 IP=$(ip -4 addr show "$IFACE" | awk '/inet /{print $2}' | cut -d/ -f1)
 
 case "$MODE" in
-  kernel)  exec /opt/af-xdp/replicator --echo-mode "$IP" "$PORT" ;;
+  echo)    exec /opt/af-xdp/replicator --echo-mode "$IP" "$PORT" ;;
   ucast)   exec /opt/af-xdp/replicator "$IFACE" "$IP" "$PORT" "$ZC" ;;
   mcast)   exec /opt/af-xdp/replicator "$IFACE" "$MCAST_GROUP" "$PORT" "$ZC" --mcast ;;
   *) echo "Unknown REPLICATOR_MODE=$MODE" >&2; exit 1 ;;
@@ -312,17 +384,56 @@ chmod +x /usr/local/bin/start-replicator.sh
 cat > /etc/default/replicator <<'EOF'
 # Replicator configuration — sourced by start-replicator.sh
 # Override via ansible, cloud-init, or manual edit.
-REPLICATOR_MODE=ucast       # kernel | ucast | mcast
+REPLICATOR_MODE=ucast       # echo | ucast | mcast
 REPLICATOR_PORT=5000
 REPLICATOR_MCAST_GROUP=224.0.31.50
 REPLICATOR_ZEROCOPY=true    # AF_XDP zero-copy (ENA-supported); set false to force copy/DRV mode
+EOF
+
+# Force clock sync before anything latency-sensitive starts.
+#
+# The stock chrony config relies on `makestep 1.0 3`, which steps only during
+# the first 3 updates AND only if the offset exceeds 1 second. An offset just
+# under 1s is never stepped and is instead slewed off at `maxslewrate 500`
+# (500 ppm), which can take tens of minutes to converge. Any benchmark started
+# in that window silently produces garbage hop1/hop2 splits.
+#
+# This is invisible to the obvious health check: chrony's `Last offset` and
+# `RMS offset` describe how well it tracks its reference's rate, not the
+# absolute error outstanding on the system clock - gate on `System time`
+# instead (see clockOffsetUs() in control_plane/agent/runner.go).
+#
+# `chronyc waitsync` blocks until chrony reports converged (with a timeout),
+# and the `makestep` right after is an explicit step that ignores the 1.0s
+# threshold entirely.
+cat > /etc/systemd/system/chrony-force-sync.service <<'EOF'
+[Unit]
+Description=Force clock convergence before latency-sensitive services start
+After=chronyd.service network-online.target
+Wants=chronyd.service network-online.target
+Before=replicator.service afxdp-agent.service
+
+[Service]
+Type=oneshot
+# waitsync's 4th arg is the RETRY INTERVAL in seconds; use 1s so 30 tries
+# really means ~30s of budget.
+#
+# Both commands live in one ExecStart so the makestep ALWAYS runs, even if
+# waitsync gives up: a step is exactly what a still-unconverged clock needs, and
+# systemd skips ExecStartPost when ExecStart fails.
+ExecStart=/bin/sh -c 'chronyc waitsync 30 0.0001 0 1 || echo "chrony-force-sync: waitsync did not converge in ~30s; stepping anyway" >&2; exec chronyc makestep'
+RemainAfterExit=yes
+TimeoutStartSec=45
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
 # Replicator systemd service
 cat > /etc/systemd/system/replicator.service <<'EOF'
 [Unit]
 Description=AF_XDP packet replicator
-After=network-online.target ena-xdp-queues.service ena-mtu.service
+After=network-online.target ena-xdp-queues.service ena-mtu.service chrony-force-sync.service
 Wants=network-online.target
 
 [Service]
@@ -403,7 +514,7 @@ EOF
 systemctl daemon-reload
 # Disable irqbalance so it can't migrate NIC IRQs onto the isolated cores.
 systemctl disable --now irqbalance 2>/dev/null || true
-systemctl enable ena-coalescing.service ena-xdp-queues.service ena-mtu.service ena-irq-affinity.service cpu-performance.service ena-rx-lowlat.service replicator.service
+systemctl enable ena-coalescing.service ena-xdp-queues.service ena-mtu.service ena-irq-affinity.service cpu-performance.service ena-rx-lowlat.service chrony-force-sync.service replicator.service
 # Enable the control-plane agent only if it built (best-effort in Step 3b).
 [ -x /opt/af-xdp/afxdp-agent ] && systemctl enable afxdp-agent.service || echo "afxdp-agent not built; unit installed but not enabled"
 

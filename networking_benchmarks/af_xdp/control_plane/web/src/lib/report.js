@@ -148,7 +148,7 @@ export function buildReportHTML(fleet, kind, variation) {
     // Mcast path table: one row per source -> replicator -> destination path.
     heat = '<table class="heat sortable" id="fanout-table"><tr>'
       + '<th>Source</th><th>Replicator</th><th>Destination</th><th>Dst AZ</th>'
-      + '<th>p50</th><th>p99</th><th>loss</th></tr>';
+      + '<th>p50</th><th title="p99 of a one-way delay is not yet clock-wander-corrected per run; treat as an upper-bound indicator, not a point estimate — see methodology below">p99&nbsp;&#9432;</th><th>loss</th></tr>';
     dstIdxs.forEach(di => {
       // The live model renders mcast as two physical hops and attributes the
       // end-to-end one-way metric to the measured last leg (replicator -> dest),
@@ -247,7 +247,8 @@ export function buildReportHTML(fleet, kind, variation) {
       <dt>Stamps</dt><dd><code>ts_ns</code> at the source immediately before TX ring submit, <code>replicator_ns</code> at replicator RX entry, <code>rx_ns</code> at destination RX. One-way = <code>rx_ns − ts_ns</code>, split as <code>replicator_ns − ts_ns</code> (source→replicator) and <code>rx_ns − replicator_ns</code> (replicator→destination).</dd>
       <dt>Clock</dt><dd><code>CLOCK_REALTIME</code> on all three nodes — necessarily, since a one-way delay spans hosts. chrony disciplines each node to the <b>ENA PHC hardware clock</b> (<code>refclock PHC /dev/ptp0</code>, <code>phc_enable=1</code>), reading the Nitro clock directly rather than over NTP-UDP; AWS Time Sync (<code>169.254.169.123</code>, <code>xleave</code>, <code>minpoll 2</code>) is the fallback until PHC is up. Observed RMS offset is tens of nanoseconds, well below the microsecond figures reported here.</dd>
       <dt>Gate</dt><dd>A run aborts when the inter-node offset exceeds the configured ceiling: a destination clock behind the source produces an invalid, possibly negative, one-way delay. Percentiles derive only from datagrams that arrived.</dd>
-      <dt>On <code>kernel</code> fwd mode</dt><dd><code>XDP_TX</code> is a single-destination passthrough rather than a fan-out, so that mode measures one representative destination.</dd>
+      <dt>On <code>xdp_tx</code> fwd mode</dt><dd><code>XDP_TX</code> is a single-destination passthrough rather than a fan-out, so that mode measures one representative destination.</dd>
+      <dt><b>Reporting policy — p99/p99.9 caveat</b></dt><dd>Per-run p99/p99.9/max for a one-way delay carry a clock-wander uncertainty band that is <b>not yet computed per run</b> (chrony's discipline of the system clock against the PHC wanders +/-3-7us on a seconds timescale — the dominant remaining error term, well above the sub-microsecond apparatus noise). That wander is zero-mean, so the <b>median (p50) is sound as reported</b> and safe to compare across runs/configurations. A tail statistic from a <em>single</em> run may be substantially clock noise rather than transit time; do not treat p99/p99.9/max from one run as a precise measurement of tail latency until either (a) it is pooled across many runs, so wander averages out, or (b) a per-sample wander correction is applied. Until then, read p99/p99.9/max here as upper-bound indicators, not point estimates.</dd>
     </dl>
   </details>` : `
   <div class="metric-kind">Reported value is a <b>ROUND-TRIP TIME</b> (RTT) through the remote replicator's echo, at queue depth 1 — one datagram in flight at a time.</div>
@@ -263,7 +264,14 @@ export function buildReportHTML(fleet, kind, variation) {
     </dl>
   </details>`;
 
-  const tableHeader = '<tr><th>src IP</th><th>src role</th><th>dst IP</th><th>dst role</th><th>dst AZ</th><th>src PG</th><th>dst PG</th><th>p50</th><th>p90</th><th>p99</th><th>p99.9</th><th>max</th><th>loss</th></tr>';
+  // Reporting policy: tail statistics for a one-way (mcast) delay carry an
+  // uncorrected clock-wander band and must not be presented as bare numbers
+  // without a caveat. RTT (ucast) is a single-clock measurement with no
+  // inter-node offset, so it is unaffected and gets the plain header.
+  const tailCaveat = 'title="Tail statistic for a one-way delay: not yet clock-wander-corrected per run (chrony discipline wanders +/-3-7us on a seconds timescale, well above apparatus noise). p50 is zero-mean-safe; treat this column as an upper-bound indicator, not a point estimate, until pooled across runs or per-sample corrected."';
+  const tableHeader = isMcast
+    ? `<tr><th>src IP</th><th>src role</th><th>dst IP</th><th>dst role</th><th>dst AZ</th><th>src PG</th><th>dst PG</th><th>p50</th><th ${tailCaveat}>p90&nbsp;&#9432;</th><th ${tailCaveat}>p99&nbsp;&#9432;</th><th ${tailCaveat}>p99.9&nbsp;&#9432;</th><th ${tailCaveat}>max&nbsp;&#9432;</th><th>loss</th></tr>`
+    : '<tr><th>src IP</th><th>src role</th><th>dst IP</th><th>dst role</th><th>dst AZ</th><th>src PG</th><th>dst PG</th><th>p50</th><th>p90</th><th>p99</th><th>p99.9</th><th>max</th><th>loss</th></tr>';
 
   return `<!doctype html><html><head><meta charset="utf-8">
 <title>${reportName}</title>

@@ -78,7 +78,7 @@ This mode **never creates or manages VPC infrastructure** - perfect when you wan
 cd deployment
 
 # Deploy into existing VPC/subnet
-./deploy-latency-hunting.sh \
+./scripts/deploy-latency-hunting.sh \
   --use-existing-vpc \
   --region ap-northeast-1 \
   --vpc-id $VPC_ID \
@@ -86,7 +86,7 @@ cd deployment
   --key-pair $SSH_KEYPAIR
 
 # With existing security group
-./deploy-latency-hunting.sh \
+./scripts/deploy-latency-hunting.sh \
   --use-existing-vpc \
   --region ap-northeast-1 \
   --vpc-id $VPC_ID \
@@ -109,10 +109,10 @@ Use this if you want CDK to manage the VPC (creates new VPC):
 cd deployment
 
 # CDK creates new VPC
-./deploy-latency-hunting.sh --region ap-northeast-1 --key-pair your-keypair
+./scripts/deploy-latency-hunting.sh --region ap-northeast-1 --key-pair your-keypair
 
 # CDK creates VPC with custom CIDR
-./deploy-latency-hunting.sh --region ap-northeast-1 --vpc-cidr 10.200.0.0/16 --key-pair your-keypair
+./scripts/deploy-latency-hunting.sh --region ap-northeast-1 --vpc-cidr 10.200.0.0/16 --key-pair your-keypair
 ```
 
 ⚠️ **Warning**: Switching between modes (CDK-managed → BYOVPC) requires stack deletion and recreation.
@@ -131,7 +131,7 @@ If your target instance is in a different region (e.g., target in eu-central-1, 
 
 ```bash
 cd deployment
-./setup-vpc-peering.sh \
+./scripts/setup-vpc-peering.sh \
   --target-vpc-id $VPC_ID \
   --target-region eu-central-1 \
   --hunting-region ap-northeast-1
