@@ -8,7 +8,7 @@ stream or loaded from a static `fleet.json` file.
 
 ```bash
 cd control_plane/web
-npm install            # svelte, vite, three
+npm install            # svelte, vite, three (package-lock.json is tracked; CI uses `npm ci`)
 npm run dev            # http://localhost:5173 - proxies to backend at :8080
 ```
 

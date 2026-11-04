@@ -381,6 +381,8 @@ $RECYCLE.BIN/
 *.swp
 cdk.context.json
 package-lock.json
+# The AF_XDP web UI lockfile is tracked so CI can run `npm ci`.
+!networking_benchmarks/af_xdp/control_plane/web/package-lock.json
 yarn.lock
 .cdk.staging
 cdk.out/
