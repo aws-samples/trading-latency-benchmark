@@ -489,3 +489,5 @@ config.properties.bak
 
 # Superpowers specs/plans (local working docs, not shipped)
 **/docs/superpowers/
+
+*runs/
