@@ -10,7 +10,7 @@ A collection of low-latency networking tools for measuring and optimizing packet
 | [open_onload](#open_onload) | OpenOnload kernel bypass | C | — | Feed relay receiver with ENA AF_XDP integration |
 | [af_xdp](#af_xdp) | AF_XDP + eBPF XDP filters | C++ | Sub-microsecond forwarding | Market data fan-out / packet replicator |
 | [mcast2ucast](#mcast2ucast) | DPDK poll-mode driver | C | ~25 us RTT (metal) | Transparent multicast-over-unicast for AWS VPC |
-| [transit-gateway](#transit-gateway) | AWS TGW multicast (native) | Python / CDK | ~150-200 us OWD | One-way latency benchmark for TGW multicast |
+| [transit_gateway](#transit_gateway) | AWS TGW multicast (native) | Python / CDK | ~75-205 us OWD, depends on flow | One-way latency benchmark for TGW multicast |
 | [phc_probe](#phc_probe) | SO_TIMESTAMPING + PHC | Python | — | HW vs SW timestamp diagnostic with live graph |
 | [clock_bound_measure](#clock_bound_measure) | ClockBound + PTP/NTP | Python CDK + Bash | ±25–34µs (PTP) | Clock error bound measurement across instance types |
 
@@ -245,15 +245,15 @@ sudo ip route add 224.0.0.0/4 dev mcast0
 
 ---
 
-## transit-gateway
+## transit_gateway
 
-**Path:** `transit-gateway/`
+**Path:** `transit_gateway/`
 
 A self-contained AWS CDK (Python) app that provisions a TGW multicast benchmark
 environment — 1 publisher + N subscribers (default 3, max 256) on PHC-capable
 instances — and orchestrates measurement via SSM. Measures **TGW multicast
 one-way latency** using NIC hardware RX timestamps from the ENA PHC, plus
-optional unicast RTT (sockperf) and throughput (iperf3) baselines.
+an optional unicast RTT floor (sockperf) reported next to it.
 
 ### Key Features
 - **Native TGW multicast domain** with `StaticSourcesSupport=enable`,
@@ -267,15 +267,19 @@ optional unicast RTT (sockperf) and throughput (iperf3) baselines.
   `cross-az` (subscribers round-robin across 3 subnets)
 - **Synth-time PHC family gate** — rejects non-PHC instance families
   (`m6i`, `c5n`, …) with a clear `ValueError`
-- **Composable `--tool` flag** (repeatable / comma-separated): `mcast`,
-  `sockperf`, `iperf3` — runs in canonical order regardless of CLI order
+- **Composable `--tool` flag** (repeatable / comma-separated): `mcast` (default),
+  `sockperf` — runs in canonical order regardless of CLI order
 - **Pure CDK synthesis tests** (Hypothesis property tests for subscriber count,
   parametrized PHC family allow/reject lists, placement-strategy coverage)
-- **`scripts/check_ptp.sh`** standalone diagnostic with per-host summary table
+- **`python3 -m orchestrator check`** standalone PTP diagnostic with a per-host summary table
+- **Flow-aware measurement** — Transit Gateway latency depends on the flow (UDP source port):
+  30 ports gave per-flow medians of 76-204 µs on one stack, while a pinned port repeated within
+  2 µs. `--src-port N` pins it; `--src-port LO-HI` spreads traffic over several flows for high
+  rates (about 790k pps delivered to two subscribers in testing)
 
 ### Quick Start
 ```bash
-cd transit-gateway
+cd transit_gateway
 
 # One-time CDK env
 python -m venv .venv && source .venv/bin/activate
@@ -288,16 +292,17 @@ npx cdk deploy \
   -c instance_type=m7i.4xlarge \
   -c placement_strategy=single-az-cpg
 
+cd benchmark          # orchestrator commands run from here
 # Run TGW one-way latency only
-scripts/run_benchmark.sh --stack-name TgwMulticastBenchmark \
+python3 -m orchestrator run --stack-name TgwMulticastBenchmark \
   --tool mcast --rate 1000 --duration 60
 
-# All three tools (mcast + sockperf + iperf3)
-scripts/run_benchmark.sh --stack-name TgwMulticastBenchmark \
-  --tool mcast,sockperf,iperf3
+# Multicast plus the unicast floor (sockperf)
+python3 -m orchestrator run --stack-name TgwMulticastBenchmark \
+  --tool mcast,sockperf
 
 # Diagnose PTP across the fleet
-scripts/check_ptp.sh --stack-name TgwMulticastBenchmark
+python3 -m orchestrator check --stack-name TgwMulticastBenchmark
 
 # Tear down
 npx cdk destroy
