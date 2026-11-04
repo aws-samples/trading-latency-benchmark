@@ -404,8 +404,8 @@ sysctl -w net.core.busy_read=50
 # Phase 1: Install all packages and build tools (network required)
 # ============================================================
 
-# Install iperf3 and build dependencies for sockperf
-yum install -y iperf3 gcc gcc-c++ make automake autoconf libtool git
+# Install build dependencies for sockperf
+yum install -y gcc gcc-c++ make automake autoconf libtool git
 
 # Build sockperf from source (not in AL2023 repos)
 if ! command -v sockperf &>/dev/null; then
@@ -421,8 +421,7 @@ fi
 
 # Verify tools are installed before proceeding
 which sockperf || { echo "FATAL: sockperf install failed"; exit 1; }
-which iperf3  || { echo "FATAL: iperf3 install failed"; exit 1; }
-echo "Tools installed: sockperf=$(which sockperf), iperf3=$(which iperf3)"
+echo "Tools installed: sockperf=$(which sockperf)"
 
 # ============================================================
 # Phase 2: Configure PTP clock sync (may briefly drop network)

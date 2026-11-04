@@ -142,10 +142,8 @@ class TestUserData:
         user_data = _get_user_data_script(template)
         assert "sockperf" in user_data, "User data must install sockperf"
 
-    def test_iperf3_installation(self):
-        template = _synth()
-        user_data = _get_user_data_script(template)
-        assert "iperf3" in user_data, "User data must install iperf3"
+    def test_iperf3_is_not_installed(self):
+        assert "iperf3" not in _get_user_data_script(_synth())
 
 
 class TestPhcInstanceValidation:
