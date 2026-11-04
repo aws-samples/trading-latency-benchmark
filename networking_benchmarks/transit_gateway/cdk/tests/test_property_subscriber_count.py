@@ -14,7 +14,7 @@ from aws_cdk.assertions import Template
 from hypothesis import given, settings
 from hypothesis.strategies import integers
 
-from stacks.benchmark_stack import BenchmarkStack
+from stacks.main import BenchmarkStack
 
 
 def _synth_template(num_subscribers: int) -> dict:

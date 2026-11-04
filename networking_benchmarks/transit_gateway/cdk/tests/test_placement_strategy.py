@@ -7,7 +7,7 @@ import aws_cdk as cdk
 from aws_cdk.assertions import Template
 import pytest
 
-from stacks.benchmark_stack import BenchmarkStack
+from stacks.main import BenchmarkStack
 
 
 def _synth(placement_strategy: str) -> Template:

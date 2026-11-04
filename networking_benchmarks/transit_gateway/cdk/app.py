@@ -2,7 +2,7 @@
 import aws_cdk as cdk
 from cdk_nag import AwsSolutionsChecks
 
-from stacks.benchmark_stack import BenchmarkStack
+from stacks.main import BenchmarkStack
 
 app = cdk.App()
 
